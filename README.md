@@ -1,5 +1,11 @@
 # KodeWork
 
+<div align="center">
+
+**English** · [简体中文](README.zh-CN.md)
+
+</div>
+
 > **Windows control plane for private Linux coding workspaces.**
 
 KodeWork is a fast, local-first Windows workbench for connecting to Linux machines that are not directly exposed to the public internet. It combines Tailscale or an SSH jump host, SSH/PTY, Herdr/tmux session continuity, SFTP, clipboard asset upload, port-forwarded previews, and a native Windows desktop workflow.
