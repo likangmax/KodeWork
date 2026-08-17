@@ -110,8 +110,8 @@ The near-term focus is not adding dashboard features. It is making the remote co
 
 ## Contributing and security
 
-This repository is being prepared for public MIT-licensed development. Before the first public release, the repository will include the final `LICENSE`, contribution guide, security policy, CI, dependency update policy, and third-party notices. Never publish passwords, SSH private keys, Tailscale auth keys, updater signing keys, real hostnames, or private files.
+This repository uses the MIT License and is being prepared for public development. Before the first public source release, it will also include the contribution guide, security policy, CI, dependency update policy, and third-party notices. Never publish passwords, SSH private keys, Tailscale auth keys, updater signing keys, real hostnames, or private files.
 
 ## License
 
-Target license: **MIT**. Bundled Tailscale components retain their upstream BSD-3-Clause license. The final public release will include the complete license and third-party notice files alongside the source distribution.
+KodeWork is licensed under the [MIT License](LICENSE). Bundled Tailscale components retain their upstream BSD-3-Clause license. The public source release will include the relevant third-party notices alongside the source distribution.
