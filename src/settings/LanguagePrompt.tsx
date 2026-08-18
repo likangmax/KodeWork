@@ -5,7 +5,7 @@ type Props = { language: Language; onChoose: (language: Language) => void }
 
 export const LanguagePrompt = memo(function LanguagePrompt({ language, onChoose }: Props) {
   const [choice, setChoice] = useState(language)
-  const t = (key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args)
+  const t = (key: Parameters<typeof translate>[1], ...args: string[]) => translate(choice, key, ...args)
   return <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="language-prompt-title">
     <div className="host-modal language-prompt">
       <div className="modal-head"><div><div className="eyebrow">LANGUAGE / 语言</div><h2 id="language-prompt-title">{t('chooseLanguage')}</h2></div></div>
