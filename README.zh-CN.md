@@ -4,7 +4,7 @@
 
 <h1 align="center">KodeWork</h1>
 
-<p align="center"><strong>面向私有 Linux 主机与持续编码会话的 Windows 远程工作台。</strong></p>
+<p align="center"><strong>面向私有 Linux 主机的本地优先、可持续恢复编码工作台。<br>当前提供 Windows 桌面版 · 可移植 Rust 核心在 Windows、macOS、Linux 上持续检查</strong></p>
 
 <p align="center">
   <a href="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml/badge.svg"></a>
@@ -21,13 +21,32 @@ KodeWork 不是又一个普通的 SSH 标签页管理器。它围绕一个明确
 
 > 在远程 Linux 主机上开始编码任务，随时断开连接，并在回来时继续原来的工作，而不需要给远程主机配置公网 IP。
 
-## 安装
+## 从这里开始
 
-1. 从 [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest) 下载最新 Windows x64 MSI。
-2. 安装 KodeWork，并通过直接地址、Tailscale 或 SSH 跳板机添加 Linux 主机。
-3. 首次连接时核对 SSH Host Key 指纹，然后打开终端，或附加已有的 Herdr/tmux 会话。
+### 我只想安装和使用 KodeWork
+
+1. 从 [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest) 下载 **Windows x64 MSI**。
+2. 安装并启动 KodeWork，第一次启动时选择“简体中文”或“English”。这是软件首次启动语言选择；MSI 安装向导本身目前尚未本地化。
+3. 点击“工作站”旁边的 **+**，填写 Linux 主机、网络路径和认证方式，然后连接。
+4. 第一次连接必须核对 SSH Host Key 指纹，确认无误后再保存信任。
+
+完全不了解 SSH、Tailscale、Herdr 或跳板机也没关系：请按 [零基础使用指南](docs/USER-GUIDE.zh-CN.md) 从准备远程 Linux、填写每个字段、首次连接，一直操作到文件传输、图片/PDF 粘贴、WSL、持久会话和故障排查。
+
+### 我是 AI Agent 或维护者
+
+修改代码前必须先读 [Agent 与维护者指南](docs/AGENT-GUIDE.md) 或 [中文 Agent 指南](docs/AGENT-GUIDE.zh-CN.md)。它们规定了仓库边界、安全规则、必跑测试、隐私扫描、Release 证据和受保护分支发布流程。
 
 目前社区构建尚未使用商业 Authenticode 证书签名，因此 Windows SmartScreen 可能显示“未知发布者”。每个 Release 会提供 SHA-256；准确的分发限制见 [项目状态](docs/STATUS.md)，不会把未验证能力写成已完成。
+
+## 平台可用性
+
+| 能力 | Windows x64 | macOS | Linux 桌面 |
+| --- | --- | --- | --- |
+| 可安装的 KodeWork 桌面版本 | **已提供 MSI** | 尚未发布 | 尚未发布 |
+| 原生 GUI、安装和签名冒烟测试 | **当前发布基线** | 尚未完成 | 尚未完成 |
+| 可移植 Rust crates 的 CI 检查 | 已检查 | 已检查 | 已检查 |
+
+跨平台核心通过 CI，不等于 macOS/Linux 桌面版已经发布。只有原生打包、签名、安装、GUI 冒烟测试、sidecar 和 Release 资产全部通过，才会声明该平台可用。详见 [发布矩阵](docs/RELEASE-MATRIX.md)。
 
 ## 为什么选择 KodeWork
 
@@ -50,22 +69,32 @@ KodeWork 不是又一个普通的 SSH 标签页管理器。它围绕一个明确
 | 图片与文档 | 粘贴截图、图片或 PDF，验证后上传到当前远程工作区并插入路径 |
 | 自动化 | Interactive、Quick、Background Actions，服务端危险分级和 Run 历史 |
 | Web Preview | SSH 本地端口转发与回环地址网页预览 |
-| Windows 集成 | 托盘运行、单实例、开机自启、签名更新产物、可配置主题 |
+| 桌面体验 | 中英文界面、首次启动语言选择、托盘运行、单实例、开机自启、可配置主题 |
 
 ## 架构
 
 ```mermaid
-flowchart LR
-  UI[Windows UI\nReact + xterm.js] --> IPC[类型化 Tauri IPC]
-  IPC --> CORE[kodework-core\n状态机与业务编排]
-  CORE --> SSH[kodework-ssh\nrussh + PTY + Host Key]
-  CORE --> SFTP[kodework-sftp\n流式文件传输]
-  CORE --> NET[kodework-network\nLAN / Tailscale / 跳板机]
-  CORE --> STORE[kodework-storage + secrets\nSQLite 引用 + Windows 安全保护]
-  SSH --> HOST[私有 Linux 主机\nHerdr / tmux / SSH / SFTP]
+flowchart TB
+  UI[React + xterm.js 工作区界面] --> IPC[类型化 Tauri 命令 + 有界 Channel]
+  Shell[Tauri 2 桌面壳] --> IPC
+  IPC --> Core[kodework-core\n会话 · Run · 隧道 · 传输]
+  Core --> Domain[kodework-domain\n模型 · 校验 · 危险分级]
+  Core --> Adapters[SSH · SFTP · Tailscale · Herdr · 本机 PTY · 存储]
+  Adapters --> Host[私有 Linux 主机\nSSH / SFTP / Herdr / tmux]
 ```
 
-Rust Core 不依赖 Tauri 类型。桌面 UI 可以替换，而连接生命周期、传输状态、安全策略和远程会话恢复不会与 React 界面绑定。
+桌面壳保持精简：Rust 负责连接真相、重连代数、认证边界、传输状态和远程会话恢复；React 只负责界面与渲染器生命周期。Tailscale 提供网络路径，但 SSH 仍负责认证与 Host Key 校验。
+
+完整的边界、数据流和性能约束见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，编号决策见 [`docs/adr/`](docs/adr/)。
+
+## 文档导航
+
+- [零基础使用指南](docs/USER-GUIDE.zh-CN.md) · [English user guide](docs/USER-GUIDE.md)
+- [Agent 与维护者指南](docs/AGENT-GUIDE.md)
+- [文档总目录](docs/README.md)
+- [项目状态](docs/STATUS.md) · [Windows 测试矩阵](docs/TEST-MATRIX-WINDOWS.md)
+- [架构说明](docs/ARCHITECTURE.md) · [发布矩阵](docs/RELEASE-MATRIX.md) · [更新日志](docs/CHANGELOG.md)
+
 
 ## 安全原则
 
@@ -104,20 +133,16 @@ cargo test --workspace --all-features
 ## 仓库结构
 
 ```text
-crates/kodework-domain       纯领域模型与安全策略
-crates/kodework-core         会话、隧道和传输编排
-crates/kodework-ssh          SSH、PTY、Host Key 和跳板机
-crates/kodework-sftp         流式 SFTP TransferManager
-crates/kodework-storage      SQLite 迁移与 Repository
-crates/kodework-secrets*     Windows 安全凭据适配器
-crates/kodework-tailscale    Tailscale CLI/用户态适配器
-crates/kodework-herdr        Herdr CLI 与 Socket Bridge
-src-tauri                    精简的类型化 IPC 和 Windows 桌面壳
-src                           React 工作区、终端、文件与设置界面
-docs                          架构、ADR、状态和发布文档
+crates/                    Rust 领域模型、核心编排、传输、存储和平台适配器
+src-tauri/                 精简 Tauri 桌面壳、类型化 IPC、插件和原生资源
+src/                       React 工作区、终端、文件、运行时和设置界面
+docs/                      架构、ADR、质量证据、发布和许可证说明
+scripts/                   可复现构建、sidecar 与验证脚本
+.github/                   CI、发布自动化、Issue 表单和贡献模板
 ```
 
-`references/` 是本地使用且被 Git 忽略的上游研究目录。它不是构建输入，也不会随 KodeWork 源码分发。
+构建清单和社区健康文件会有意保留在仓库根目录，让 Cargo、npm、Vite、Tauri 和 GitHub 无需额外配置即可识别。被 `.gitignore` 忽略的 `references/`、`target/`、`dist/` 和 `node_modules/` 只是本机研究/生成数据，不会随源码分发。
+
 
 ## 项目状态
 

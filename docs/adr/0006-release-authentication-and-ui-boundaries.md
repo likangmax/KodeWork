@@ -1,4 +1,4 @@
-# ADR-0001: Separate UI boundaries and release trust mechanisms
+# ADR-0006: Separate UI boundaries and release trust mechanisms
 
 ## Status
 Accepted

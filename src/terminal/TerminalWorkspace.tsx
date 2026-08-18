@@ -1,6 +1,7 @@
 import { lazy, memo, Suspense, useState } from 'react'
 import type { Host } from '../api'
 import { Icon } from '../icons'
+import { translate, type Language } from '../i18n'
 
 const TerminalPane = lazy(async () => import('../terminal').then((module) => ({ default: module.TerminalPane })))
 
@@ -16,6 +17,7 @@ type Props = {
   micListening: boolean
   runtimeOpen: boolean
   focusMode: boolean
+  language: Language
   onMicToggle: () => void
   onSplit: (direction: 'h' | 'v') => void
   onToggleRuntime: () => void
@@ -25,7 +27,7 @@ type Props = {
 }
 
 export const TerminalWorkspace = memo(function TerminalWorkspace({
-  visible, phase, stateLabel, selected, panes, splitDir, micListening, runtimeOpen, focusMode,
+  visible, phase, stateLabel, selected, panes, splitDir, micListening, runtimeOpen, focusMode, language,
   onMicToggle, onSplit, onToggleRuntime, onToggleFocus, onClosePane, onPasteStatus,
 }: Props) {
   const [pasteRequests, setPasteRequests] = useState<Record<string, number>>({})
@@ -33,20 +35,22 @@ export const TerminalWorkspace = memo(function TerminalWorkspace({
     ...current,
     [paneKey]: (current[paneKey] ?? 0) + 1,
   }))
+  const t = (key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args)
   const primary = selected && panes[0] ? `${selected.id}:${panes[0].id}:${panes[0].channel}` : null
+  const atPaneLimit = panes.length >= 20
 
   return <section className="terminal-card" style={{ display: visible ? undefined : 'none' }}>
     <div className="terminal-head">
       <span><i className={`dot ${phase === 'ready' ? 'online' : 'offline'}`} /> {stateLabel}</span>
       <span className="terminal-tools">
         {phase === 'ready' && <>
-          <button className="mini terminal-new-action" onClick={() => onSplit(splitDir)} title="创建一个独立的远程 PTY"><Icon name="plus" size={11} />新建终端</button>
-          <button className="mini terminal-paste-action" disabled={!primary} onClick={() => primary && requestPaste(primary)} title="读取系统剪贴板；图片或 PDF 会上传并插入当前终端"><Icon name="clipboard" size={11} />粘贴图片/PDF</button>
-          <button className={`icon-btn${micListening ? ' mic-on' : ''}`} onClick={onMicToggle} title="语音输入（发送到第一个远程终端）" aria-label="语音输入"><Icon name="power" size={11} /></button>
-          <button className="icon-btn" onClick={() => onSplit('h')} title="新建左右分屏终端" aria-label="新建左右分屏终端"><Icon name="chevron" size={11} style={{ transform: 'rotate(90deg)' }} /></button>
-          <button className="icon-btn" onClick={() => onSplit('v')} title="新建上下分屏终端" aria-label="新建上下分屏终端"><Icon name="chevron" size={11} style={{ transform: 'rotate(180deg)' }} /></button>
-          <button className={`icon-btn${runtimeOpen ? ' active' : ''}`} onClick={onToggleRuntime} title="显示或隐藏 Herdr/tmux 运行时" aria-label="切换运行时面板"><Icon name="server" size={12} /></button>
-          <button className={`icon-btn${focusMode ? ' active' : ''}`} onClick={onToggleFocus} title="终端专注模式" aria-label="切换终端专注模式"><Icon name="eye" size={12} /></button>
+          <button className="mini terminal-new-action" disabled={atPaneLimit} onClick={() => onSplit(splitDir)} title={t('newTerminal')}><Icon name="plus" size={11} />{t('newTerminal')}</button>
+          <button className="mini terminal-paste-action" disabled={!primary} onClick={() => primary && requestPaste(primary)} title={t('pasteAssets')}><Icon name="clipboard" size={11} />{t('pasteAssets')}</button>
+          <button className={`mini terminal-tool-action${micListening ? ' mic-on' : ''}`} onClick={onMicToggle} title={t('voice')} aria-label={t('voice')}><Icon name="mic" size={11} />{t('voice')}</button>
+          <button className="mini terminal-tool-action" disabled={atPaneLimit} onClick={() => onSplit('h')} title={t('splitRight')} aria-label={t('splitRight')}><Icon name="chevron" size={10} style={{ transform: 'rotate(90deg)' }} />{t('splitRight')}</button>
+          <button className="mini terminal-tool-action" disabled={atPaneLimit} onClick={() => onSplit('v')} title={t('splitBelow')} aria-label={t('splitBelow')}><Icon name="chevron" size={10} style={{ transform: 'rotate(180deg)' }} />{t('splitBelow')}</button>
+          <button className={`mini terminal-tool-action${runtimeOpen ? ' active' : ''}`} onClick={onToggleRuntime} title={t('runtime')} aria-label={t('runtime')}><Icon name="server" size={11} />{t('runtime')}</button>
+          <button className={`mini terminal-tool-action${focusMode ? ' active' : ''}`} onClick={onToggleFocus} title={t('focus')} aria-label={t('focus')}><Icon name="eye" size={11} />{t('focus')}</button>
         </>}
       </span>
     </div>
@@ -57,13 +61,13 @@ export const TerminalWorkspace = memo(function TerminalWorkspace({
             const paneKey = `${selected.id}:${pane.id}:${pane.channel}`
             return <div className="split-pane" key={pane.id}>
               <div className="pane-bar">
-                <span className="pane-title">远程终端 {index + 1} · PTY {pane.id}</span>
+                <span className="pane-title">{t('remoteTerminal')} {index + 1} · PTY {pane.id}</span>
                 <span className="pane-actions">
-                  <button className="mini pane-paste" onClick={() => requestPaste(paneKey)} title="粘贴文本；图片或 PDF 会上传并插入远端路径"><Icon name="clipboard" size={10} />粘贴</button>
-                  <button className="icon-btn" onClick={() => onClosePane(pane.id)} title="关闭终端" aria-label={`关闭远程终端 ${index + 1}`}><Icon name="close" size={10} /></button>
+                  <button className="mini pane-paste" onClick={() => requestPaste(paneKey)} title={t('pasteAssets')}><Icon name="clipboard" size={10} />{language === 'zh-CN' ? '粘贴' : 'Paste'}</button>
+                  <button className="icon-btn" onClick={() => onClosePane(pane.id)} title={t('closeTerminal')} aria-label={`${t('closeTerminal')} ${index + 1}`}><Icon name="close" size={10} /></button>
                 </span>
               </div>
-              <Suspense fallback={<div className="terminal-loading">正在加载终端渲染器…</div>}>
+              <Suspense fallback={<div className="terminal-loading">{language === 'zh-CN' ? '正在加载终端渲染器…' : 'Loading terminal renderer…'}</div>}>
                 <TerminalPane hostId={selected.id} paneId={pane.id} channelId={pane.channel} pasteRequest={pasteRequests[paneKey] ?? 0} connected onPasteStatus={onPasteStatus} />
               </Suspense>
             </div>
@@ -71,8 +75,8 @@ export const TerminalWorkspace = memo(function TerminalWorkspace({
         </div>
       ) : <div className="terminal-empty">
         <div className="empty-symbol"><Icon name="terminal" size={40} /></div>
-        <h2>{phase === 'connecting' ? '正在建立安全连接…' : phase === 'ready' ? '没有打开的远程终端' : '尚未连接'}</h2>
-        <p>{phase === 'ready' ? '使用上方“新建终端”打开一个独立 PTY。' : selected ? '连接建立后，这里将显示远程 PTY。首次连接会要求确认主机密钥指纹。' : '添加工作站后，这里将成为远程终端。'}</p>
+        <h2>{phase === 'connecting' ? (language === 'zh-CN' ? '正在建立安全连接…' : 'Establishing a secure connection…') : phase === 'ready' ? (language === 'zh-CN' ? '没有打开的远程终端' : 'No remote terminal open') : (language === 'zh-CN' ? '尚未连接' : 'Not connected')}</h2>
+        <p>{phase === 'ready' ? (language === 'zh-CN' ? '使用上方“新建终端”打开一个独立 PTY。' : 'Use “New terminal” above to open an independent PTY.') : selected ? (language === 'zh-CN' ? '连接建立后，这里将显示远程 PTY。首次连接会要求确认主机密钥指纹。' : 'Remote PTY sessions appear here after connection. The first connection requires host-key fingerprint confirmation.') : (language === 'zh-CN' ? '添加工作站后，这里将成为远程终端。' : 'Add a workstation to use this remote terminal.')}</p>
       </div>}
     </div>
   </section>

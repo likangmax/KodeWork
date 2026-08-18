@@ -25,6 +25,9 @@ import { useResumeRecovery } from './runtime/useResumeRecovery'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
+import { useLanguage } from './settings/useLanguage'
+import { LanguagePrompt } from './settings/LanguagePrompt'
+import { translate } from './i18n'
 import { WorkspaceHeader } from './workspace/WorkspaceHeader'
 
 const inputEncoder = new TextEncoder()
@@ -102,6 +105,8 @@ export default function App() {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [theme, onThemeChange] = useTheme()
+  const [language, onLanguageChange, needsLanguagePrompt] = useLanguage()
+  const t = useCallback((key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args), [language])
   const [activeTab, setActiveTab] = useState<'terminal' | 'local' | 'files' | 'preview' | 'actions'>('terminal')
   const [panes, setPanes] = useState<{ id: number; channel: number }[]>([])
   const [splitDir, setSplitDir] = useState<'h' | 'v'>('h')
@@ -964,8 +969,8 @@ export default function App() {
     <div className={'shell' + (terminalFocusMode ? ' terminal-focus-mode' : '')}>
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark" /><span className="brand-name">kodework<em>.</em></span><span className="brand-meta">远程工作台</span></div>
-        <div className="section-label">工作站 <button aria-label="添加工作站" onClick={() => setDraft(newHost())}><Icon name="plus" size={13} /></button></div>
-        {hosts.length === 0 && <div className="empty-nav">还没有工作站配置</div>}
+        <div className="section-label">{language === 'zh-CN' ? '工作站' : 'Workstations'} <button aria-label={language === 'zh-CN' ? '添加工作站' : 'Add workstation'} onClick={() => setDraft(newHost())}><Icon name="plus" size={13} /></button></div>
+        {hosts.length === 0 && <div className="empty-nav">{language === 'zh-CN' ? '还没有工作站配置' : 'No workstations configured'}</div>}
         {hosts.map((host) => (
           <button
             className={'nav-row ' + (selectedId === host.id ? 'selected' : '')}
@@ -980,26 +985,26 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="connection-pill">
             <span className={'dot ' + (phase === 'ready' ? 'online' : 'offline')} />
-            {stateLabel} · {phase === 'ready' && selected ? selected.label : '无会话'}
+            {stateLabel} · {phase === 'ready' && selected ? selected.label : t('noSession')}
           </div>
           <div className="sidebar-actions">
-            <button className="settings" onClick={() => setSnippetsOpen(true)}><Icon name="zap" size={14} />片段</button>
-            <button className="settings" onClick={() => { setSettingsOpen(true); void autostartStatus().then(setAutoStart).catch(() => {}) }}><Icon name="gear" size={14} />设置</button>
+            <button className="settings" onClick={() => setSnippetsOpen(true)}><Icon name="zap" size={14} />{language === 'zh-CN' ? '片段' : 'Snippets'}</button>
+            <button className="settings" onClick={() => { setSettingsOpen(true); void autostartStatus().then(setAutoStart).catch(() => {}) }}><Icon name="gear" size={14} />{t('settings')}</button>
           </div>
         </div>
       </aside>
 
       <main className="main">
-        <WorkspaceHeader selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
+        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
 
         <div className="workspace-tabs">
-          <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />终端</button>
-          <button className={activeTab === 'local' ? 'active' : ''} onClick={() => setActiveTab('local')}><Icon name="computer" size={13} />本机</button>
-          <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}><Icon name="folder" size={13} />文件</button>
-          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl}><Icon name="globe" size={13} />预览</button>
-          <button className={activeTab === 'actions' ? 'active' : ''} onClick={() => setActiveTab('actions')}><Icon name="activity" size={13} />活动</button>
+          <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />{t('terminal')}</button>
+          <button className={activeTab === 'local' ? 'active' : ''} onClick={() => setActiveTab('local')}><Icon name="computer" size={13} />{t('local')}</button>
+          <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}><Icon name="folder" size={13} />{t('files')}</button>
+          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl}><Icon name="globe" size={13} />{t('preview')}</button>
+          <button className={activeTab === 'actions' ? 'active' : ''} onClick={() => setActiveTab('actions')}><Icon name="activity" size={13} />{t('activity')}</button>
           <span className="tmux">
-            {selected?.tailscale?.enabled ? 'Tailscale 已配置' : '地址候选待配置'} · {selected ? selected.default_runtime.toLowerCase() : '未连接'}
+            {selected?.tailscale?.enabled ? t('tailscaleConfigured') : t('addressCandidatesPending')} · {selected ? selected.default_runtime.toLowerCase() : t('notConnected')}
           </span>
         </div>
 
@@ -1127,9 +1132,9 @@ export default function App() {
             panes={panes} splitDir={splitDir} micListening={micListening} runtimeOpen={runtimeOpen}
             focusMode={terminalFocusMode} onMicToggle={onMicToggle} onSplit={(direction) => { void onSplit(direction) }}
             onToggleRuntime={() => setRuntimeOpen((open) => !open)} onToggleFocus={() => setTerminalFocusMode((active) => !active)}
-            onClosePane={onClosePane} onPasteStatus={setMessage}
+            onClosePane={onClosePane} onPasteStatus={setMessage} language={language}
           />
-          <LocalTerminalWorkspace visible={activeTab === 'local'} onStatus={setMessage} />
+          <LocalTerminalWorkspace language={language} visible={activeTab === 'local'} onStatus={setMessage} />
           {phase === 'ready' && selected && activeTab === 'terminal' && runtimeOpen && (
             <RuntimePanel
               herdrVersion={herdrVersion} herdrMissing={herdrMissing} herdrError={herdrError} agents={agents}
@@ -1142,14 +1147,14 @@ export default function App() {
         </div>
 
         <footer className="statusbar">
-          <span className="status-security"><Icon name="check" size={12} />本地元数据 · 凭据不进入 SQLite</span>
-          <span className={messageIsError ? 'status-message error' : 'status-message'}>{message || '就绪'}</span>
+          <span className="status-security"><Icon name="check" size={12} />{t('localMetadataSafe')}</span>
+          <span className={messageIsError ? 'status-message error' : 'status-message'}>{message || t('ready')}</span>
           <span>{isDesktop() ? 'Desktop' : 'Preview'} · v{__APP_VERSION__}</span>
         </footer>
       </main>
       {draft && (
         <HostEditor
-          draft={draft} tailscaleComponents={tailscaleComponents} tailscaleKeyInputRef={tailscaleKeyInputRef}
+          draft={draft} language={language} tailscaleComponents={tailscaleComponents} tailscaleKeyInputRef={tailscaleKeyInputRef}
           privateKeyPassphraseRef={privateKeyPassphraseRef} updateDraft={updateDraft} onClose={() => setDraft(null)}
           onSave={() => { void saveDraft() }} onMessage={setMessage}
         />
@@ -1366,13 +1371,15 @@ export default function App() {
 
       {settingsOpen && (
         <SettingsPanel
-          autoStart={autoStart} updateCheck={updateCheck} updateBusy={updateBusy} version={__APP_VERSION__} theme={theme} onThemeChange={onThemeChange}
+          autoStart={autoStart} updateCheck={updateCheck} updateBusy={updateBusy} version={__APP_VERSION__} theme={theme} onThemeChange={onThemeChange} language={language} onLanguageChange={onLanguageChange}
           onClose={() => setSettingsOpen(false)}
           onAutoStart={(enabled) => { setAutoStart(enabled); void setAutostart(enabled).then(setAutoStart).catch((error) => setMessage('自启设置失败：' + String(error))) }}
           onCheck={() => { setUpdateBusy(true); void checkForUpdates().then(setUpdateCheck).catch((error) => setUpdateCheck({ status: 'error', error: String(error) })).finally(() => setUpdateBusy(false)) }}
           onInstall={() => { setUpdateBusy(true); void installUpdate().then((result) => { if (result.ok) { setUpdateCheck({ status: 'up-to-date' }); setMessage('更新已安装，重启应用后生效。') } else { setUpdateCheck({ status: 'error', error: result.error ?? '安装失败' }) } }).finally(() => setUpdateBusy(false)) }}
         />
       )}
+
+      {needsLanguagePrompt && <LanguagePrompt language={language} onChoose={onLanguageChange} />}
 
 
       {keyboardInteractiveRequest && (

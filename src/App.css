@@ -232,12 +232,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   background: var(--bg-raised); border-bottom: 1px solid var(--line);
   font-size: 11.5px; color: var(--text-faint); font-family: var(--mono);
 }
-.terminal-tools { margin-left: auto; font-size: 10px; color: var(--text-faint); opacity: 0.75; }
+.terminal-tools { margin-left: auto; display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px; font-size: 10px; color: var(--text-faint); opacity: 1; }
 .terminal-paste-action { color: var(--accent); border-color: var(--accent-dim); margin-right: 4px; opacity: 1; }
 .terminal-new-action { color: var(--text-dim); margin-right: 2px; }
 .terminal-paste-action:hover { color: var(--accent-hi); border-color: var(--accent); background: var(--accent-dim); }
 .terminal-body { flex: 1; min-height: 0; position: relative; }
-.terminal-host { position: absolute; inset: 0; padding: 8px; }
+/* Give xterm an exact inner box. Padding on the measured container makes FitAddon
+   overestimate the available rows and clips the last line against the status bar. */
+.terminal-host { position: absolute; inset: 8px 8px 12px; padding: 0; overflow: hidden; }
 .terminal-host .xterm { height: 100%; }
 .terminal-host .xterm-viewport { overflow-y: auto !important; }
 .terminal-paste-progress {
@@ -371,6 +373,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .security-note { display: flex; align-items: flex-start; gap: 8px; color: var(--text-faint); font-size: 11px; line-height: 1.55; padding: 0 2px; }
 .security-note svg { color: var(--ok); flex: none; margin-top: 1px; }
 .theme-section { border: 1px solid var(--line); border-radius: 7px; padding: 13px; background: var(--surface-soft); }
+.language-inline { display: flex; gap: 7px; }
+.language-inline .mini.selected { border-color: var(--accent); color: var(--text); background: var(--accent-dim); }
+.language-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
+.language-prompt { max-width: 430px; }
 .theme-mode-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
 .theme-option { text-align: left; border: 1px solid var(--line); background: var(--bg-inset); color: var(--text-dim); border-radius: 6px; padding: 9px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-height: 58px; }
 .theme-option:hover { border-color: var(--accent); background: var(--bg-hover); }
@@ -543,7 +549,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .split { height: 100%; display: flex; gap: 2px; }
 .split-h { flex-direction: row; }
 .split-v { flex-direction: column; }
-.split-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-inset); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.split-pane { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-inset); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.split-pane > .terminal-host { position: relative; inset: auto; flex: 1; width: auto; height: auto; margin: 7px 7px 11px; }
 .pane-bar {
   display: flex; align-items: center; gap: 8px; padding: 2px 8px;
   background: var(--bg-raised); border-bottom: 1px solid var(--line);
@@ -566,3 +573,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .shell.terminal-focus-mode .main-area { gap: 0; }
 .shell.terminal-focus-mode .terminal-card { border: 0; border-radius: 0; }
 .shell.terminal-focus-mode .runtime-panel { display: none; }
+
+.terminal-tool-action { color: var(--text-faint); }
+.terminal-tool-action:hover, .terminal-tool-action.active { color: var(--accent-hi); border-color: var(--accent); background: var(--accent-dim); }
+.terminal-tools .mini:disabled { cursor: not-allowed; opacity: .4; }

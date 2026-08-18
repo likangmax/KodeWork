@@ -1,4 +1,4 @@
-# ADR 0002 — Theme system and runtime audit hardening
+# ADR-0007: Theme system and runtime audit hardening
 
 ## Status
 
