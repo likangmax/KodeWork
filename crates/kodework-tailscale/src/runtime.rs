@@ -611,6 +611,7 @@ mod tests {
     use kodework_domain::{TailscaleConfig, TailscaleMode};
 
     #[test]
+    #[cfg(windows)]
     fn daemon_path_tracks_windows_cli_name() {
         assert_eq!(
             daemon_executable(Path::new(r"C:\Program Files\Tailscale\tailscale.exe")),
