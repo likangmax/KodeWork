@@ -1,0 +1,8 @@
+{
+  "productName": "Kodework Windows",
+  "bundle": {
+    "targets": ["msi"],
+    "shortDescription": "A fast Windows remote coding workbench",
+    "longDescription": "SSH, Tailscale, tmux, Herdr and SFTP workspace for remote development"
+  }
+}

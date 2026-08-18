@@ -1,0 +1,18 @@
+[package]
+name = "kodework-secrets-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+keyring = { version = "3.6.3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+kodework-domain = { path = "../kodework-domain" }
+kodework-secrets = { path = "../kodework-secrets" }
+
+[lints]
+workspace = true

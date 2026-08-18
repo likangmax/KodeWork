@@ -1,0 +1,34 @@
+[package]
+name = "kodework-secrets-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kodework-domain = { path = "../kodework-domain" }
+kodework-secrets = { path = "../kodework-secrets" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Storage",
+    "Win32_Storage_FileSystem",
+] }
+zeroize = "1"
+
+# The Windows adapters call Win32 APIs (inherently unsafe). Keep the
+# workspace-wide safety rules except unsafe_code, which drops from forbid to
+# deny and is allowed only inside windows_impl.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

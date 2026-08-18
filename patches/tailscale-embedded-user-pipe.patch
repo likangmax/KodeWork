@@ -1,0 +1,13 @@
+diff --git a/safesocket/pipe_windows.go b/safesocket/pipe_windows.go
+index 0ffee76..dcf22d0 100644
+--- a/safesocket/pipe_windows.go
++++ b/safesocket/pipe_windows.go
+@@ -28,7 +28,7 @@ func connect(ctx context.Context, path string) (net.Conn, error) {
+ // windowsSDDL is the Security Descriptor set on the namedpipe.
+ // It provides read/write access to all users and the local system.
+ // It is a var for testing, do not change this value.
+-var windowsSDDL = "O:BAG:BAD:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"
++var windowsSDDL = "D:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"
+ 
+ func listen(path string) (net.Listener, error) {
+ 	lc, err := winio.ListenPipe(

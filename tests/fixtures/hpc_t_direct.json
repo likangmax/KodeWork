@@ -1,0 +1,19 @@
+{
+  "label": "Example private host",
+  "hostname": "203.0.113.10",
+  "port": 22,
+  "username": "testuser",
+  "authentication": "Password",
+  "credential_ref": "fixture-redacted-password",
+  "session_runtime": "Herdr",
+  "tailscale": {
+    "enabled": true,
+    "mode": "EmbeddedUserspace",
+    "device_name": "kodework-windows-fixture",
+    "auth_key_ref": "fixture-redacted-tailscale-key",
+    "state_dir": null
+  },
+  "fallback_address": null,
+  "proxy_enabled": false,
+  "jump_host_enabled": false
+}
