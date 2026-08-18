@@ -1,18 +1,33 @@
-# KodeWork
+<p align="center">
+  <img src="assets/branding/kodework-icon-master.png" width="112" alt="KodeWork 图标">
+</p>
 
-<div align="center">
+<h1 align="center">KodeWork</h1>
 
-[English](README.md) · **简体中文**
+<p align="center"><strong>面向私有 Linux 主机与持续编码会话的 Windows 远程工作台。</strong></p>
 
-</div>
+<p align="center">
+  <a href="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/likangmax/KodeWork/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/likangmax/KodeWork?display_name=tag"></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
+  <img alt="Windows 10/11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+</p>
 
-> **运行在 Windows 上的私有 Linux 远程编码工作台。**
+<p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 KodeWork 是一款高性能、本地优先的 Windows 桌面软件，用于连接没有直接暴露在公网中的 Linux 电脑。它把 Tailscale 或 SSH 跳板机、SSH/PTY、Herdr/tmux 会话保持、SFTP、剪贴板文件上传、端口转发预览以及 Windows 原生桌面体验整合到一个工作区中。
 
 KodeWork 不是又一个普通的 SSH 标签页管理器。它围绕一个明确目标设计：
 
 > 在远程 Linux 主机上开始编码任务，随时断开连接，并在回来时继续原来的工作，而不需要给远程主机配置公网 IP。
+
+## 安装
+
+1. 从 [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest) 下载最新 Windows x64 MSI。
+2. 安装 KodeWork，并通过直接地址、Tailscale 或 SSH 跳板机添加 Linux 主机。
+3. 首次连接时核对 SSH Host Key 指纹，然后打开终端，或附加已有的 Herdr/tmux 会话。
+
+目前社区构建尚未使用商业 Authenticode 证书签名，因此 Windows SmartScreen 可能显示“未知发布者”。每个 Release 会提供 SHA-256；准确的分发限制见 [项目状态](docs/STATUS.md)，不会把未验证能力写成已完成。
 
 ## 为什么选择 KodeWork
 
@@ -99,14 +114,14 @@ crates/kodework-tailscale    Tailscale CLI/用户态适配器
 crates/kodework-herdr        Herdr CLI 与 Socket Bridge
 src-tauri                    精简的类型化 IPC 和 Windows 桌面壳
 src                           React 工作区、终端、文件与设置界面
-docs                          架构、ADR、交接和发布文档
+docs                          架构、ADR、状态和发布文档
 ```
 
 `references/` 是本地使用且被 Git 忽略的上游研究目录。它不是构建输入，也不会随 KodeWork 源码分发。
 
-## 项目方向
+## 项目状态
 
-近期重点不是继续增加运维 Dashboard 功能，而是让远程编码链路足够快速、稳定和自然：
+KodeWork 当前已经可以使用，但仍处于持续开发的 `0.x` 阶段。近期重点是让远程编码链路更快、更稳定、更自然：
 
 - 缩短建立连接和显示首个终端字节的时间；
 - 保证大量输出和多个终端并发时仍然流畅；
@@ -116,8 +131,8 @@ docs                          架构、ADR、交接和发布文档
 
 ## 参与贡献与安全报告
 
-本项目使用 MIT License，并正在为公开协作完善贡献指南、安全策略、CI、依赖更新策略与第三方版权说明。请勿在 Issue、Pull Request 或日志中提交密码、SSH 私钥、Tailscale Auth Key、更新签名密钥、真实主机名或私人文件。
+本项目使用 MIT License，并接受范围清晰的 Issue 与 Pull Request。修改代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。请勿在 Issue、Pull Request 或日志中提交密码、SSH 私钥、Tailscale Auth Key、更新签名密钥、真实主机名或私人文件。
 
 ## 开源协议
 
-KodeWork 使用 [MIT License](LICENSE)。内置的 Tailscale 组件继续遵循其上游 BSD-3-Clause License；公开源码发行包会同时保留必要的第三方版权与许可证说明。
+KodeWork 使用 [MIT License](LICENSE)。内置的 Tailscale 组件继续遵循其上游 BSD-3-Clause License，详见[第三方版权与许可证说明](docs/THIRD-PARTY-NOTICES.md)。

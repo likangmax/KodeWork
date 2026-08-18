@@ -16,7 +16,7 @@ own its private pipe without administrator privileges; the upstream access
 control list is otherwise unchanged.
 
 > 更新日期：2026-08-14（M0 收尾）
-> 政策依据：docs/GOAL-KODEWORK-WINDOWS.md §2.3（许可证政策）与执行规则 10。
+> 政策依据：本项目的 MIT 许可证、各依赖的原始许可证和本文件中的逐项记录。
 
 ## 总声明
 

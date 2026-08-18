@@ -248,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn resolver_merges_and_deduplicates() {
         let host = host_with(vec![
-            address(AddressKind::Lan, "192.168.1.2"),
+            address(AddressKind::Lan, "203.0.113.11"),
             address(AddressKind::Tailscale, "100.64.0.2"),
         ]);
         let provider = StaticProvider {
@@ -263,7 +263,7 @@ mod tests {
         let candidates = resolver.candidates(&host).await;
         assert_eq!(candidates.len(), 2, "duplicate 100.64.0.2 must collapse");
         assert_eq!(candidates[0].address.hostname_or_ip, "100.64.0.2");
-        assert_eq!(candidates[1].address.hostname_or_ip, "192.168.1.2");
+        assert_eq!(candidates[1].address.hostname_or_ip, "203.0.113.11");
     }
 
     #[tokio::test]

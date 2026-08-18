@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to package (for example v0.2.2)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows-msi:
+    name: Windows MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Prepare pinned Tailscale sidecars
+        shell: pwsh
+        run: ./scripts/prepare-tailscale.ps1
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build MSI and updater signature
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          KODEWORK_CERT_THUMBPRINT: ${{ secrets.KODEWORK_CERT_THUMBPRINT }}
+          KODEWORK_TIMESTAMP_URL: ${{ secrets.KODEWORK_TIMESTAMP_URL }}
+          KODEWORK_REQUIRE_AUTHENTICODE: '0'
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            $keyDirectory = Join-Path $env:USERPROFILE '.tauri'
+            New-Item -ItemType Directory -Path $keyDirectory -Force | Out-Null
+            [System.IO.File]::WriteAllText(
+              (Join-Path $keyDirectory 'kodework.key'),
+              $env:TAURI_SIGNING_PRIVATE_KEY,
+              [System.Text.UTF8Encoding]::new($false)
+            )
+            if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+              [System.IO.File]::WriteAllText(
+                (Join-Path $keyDirectory 'kodework.pass'),
+                $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+                [System.Text.UTF8Encoding]::new($false)
+              )
+            }
+            ./scripts/build-release.ps1
+          } else {
+            Write-Warning 'Updater signing secrets are not configured; publishing the MSI without an updater signature.'
+            $overlayPath = Join-Path $env:RUNNER_TEMP 'kodework-release-overlay.json'
+            '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -LiteralPath $overlayPath -Encoding utf8NoBOM
+            npm run tauri -- build --config $overlayPath
+          }
+      - name: Verify and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          $msi = Get-ChildItem target/release/bundle/msi -Filter '*.msi' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw 'MSI was not generated.' }
+          $sig = Get-Item ($msi.FullName + '.sig') -ErrorAction SilentlyContinue
+          $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = Join-Path $msi.DirectoryName ($msi.Name + '.sha256')
+          "$hash *$($msi.Name)" | Set-Content -LiteralPath $checksumPath -Encoding utf8NoBOM
+          $notes = @(
+            "## KodeWork $env:RELEASE_TAG",
+            '',
+            'Windows x64 MSI for the KodeWork remote coding workbench.',
+            '适用于 KodeWork 远程编码工作台的 Windows x64 安装包。',
+            '',
+            "SHA-256: `$hash`",
+            '',
+            'See the bilingual README for setup, security boundaries, and distribution notes.'
+          ) -join "`n"
+          $assets = @($msi.FullName, $checksumPath)
+          if ($sig) { $assets += $sig.FullName }
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @assets --clobber
+            gh release edit $env:RELEASE_TAG --title "KodeWork $env:RELEASE_TAG" --notes $notes
+          } else {
+            gh release create $env:RELEASE_TAG @assets --title "KodeWork $env:RELEASE_TAG" --notes $notes --verify-tag
+          }
