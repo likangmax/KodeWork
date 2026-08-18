@@ -84,7 +84,7 @@ jobs:
             'Windows x64 MSI for the KodeWork remote coding workbench.',
             '适用于 KodeWork 远程编码工作台的 Windows x64 安装包。',
             '',
-            "SHA-256: `$hash`",
+            "SHA-256: $hash",
             '',
             'See the bilingual README for setup, security boundaries, and distribution notes.'
           ) -join "`n"
