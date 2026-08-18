@@ -1,18 +1,33 @@
-# KodeWork
+<p align="center">
+  <img src="assets/branding/kodework-icon-master.png" width="112" alt="KodeWork icon">
+</p>
 
-<div align="center">
+<h1 align="center">KodeWork</h1>
 
-**English** · [简体中文](README.zh-CN.md)
+<p align="center"><strong>A Windows workbench for private, durable Linux coding sessions.</strong></p>
 
-</div>
+<p align="center">
+  <a href="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/likangmax/KodeWork/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/likangmax/KodeWork?display_name=tag"></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
+  <img alt="Windows 10/11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+</p>
 
-> **Windows control plane for private Linux coding workspaces.**
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 KodeWork is a fast, local-first Windows workbench for connecting to Linux machines that are not directly exposed to the public internet. It combines Tailscale or an SSH jump host, SSH/PTY, Herdr/tmux session continuity, SFTP, clipboard asset upload, port-forwarded previews, and a native Windows desktop workflow.
 
 It is not another generic terminal tab manager. The product is built around one promise:
 
 > Start a coding workspace on a remote Linux host, disconnect whenever you want, and come back to the same work without giving the host a public IP.
+
+## Install
+
+1. Download the latest Windows x64 MSI from [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest).
+2. Install KodeWork and add a Linux host using a direct address, Tailscale, or an SSH jump host.
+3. Verify the SSH host-key fingerprint on first connection, then open a terminal or attach to an existing Herdr/tmux session.
+
+Current community builds are not Authenticode-signed because the project does not yet have a commercial Windows certificate. Windows SmartScreen may therefore show an unknown-publisher warning. Release checksums and the exact distribution limits are listed in each release and in [Project status](docs/STATUS.md).
 
 ## Why KodeWork
 
@@ -99,14 +114,14 @@ crates/kodework-tailscale    Tailscale CLI/userspace adapter
 crates/kodework-herdr        Herdr CLI and socket bridge
 src-tauri                    Thin typed IPC and Windows shell integration
 src                           React workspace, terminal, files and settings
-docs                          Architecture, ADRs, handoff and release notes
+docs                          Architecture, ADRs, status and release notes
 ```
 
 The `references/` directory is a local, ignored research area. It is not a build input and is not redistributed with KodeWork.
 
-## Project direction
+## Project status
 
-The near-term focus is not adding dashboard features. It is making the remote coding loop feel instantaneous and dependable:
+KodeWork is usable today, but it remains an actively developed `0.x` project. The near-term focus is making the remote coding loop faster and more dependable:
 
 - faster first-byte connection feedback and address selection;
 - smooth terminal rendering under large output and many panes;
@@ -116,8 +131,8 @@ The near-term focus is not adding dashboard features. It is making the remote co
 
 ## Contributing and security
 
-This repository uses the MIT License and is being prepared for public development. Before the first public source release, it will also include the contribution guide, security policy, CI, dependency update policy, and third-party notices. Never publish passwords, SSH private keys, Tailscale auth keys, updater signing keys, real hostnames, or private files.
+This repository uses the MIT License and accepts focused issues and pull requests. Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code and report vulnerabilities through [SECURITY.md](SECURITY.md). Never publish passwords, SSH private keys, Tailscale auth keys, updater signing keys, real hostnames, or private files.
 
 ## License
 
-KodeWork is licensed under the [MIT License](LICENSE). Bundled Tailscale components retain their upstream BSD-3-Clause license. The public source release will include the relevant third-party notices alongside the source distribution.
+KodeWork is licensed under the [MIT License](LICENSE). Bundled Tailscale components retain their upstream BSD-3-Clause license; see [third-party notices](docs/THIRD-PARTY-NOTICES.md).

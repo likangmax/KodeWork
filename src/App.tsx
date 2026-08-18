@@ -963,7 +963,7 @@ export default function App() {
   return (
     <div className={'shell' + (terminalFocusMode ? ' terminal-focus-mode' : '')}>
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark" /><span className="brand-name">kodework<em>.</em></span><span className="brand-meta">windows</span></div>
+        <div className="brand"><span className="brand-mark" /><span className="brand-name">kodework<em>.</em></span><span className="brand-meta">远程工作台</span></div>
         <div className="section-label">工作站 <button aria-label="添加工作站" onClick={() => setDraft(newHost())}><Icon name="plus" size={13} /></button></div>
         {hosts.length === 0 && <div className="empty-nav">还没有工作站配置</div>}
         {hosts.map((host) => (

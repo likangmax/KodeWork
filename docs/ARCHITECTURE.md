@@ -1,6 +1,6 @@
 # Kodework Windows 架构说明
 
-> 状态：M0 完成（2026-08-14）。本文是 docs/GOAL-KODEWORK-WINDOWS.md §4（总体架构）的落地记录；GOAL 文档仍是唯一执行规范。
+> 状态：架构基线文档。实现以当前 Rust workspace、测试门禁和 ADR 为准。
 
 ## 1. 分层
 
