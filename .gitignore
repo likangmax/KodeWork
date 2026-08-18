@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust build output
+/target/
+/src-tauri/target/
+
+# Read-only upstream research clones (never built, never committed)
+/references/
+
+# Tauri generated schemas
+/src-tauri/gen/
+/src-tauri/binaries/*.exe
+/src-tauri/binaries/tailscale-*
+/src-tauri/binaries/tailscaled-*
+
+# TypeScript build info
+*.tsbuildinfo

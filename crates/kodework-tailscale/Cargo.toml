@@ -1,0 +1,18 @@
+[package]
+name = "kodework-tailscale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+kodework-domain = { path = "../kodework-domain" }
+kodework-network = { path = "../kodework-network" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "io-util", "sync"] }
+zeroize = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "kodework-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kodework-domain = { path = "../kodework-domain" }
+kodework-network = { path = "../kodework-network" }
+kodework-herdr = { path = "../kodework-herdr" }
+kodework-sftp = { path = "../kodework-sftp" }
+russh-sftp = { version = "2.4", default-features = false }
+kodework-ssh = { path = "../kodework-ssh" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+kodework-testkit = { path = "../kodework-testkit" }
+
+[lints]
+workspace = true

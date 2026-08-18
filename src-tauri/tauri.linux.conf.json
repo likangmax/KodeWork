@@ -1,0 +1,15 @@
+{
+  "productName": "Kodework",
+  "app": {
+    "windows": [
+      {
+        "title": "Kodework"
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["appimage", "deb", "rpm"],
+    "shortDescription": "A fast remote coding workbench",
+    "longDescription": "SSH, Tailscale, tmux, Herdr and SFTP workspace for remote development"
+  }
+}

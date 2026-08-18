@@ -1,0 +1,19 @@
+[package]
+name = "kodework-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kodework-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "signal", "sync"] }
+zeroize = "1"
+
+[lints]
+workspace = true

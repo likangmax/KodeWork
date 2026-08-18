@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/kodework-agent",
+    "crates/kodework-domain",
+    "crates/kodework-core",
+    "crates/kodework-storage",
+    "crates/kodework-secrets",
+    "crates/kodework-secrets-native",
+    "crates/kodework-secrets-win",
+    "crates/kodework-network",
+    "crates/kodework-ssh",
+    "crates/kodework-sftp",
+    "crates/kodework-tailscale",
+    "crates/kodework-herdr",
+    "crates/kodework-platform-win",
+    "crates/kodework-local-pty",
+    "crates/kodework-testkit",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.2.2"
+edition = "2021"
+license = "MIT"
+repository = "local"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

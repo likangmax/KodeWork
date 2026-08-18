@@ -1,0 +1,22 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: var(--text, #e9edf1);
+  background: var(--bg, #101214);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 960px;
+  min-height: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}

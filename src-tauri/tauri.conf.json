@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kodework Windows",
+  "version": "0.2.2",
+  "identifier": "dev.kodework.windows",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Kodework Windows",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self'; frame-src http://127.0.0.1:* http://localhost:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": ["msi"],
+    "externalBin": [
+      "binaries/tailscale",
+      "binaries/tailscaled"
+    ],
+    "resources": [
+      "binaries/TAILSCALE-LICENSE.txt"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "A fast Windows remote coding workbench",
+    "longDescription": "SSH, Tailscale, tmux, Herdr and SFTP workspace for remote development"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJFN0U0QkYyMzdGREFCMjgKUldRb3EvMDM4a3Qrdm9ERGdpN29HUWdnWXhwVkZGeFFyOGJZKzZoQU1WOTVDZFN0ampuajVCUWQK",
+      "endpoints": [
+        "https://updates.kodework.dev/stable/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
