@@ -26,24 +26,17 @@ if ($LASTEXITCODE -ne 0 -or $actual -ne $commit) {
 }
 # Upstream's service pipe declares Builtin Administrators as its owner. A
 # per-user embedded daemon cannot assign that owner and exits before opening
-# LocalAPI. Keep the upstream DACL and let Windows assign the current user as
-# owner. The patch is version-pinned and its runtime behavior is smoke-tested.
-$savedErrorAction = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-& git -C $source apply --check $userPipePatch 2>$null
-$canApplyPatch = $LASTEXITCODE -eq 0
-$ErrorActionPreference = $savedErrorAction
-& git -C $source grep -q 'var windowsSDDL = "D:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"' -- safesocket/pipe_windows.go
-$patchedSddl = $LASTEXITCODE -eq 0
-if ($canApplyPatch) {
-  & git -C $source apply $userPipePatch
-  if ($LASTEXITCODE -ne 0) { throw 'failed to apply embedded named-pipe patch' }
-} elseif (-not $patchedSddl) {
-  $ErrorActionPreference = 'Continue'
-  & git -C $source apply --reverse --check $userPipePatch 2>$null
-  $patchAlreadyApplied = $LASTEXITCODE -eq 0
-  $ErrorActionPreference = $savedErrorAction
-    if (-not $patchAlreadyApplied) { throw 'Tailscale source differs from the audited embedded pipe patch' }
+# LocalAPI. Replace the exact version-pinned declaration so line endings and
+# Git patch heuristics cannot make clean CI clones behave differently.
+$pipeSource = Join-Path $source 'safesocket\pipe_windows.go'
+$originalSddl = 'var windowsSDDL = "O:BAG:BAD:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"'
+$patchedSddl = 'var windowsSDDL = "D:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"'
+$pipeText = [System.IO.File]::ReadAllText($pipeSource)
+if ($pipeText.Contains($originalSddl)) {
+  $pipeText = $pipeText.Replace($originalSddl, $patchedSddl)
+  [System.IO.File]::WriteAllText($pipeSource, $pipeText, [System.Text.UTF8Encoding]::new($false))
+} elseif (-not $pipeText.Contains($patchedSddl)) {
+  throw "Tailscale source differs from the audited embedded pipe patch at $userPipePatch"
 }
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
