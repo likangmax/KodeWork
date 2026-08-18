@@ -365,15 +365,16 @@ impl Drop for TailscaleRuntime {
 }
 
 fn daemon_executable(executable: &Path) -> PathBuf {
-    let suffix = std::env::consts::EXE_SUFFIX;
-    let cli_name = format!("tailscale{suffix}");
+    // Derive the executable suffix from the configured CLI path rather than
+    // the host compiling the crate. This keeps path resolution correct in
+    // portable tests and when a Windows sidecar path is inspected off-host.
+    let suffix = executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_default();
     let daemon_name = format!("tailscaled{suffix}");
-    if executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(&cli_name))
-        || executable.components().count() > 1
-    {
+    if executable.components().count() > 1 {
         executable.with_file_name(daemon_name)
     } else {
         PathBuf::from(daemon_name)
@@ -691,20 +692,25 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_status_rejects_a_different_active_state() {
-        let runtime = TailscaleRuntime::new("tailscale", std::env::temp_dir());
+        let root =
+            std::env::temp_dir().join(format!("kodework-tailscale-status-{}", std::process::id()));
+        let runtime = TailscaleRuntime::new("tailscale", &root);
+        let active_state = root.join("other").join("tailscale.state");
+        let requested_state = root.join("requested").join("tailscale.state");
         {
             let mut inner = runtime.inner.lock().await;
-            inner.socket = Some(PathBuf::from(r"\\.\pipe\kodework-test"));
-            inner.state_path = Some(PathBuf::from(r"C:\other\tailscale.state"));
+            inner.socket = Some(root.join("socket"));
+            inner.state_path = Some(active_state);
         }
         let config = TailscaleConfig {
             enabled: true,
             mode: TailscaleMode::EmbeddedUserspace,
             device_name: None,
             auth_key_ref: None,
-            state_dir: Some(r"C:\requested\tailscale.state".into()),
+            state_dir: Some(requested_state.to_string_lossy().into_owned()),
         };
         let result = runtime.status_for_config(Some(&config)).await;
+        let _ = std::fs::remove_dir_all(root);
         assert!(matches!(
             result,
             Err(TailscaleError::DaemonUnavailable(message))

@@ -30,6 +30,9 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-msvc
           components: rustfmt, clippy
+      - name: Prepare bundled Tailscale sidecars
+        shell: pwsh
+        run: ./scripts/prepare-tailscale.ps1
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
