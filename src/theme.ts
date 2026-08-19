@@ -9,7 +9,7 @@ export type ThemePreference = {
 export const THEME_STORAGE_KEY = 'kodework.theme.v1'
 export const THEME_CHANGE_EVENT = 'kodework-theme-change'
 
-const DEFAULT_PREFERENCE: ThemePreference = { mode: 'dark', accent: 'amber' }
+const DEFAULT_PREFERENCE: ThemePreference = { mode: 'dark', accent: 'blue' }
 const validModes: ThemeMode[] = ['dark', 'light', 'system']
 const validAccents: AccentColor[] = ['amber', 'blue', 'green', 'purple', 'rose', 'cyan']
 
@@ -59,14 +59,14 @@ export function terminalTheme(): {
 } {
   const light = document.documentElement.dataset.theme === 'light'
   const accent = document.documentElement.dataset.accent ?? 'amber'
-  const cursor = ({ amber: '#d58b16', blue: '#2878c8', green: '#238a58', purple: '#8254c7', rose: '#c34d76', cyan: '#168fa3' } as Record<string, string>)[accent] ?? '#d58b16'
+  const cursor = ({ amber: '#e3b341', blue: '#4aa3ff', green: '#3fb96f', purple: '#a371f7', rose: '#f778ba', cyan: '#22b8cf' } as Record<string, string>)[accent] ?? '#4aa3ff'
   return light ? {
-    background: '#f7f8fa', foreground: '#20252b', cursor, selectionBackground: '#c7ddf4',
-    black: '#20252b', red: '#b42318', green: '#137333', yellow: '#8a5a00', blue: '#155eef', magenta: '#7a3e9d', cyan: '#087f8c', white: '#f7f8fa',
-    brightBlack: '#59636e', brightRed: '#d92d20', brightGreen: '#1a9b52', brightYellow: '#a66a00', brightBlue: '#2f80ed', brightMagenta: '#9b51e0', brightCyan: '#149eca', brightWhite: '#ffffff',
+    background: '#f8fafc', foreground: '#1c2430', cursor, selectionBackground: '#cfe3f7',
+    black: '#1c2430', red: '#c23c32', green: '#1f8a50', yellow: '#a2670a', blue: '#2b6cb0', magenta: '#8a4fae', cyan: '#0f8296', white: '#f8fafc',
+    brightBlack: '#5a6a7d', brightRed: '#dd5045', brightGreen: '#2ba35f', brightYellow: '#c07f14', brightBlue: '#3f8fe0', brightMagenta: '#a56ad0', brightCyan: '#18a3b8', brightWhite: '#ffffff',
   } : {
-    background: '#0c0e10', foreground: '#d6dee3', cursor, selectionBackground: '#2c3a40',
-    black: '#0c0e10', red: '#e06c75', green: '#98c379', yellow: '#e5c07b', blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#abb2bf',
-    brightBlack: '#5c6370', brightRed: '#e06c75', brightGreen: '#98c379', brightYellow: '#e5c07b', brightBlue: '#61afef', brightMagenta: '#c678dd', brightCyan: '#56b6c2', brightWhite: '#ffffff',
+    background: '#0d1117', foreground: '#dbe4ee', cursor, selectionBackground: '#25354a',
+    black: '#0d1117', red: '#e5534b', green: '#3fb96f', yellow: '#d9a52a', blue: '#4aa3ff', magenta: '#a371f7', cyan: '#39c5cf', white: '#b1bac4',
+    brightBlack: '#6e7681', brightRed: '#f47067', brightGreen: '#5cc98a', brightYellow: '#e3b341', brightBlue: '#6db8ff', brightMagenta: '#b78cfa', brightCyan: '#5ad4dd', brightWhite: '#ffffff',
   }
 }

@@ -519,6 +519,8 @@ export default function App() {
 
   const deleteSelected = async () => {
     if (!selected) return
+    // Deleting cascades projects/actions/sessions/tunnels: confirm first.
+    if (!window.confirm('确定删除工作站 ' + selected.label + '？其项目、动作与传输记录将一并删除。')) return
     if (isDesktop()) {
       try { await deleteHost(selected.id) } catch (error) { setMessage('删除失败：' + String(error)); return }
     }
@@ -995,13 +997,13 @@ export default function App() {
       </aside>
 
       <main className="main">
-        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
+        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} stateLabel={stateLabel} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
 
         <div className="workspace-tabs">
           <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />{t('terminal')}</button>
           <button className={activeTab === 'local' ? 'active' : ''} onClick={() => setActiveTab('local')}><Icon name="computer" size={13} />{t('local')}</button>
           <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}><Icon name="folder" size={13} />{t('files')}</button>
-          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl}><Icon name="globe" size={13} />{t('preview')}</button>
+          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl} title={listeningTunnels.length === 0 && !previewUrl ? '建立隧道后可预览远程 Web 服务' : undefined}><Icon name="globe" size={13} />{t('preview')}</button>
           <button className={activeTab === 'actions' ? 'active' : ''} onClick={() => setActiveTab('actions')}><Icon name="activity" size={13} />{t('activity')}</button>
           <span className="tmux">
             {selected?.tailscale?.enabled ? t('tailscaleConfigured') : t('addressCandidatesPending')} · {selected ? selected.default_runtime.toLowerCase() : t('notConnected')}
