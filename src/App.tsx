@@ -83,7 +83,9 @@ export default function App() {
     }, isError ? 30000 : 10000)
   }, [])
   const [phase, setPhase] = useState<ConnectPhase>('idle')
-  const [stateLabel, setStateLabel] = useState('未连接')
+  // Empty initial value: language is resolved below; render sites fall
+  // back to the translated "disconnected" label until the first refresh.
+  const [stateLabel, setStateLabel] = useState('')
   // Keep credentials out of React state/devtools snapshots. The value lives
   // only in the native input element until submit and is cleared immediately.
   const passwordInputRef = useRef<HTMLInputElement | null>(null)
@@ -239,9 +241,9 @@ export default function App() {
     try {
       const state = await sessionState(hostId)
       const labels: Record<string, string> = {
-        Disconnected: '未连接', ResolvingAddress: '解析地址…', Connecting: '连接中…',
-        VerifyingHostKey: '验证主机密钥…', Authenticating: '认证中…', Ready: '已连接',
-        Reconnecting: '重连中…', Failed: '连接失败',
+        Disconnected: t('stateDisconnected'), ResolvingAddress: t('stateResolving'), Connecting: t('stateConnecting'),
+        VerifyingHostKey: t('stateVerifyingHostKey'), Authenticating: t('stateAuthenticating'), Ready: t('stateReady'),
+        Reconnecting: t('stateReconnecting'), Failed: t('stateFailed'),
       }
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
@@ -340,7 +342,7 @@ export default function App() {
       try {
         const state = await sessionState(selectedId)
         if (state === 'Reconnecting') {
-          setStateLabel('重连中…')
+          setStateLabel(t('stateReconnecting'))
           setPhase('connecting')
           // Panes belong to the dead transport: the backend cleared them
           // on attach, so drop the stale ids and let the ready-effect
@@ -372,12 +374,12 @@ export default function App() {
           }
         } else if (state === 'Failed') {
           setPhase('failed')
-          setStateLabel('连接失败')
+          setStateLabel(t('stateFailed'))
         } else if (state === 'Ready') {
           reconnectAttemptsRef.current = 0
           if (phase !== 'ready') {
             setPhase('ready')
-            setStateLabel('已连接')
+            setStateLabel(t('stateReady'))
           }
         }
       } catch { /* transient */ }
@@ -427,7 +429,7 @@ export default function App() {
     } catch (error) {
       if (seq !== connectSeq.current) return
       setPhase('failed')
-      setStateLabel('连接失败')
+      setStateLabel(t('stateFailed'))
       setMessage('连接失败：' + String(error))
     }
   }
@@ -474,7 +476,7 @@ export default function App() {
           setTransfers({})
           setFiles([])
           setPhase('idle')
-          setStateLabel('未连接')
+          setStateLabel(t('stateDisconnected'))
         }
         await saveHost(draft)
         let storedDraft = draft
@@ -539,7 +541,7 @@ export default function App() {
     setSelectedId(host.id)
     setFilesPath(host.default_remote_path || '/')
     setPhase('idle')
-    setStateLabel('未连接')
+    setStateLabel(t('stateDisconnected'))
     setPanes([])
     setTransfers({})
     setFiles([])
@@ -570,7 +572,7 @@ export default function App() {
     setTransfers({})
     setFiles([])
     setPhase('idle')
-    setStateLabel('未连接')
+    setStateLabel(t('stateDisconnected'))
     setMessage('已断开；远端 tmux/Herdr 会话不受影响。')
   }
 
@@ -987,7 +989,7 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="connection-pill">
             <span className={'dot ' + (phase === 'ready' ? 'online' : 'offline')} />
-            {stateLabel} · {phase === 'ready' && selected ? selected.label : t('noSession')}
+            {stateLabel || t('stateDisconnected')} · {phase === 'ready' && selected ? selected.label : t('noSession')}
           </div>
           <div className="sidebar-actions">
             <button className="settings" onClick={() => setSnippetsOpen(true)}><Icon name="zap" size={14} />{language === 'zh-CN' ? '片段' : 'Snippets'}</button>
@@ -997,7 +999,7 @@ export default function App() {
       </aside>
 
       <main className="main">
-        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} stateLabel={stateLabel} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
+        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} stateLabel={stateLabel || t('stateDisconnected')} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
 
         <div className="workspace-tabs">
           <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />{t('terminal')}</button>
@@ -1130,7 +1132,7 @@ export default function App() {
             />
           ) : null}
           <TerminalWorkspace
-            visible={activeTab === 'terminal'} phase={phase} stateLabel={stateLabel} selected={selected}
+            visible={activeTab === 'terminal'} phase={phase} stateLabel={stateLabel || t('stateDisconnected')} selected={selected}
             panes={panes} splitDir={splitDir} micListening={micListening} runtimeOpen={runtimeOpen}
             focusMode={terminalFocusMode} onMicToggle={onMicToggle} onSplit={(direction) => { void onSplit(direction) }}
             onToggleRuntime={() => setRuntimeOpen((open) => !open)} onToggleFocus={() => setTerminalFocusMode((active) => !active)}
@@ -1186,7 +1188,7 @@ export default function App() {
                 setPromptPassword(false)
                 setRememberPassword(false)
                 setPhase('idle')
-                setStateLabel('未连接')
+                setStateLabel(t('stateDisconnected'))
               }}>取消</button>
             </div>
             <label>{selected.auth_mode === 'PublicKey' ? '私钥口令（如无可留空）' : '密码'}
