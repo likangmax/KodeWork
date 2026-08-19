@@ -248,7 +248,7 @@ export default function App() {
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
     } catch { /* transient */ }
-  }, [])
+  }, [t])
 
   useResumeRecovery(Boolean(selectedId && phase !== 'idle'), () => {
     if (selectedId) void refreshState(selectedId)
