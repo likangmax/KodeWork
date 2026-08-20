@@ -210,18 +210,32 @@ pub enum RunStatus {
     Failed,
     Cancelled,
     TimedOut,
+    /// The run was previously active, but neither a live remote session nor
+    /// authoritative completion metadata can currently be found.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Run {
     pub id: RunId,
-    pub action_id: ActionId,
+    /// The mutable source Action may be deleted after this historical record
+    /// is created, so it is intentionally optional.
+    pub action_id: Option<ActionId>,
+    pub host_id: HostId,
+    pub project_id: Option<ProjectId>,
+    pub action_name: String,
+    pub command_snapshot: String,
+    pub mode: ActionMode,
+    pub cwd_snapshot: Option<String>,
     pub status: RunStatus,
     pub started_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     pub exit_code: Option<i32>,
     pub remote_session_ref: Option<String>,
+    pub stdout_preview: String,
+    pub stderr_preview: String,
     pub output_bytes: u64,
+    pub last_reconciled_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -462,7 +476,40 @@ pub fn classify_danger(command: &str) -> DangerLevel {
     {
         return DangerLevel::Review;
     }
-    DangerLevel::Safe
+    // Only a small observational set is confidently safe. Shell commands
+    // are open-ended; treating every unknown construct as Safe creates a
+    // false sense of protection around scripts, aliases and interpreters.
+    let clearly_observational = [
+        "pwd",
+        "whoami",
+        "id",
+        "date",
+        "uname",
+        "hostname",
+        "git status",
+        "git diff",
+        "git log",
+        "ls",
+        "ll",
+        "cat",
+        "head",
+        "tail",
+        "echo",
+        "printf",
+        "env",
+        "printenv",
+        "which",
+        "command -v",
+        "tmux ls",
+    ];
+    if clearly_observational
+        .iter()
+        .any(|prefix| normalized == *prefix || normalized.starts_with(&format!("{prefix} ")))
+    {
+        DangerLevel::Safe
+    } else {
+        DangerLevel::Review
+    }
 }
 
 fn pipe_to_shell(command: &str) -> bool {
@@ -505,6 +552,38 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::Ready,
             ConnectionState::Reconnecting | ConnectionState::Disconnected
         ) | (ConnectionState::Failed, ConnectionState::Disconnected)
+    )
+}
+
+/// Validates persisted Run lifecycle transitions. Terminal states are final;
+/// `Unknown` remains reconcilable because late remote metadata may appear.
+#[must_use]
+pub fn run_transition(from: RunStatus, to: RunStatus) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (
+            RunStatus::Created,
+            RunStatus::Confirming | RunStatus::Queued | RunStatus::Running | RunStatus::Failed
+        ) | (
+            RunStatus::Confirming,
+            RunStatus::Queued | RunStatus::Failed | RunStatus::Cancelled
+        ) | (
+            RunStatus::Queued,
+            RunStatus::Running | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Unknown
+        ) | (
+            RunStatus::Running,
+            RunStatus::Succeeded
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::TimedOut
+                | RunStatus::Unknown
+        ) | (
+            RunStatus::Unknown,
+            RunStatus::Running | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        )
     )
 }
 
@@ -561,6 +640,11 @@ mod tests {
     #[test]
     fn classifies_dangerous_commands() {
         assert_eq!(classify_danger("git status"), DangerLevel::Safe);
+        assert_eq!(classify_danger("python -c 'print(1)'"), DangerLevel::Review);
+        assert_eq!(
+            classify_danger("rsync --delete ./ /srv/app"),
+            DangerLevel::Review
+        );
         assert_eq!(
             classify_danger("sudo systemctl restart app"),
             DangerLevel::Review
@@ -601,6 +685,16 @@ mod tests {
             ConnectionState::Ready,
             ConnectionState::Reconnecting
         ));
+    }
+
+    #[test]
+    fn run_state_machine_keeps_final_states_final() {
+        assert!(run_transition(RunStatus::Running, RunStatus::Running));
+        assert!(run_transition(RunStatus::Running, RunStatus::Succeeded));
+        assert!(run_transition(RunStatus::Running, RunStatus::Unknown));
+        assert!(run_transition(RunStatus::Unknown, RunStatus::Failed));
+        assert!(!run_transition(RunStatus::Succeeded, RunStatus::Running));
+        assert!(!run_transition(RunStatus::Failed, RunStatus::Succeeded));
     }
 
     #[test]

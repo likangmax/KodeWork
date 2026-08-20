@@ -92,7 +92,21 @@ jobs:
           if ($sig) { $assets += $sig.FullName }
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG @assets --clobber
+            # Stable releases are immutable. Re-running a release must either
+            # observe byte-identical assets or fail loudly; never replace an
+            # installer behind an existing tag.
+            $existingDir = Join-Path $env:RUNNER_TEMP 'existing-release'
+            New-Item -ItemType Directory -Path $existingDir -Force | Out-Null
+            gh release download $env:RELEASE_TAG --pattern $msi.Name --dir $existingDir 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $existingPath = Join-Path $existingDir $msi.Name
+              if ((Get-FileHash $existingPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+                throw "Release $env:RELEASE_TAG already contains a different MSI; refusing to overwrite an immutable release."
+              }
+              Write-Host "Release $env:RELEASE_TAG already contains the same MSI; no asset overwrite will be attempted."
+            } else {
+              gh release upload $env:RELEASE_TAG @assets
+            }
             gh release edit $env:RELEASE_TAG --title "KodeWork $env:RELEASE_TAG" --notes $notes
           } else {
             gh release create $env:RELEASE_TAG @assets --title "KodeWork $env:RELEASE_TAG" --notes $notes --verify-tag

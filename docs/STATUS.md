@@ -15,9 +15,19 @@ KodeWork is under active development. The currently distributable desktop produc
 - Projects, Actions, Runs, SSH tunnels, and loopback Web Preview
 - Tray, autostart, single-instance behavior, themes, and updater signature verification support
 
+## Reliability hardening in progress
+
+- Background Runs remain `Running` until remote exit metadata is reconciled; launcher success is not command success.
+- Run history snapshots its command and ownership so editing or deleting an Action does not rewrite or erase old records.
+- SFTP resume verifies the existing partial prefix byte-for-byte before seeking.
+- Herdr bridge shutdown is PID-owned and readiness-checked rather than pattern-killing unrelated processes.
+- SSH host-key trust is bound to the logical HostId across LAN, Tailscale, and public fallback addresses (schema v10), with legacy address records retained for compatibility.
+- Reconnect retry/backoff is owned by the native layer and guarded single-flight per HostId.
+- Unknown Action commands require review confirmation by default; only clearly observational commands are classified Safe.
+
 ## Verification policy
 
-Every pull request must pass formatting, Clippy with warnings denied, the full Rust workspace tests, frontend lint/tests/build, and secret scanning. Platform or network behavior is marked verified only when it has been exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for current evidence and explicit gaps.
+Every pull request must pass formatting, Clippy with warnings denied, the full Rust workspace tests, and frontend lint/tests/build. Repository secret scanning and push protection are GitHub security settings, not a CI job; contributors must run the documented local pattern scan before staging. The current local verification includes Rust workspace tests, strict Clippy, frontend tests/lint/build, diff checks, and changed-file secret-pattern scanning on August 20, 2026. Platform or network behavior is marked verified only when it has been exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for current evidence and explicit gaps.
 
 ## Known distribution limits
 

@@ -6,6 +6,7 @@
 use crate::handler::{SessionEvent, SshHandler};
 use crate::host_key::HostKeyBroker;
 use crate::SshError;
+use kodework_domain::HostId;
 use russh::client;
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
@@ -92,6 +93,8 @@ pub struct ConnectionOptions {
     pub hostname: String,
     pub port: u16,
     pub username: String,
+    /// Logical workstation identity used to bind trust across fallback paths.
+    pub logical_host_id: Option<HostId>,
     /// Authentication methods tried in order until one succeeds.
     pub auth: Vec<AuthMethod>,
     pub host_key: Arc<HostKeyBroker>,
@@ -121,6 +124,7 @@ impl ConnectionOptions {
             hostname,
             port,
             username,
+            logical_host_id: None,
             auth,
             host_key,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -214,6 +218,7 @@ impl SshConnection {
         let handler = SshHandler::new(
             options.hostname.clone(),
             options.port,
+            options.logical_host_id,
             Arc::clone(&options.host_key),
             event_tx,
             options.generation,
@@ -306,6 +311,7 @@ impl SshConnection {
         let handler = SshHandler::new(
             options.hostname.clone(),
             options.port,
+            options.logical_host_id,
             Arc::clone(&options.host_key),
             event_tx,
             options.generation,

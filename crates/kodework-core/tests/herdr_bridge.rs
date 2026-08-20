@@ -82,9 +82,17 @@ async fn bridge_probes_socket_and_starts_socat() {
                     },
                 ),
                 (
-                    "nohup".into(),
+                    "(nohup".into(),
                     FakeExecResponse {
-                        stdout: b"started\n".to_vec(),
+                        stdout: b"4242\n".to_vec(),
+                        stderr: Vec::new(),
+                        exit_code: 0,
+                    },
+                ),
+                (
+                    "kill -0 4242".into(),
+                    FakeExecResponse {
+                        stdout: b"ready\n".to_vec(),
                         stderr: Vec::new(),
                         exit_code: 0,
                     },
@@ -130,7 +138,7 @@ async fn bridge_probes_socket_and_starts_socat() {
     assert!(info.tunnel.local_addr.starts_with("127.0.0.1:"));
 
     manager
-        .herdr_bridge_stop(host.id, info.remote_port)
+        .herdr_bridge_stop(host.id, info.remote_port, Some(info.remote_pid))
         .await
         .unwrap_or_else(|error| unreachable!("bridge stop: {error}"));
     server.shutdown().await;

@@ -324,6 +324,14 @@ pub(crate) async fn connect_host(
     host: Host,
     password: Option<String>,
 ) -> Result<String, String> {
+    connect_host_inner(&state, host, password).await
+}
+
+async fn connect_host_inner(
+    state: &AppState,
+    host: Host,
+    password: Option<String>,
+) -> Result<String, String> {
     // The renderer may hold a stale or tampered copy of a Host.  Resolve the
     // authoritative record by id before selecting credentials or addresses;
     // otherwise an IPC caller could combine one host's credential reference
@@ -436,6 +444,60 @@ pub(crate) async fn connect_host(
         }
         kodework_core::session::SessionOutcome::Failed { reason, .. } => Err(reason),
     }
+}
+
+/// Runs the bounded reconnect policy in the native layer. The renderer only
+/// requests supervision; credential lookup, backoff and single-flight
+/// ownership stay inside the desktop process.
+#[tauri::command]
+pub(crate) async fn reconnect_host(
+    state: State<'_, AppState>,
+    host_id: HostId,
+) -> Result<String, String> {
+    let host = state
+        .database
+        .lock()
+        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .get_host(host_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "host does not exist".to_string())?;
+    let automatic = host.auth_ref.is_some()
+        || matches!(
+            host.auth_mode,
+            AuthenticationMode::SshAgent | AuthenticationMode::KeyboardInteractive
+        );
+    if !automatic {
+        return Err("interactive credentials are required".to_string());
+    }
+    {
+        let mut active = state
+            .reconnecting
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        if !active.insert(host_id) {
+            return Ok("reconnect already in progress".to_string());
+        }
+    }
+    let result = async {
+        let mut last_error = String::from("reconnect failed");
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1200 * attempt as u64)).await;
+            }
+            match connect_host_inner(&state, host.clone(), None).await {
+                Ok(message) => return Ok(message),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+    .await;
+    state
+        .reconnecting
+        .lock()
+        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .remove(&host_id);
+    result
 }
 
 fn expand_user_path(value: &str) -> std::path::PathBuf {
@@ -1021,8 +1083,12 @@ pub(crate) async fn herdr_bridge_stop(
     state: State<'_, AppState>,
     host_id: HostId,
     remote_port: u16,
+    remote_pid: Option<u32>,
 ) -> Result<(), String> {
-    state.sessions.herdr_bridge_stop(host_id, remote_port).await
+    state
+        .sessions
+        .herdr_bridge_stop(host_id, remote_port, remote_pid)
+        .await
 }
 /// Lists all command snippets.
 #[tauri::command]
@@ -1256,13 +1322,22 @@ pub(crate) async fn run_action(
         .as_millis() as u64;
     let run = Run {
         id: RunId::new(),
-        action_id: action.id,
+        action_id: Some(action.id),
+        host_id,
+        project_id: Some(action.project_id),
+        action_name: action.name.clone(),
+        command_snapshot: action.command.clone(),
+        mode: action.mode,
+        cwd_snapshot: action.cwd.clone(),
         status: RunStatus::Running,
         started_at_ms: Some(started_at_ms),
         finished_at_ms: None,
         exit_code: None,
         remote_session_ref: None,
+        stdout_preview: String::new(),
+        stderr_preview: String::new(),
         output_bytes: 0,
+        last_reconciled_at_ms: None,
     };
     {
         let db = state
@@ -1274,23 +1349,65 @@ pub(crate) async fn run_action(
             .map_err(|error| error.to_string())?;
     }
 
-    let outcome = state.sessions.run_action(host_id, &action, confirmed).await;
+    let outcome = state
+        .sessions
+        .run_action_with_id(host_id, &action, confirmed, Some(run.id))
+        .await;
     let finished_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis() as u64;
-    let (status, exit_code, remote_ref, output_bytes) = match &outcome {
-        Ok(value) => (
-            if value.exit_code == Some(0) {
-                RunStatus::Succeeded
-            } else {
-                RunStatus::Failed
-            },
-            value.exit_code,
-            value.remote_session_ref.as_deref(),
-            value.output_bytes,
+    let (
+        status,
+        exit_code,
+        finished_at_ms,
+        remote_ref,
+        output_bytes,
+        stdout_preview,
+        stderr_preview,
+    ) = match &outcome {
+        Ok(value) => match value.disposition {
+            kodework_core::session::RunDisposition::BackgroundStarted => (
+                RunStatus::Running,
+                None,
+                None,
+                value.remote_session_ref.as_deref(),
+                value.output_bytes,
+                value.stdout_preview.as_str(),
+                value.stderr_preview.as_str(),
+            ),
+            kodework_core::session::RunDisposition::Completed => (
+                if value.exit_code == Some(0) {
+                    RunStatus::Succeeded
+                } else {
+                    RunStatus::Failed
+                },
+                value.exit_code,
+                Some(finished_at_ms),
+                value.remote_session_ref.as_deref(),
+                value.output_bytes,
+                value.stdout_preview.as_str(),
+                value.stderr_preview.as_str(),
+            ),
+            kodework_core::session::RunDisposition::InteractiveDispatched => (
+                RunStatus::Unknown,
+                None,
+                Some(finished_at_ms),
+                None,
+                0,
+                value.stdout_preview.as_str(),
+                value.stderr_preview.as_str(),
+            ),
+        },
+        Err(_) => (
+            RunStatus::Failed,
+            None,
+            Some(finished_at_ms),
+            None,
+            0,
+            "",
+            "",
         ),
-        Err(_) => (RunStatus::Failed, None, None, 0),
     };
     let db = state
         .database
@@ -1301,9 +1418,12 @@ pub(crate) async fn run_action(
             run.id,
             status,
             exit_code,
-            Some(finished_at_ms),
+            finished_at_ms,
             remote_ref,
             output_bytes,
+            stdout_preview,
+            stderr_preview,
+            None,
         )
         .map_err(|error| error.to_string())?;
     outcome
@@ -1344,4 +1464,71 @@ pub(crate) fn run_list(
         (None, None) => repository.list_recent(limit),
     }
     .map_err(|error| error.to_string())
+}
+
+/// Reconcile persisted Quick/Background runs against the remote source of
+/// truth. This is intentionally explicit and bounded so a reconnect cannot
+/// spawn an unbounded number of SSH probes.
+#[tauri::command]
+pub(crate) async fn run_reconcile(
+    state: State<'_, AppState>,
+    host_id: HostId,
+) -> Result<usize, String> {
+    use kodework_core::session::RemoteRunState;
+    use kodework_domain::RunStatus;
+    use kodework_storage::repositories::RunRepository;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let runs = {
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        RunRepository::new(db.connection())
+            .list_reconcilable_by_host(host_id, 100)
+            .map_err(|error| error.to_string())?
+    };
+    let mut reconciled = 0usize;
+    for run in runs {
+        let remote = state
+            .sessions
+            .reconcile_background_run(host_id, run.id)
+            .await?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis() as u64;
+        let (status, exit_code, finished) = match remote {
+            RemoteRunState::Running => (RunStatus::Running, None, None),
+            RemoteRunState::Completed { exit_code } => (
+                if exit_code == 0 {
+                    RunStatus::Succeeded
+                } else {
+                    RunStatus::Failed
+                },
+                Some(exit_code),
+                Some(now),
+            ),
+            RemoteRunState::Unknown => (RunStatus::Unknown, None, Some(now)),
+        };
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        RunRepository::new(db.connection())
+            .finish(
+                run.id,
+                status,
+                exit_code,
+                finished,
+                run.remote_session_ref.as_deref(),
+                run.output_bytes,
+                &run.stdout_preview,
+                &run.stderr_preview,
+                Some(now),
+            )
+            .map_err(|error| error.to_string())?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
 }

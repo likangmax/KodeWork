@@ -414,7 +414,11 @@ async fn upload(
     // bad resume can never corrupt the destination.
     let resume_offset = if request.resume {
         let existing = existing_part_size(backend, &remote_part).await?;
-        if existing > total {
+        if existing > total
+            || (existing > 0
+                && !upload_prefix_matches(&request.local_path, backend, &remote_part, existing)
+                    .await?)
+        {
             0
         } else {
             existing
@@ -499,7 +503,11 @@ async fn download(
     // discarded so a bad resume can never corrupt the destination.
     let resume_offset = if request.resume {
         let existing = local_part_size(&local_part).await?;
-        if existing > total {
+        if existing > total
+            || (existing > 0
+                && !download_prefix_matches(&local_part, backend, &request.remote_path, existing)
+                    .await?)
+        {
             0
         } else {
             existing
@@ -651,6 +659,82 @@ async fn local_part_size(part: &str) -> Result<u64, SftpError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(SftpError::Backend(format!("part metadata: {error}"))),
     }
+}
+
+/// Verifies the exact bytes already present in a remote `.part` against the
+/// current local source. A size match alone is not a transfer identity.
+async fn upload_prefix_matches(
+    local_path: &str,
+    backend: &dyn SftpBackend,
+    remote_part: &str,
+    length: u64,
+) -> Result<bool, SftpError> {
+    use tokio::io::AsyncReadExt;
+    let mut local = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|error| SftpError::Backend(format!("prefix local open: {error}")))?;
+    let mut remote = backend.open_read(remote_part).await?;
+    let mut left = length;
+    let mut local_buf = vec![0u8; 64 * 1024];
+    let mut remote_buf = vec![0u8; 64 * 1024];
+    let mut equal = true;
+    while left > 0 {
+        let wanted = left.min(local_buf.len() as u64) as usize;
+        let local_n = local
+            .read(&mut local_buf[..wanted])
+            .await
+            .map_err(|error| SftpError::Backend(format!("prefix local read: {error}")))?;
+        let remote_n = remote.read(&mut remote_buf[..wanted]).await?;
+        if local_n != remote_n || local_buf[..local_n] != remote_buf[..remote_n] {
+            equal = false;
+            break;
+        }
+        if local_n == 0 {
+            equal = false;
+            break;
+        }
+        left -= local_n as u64;
+    }
+    remote.close().await?;
+    Ok(equal && left == 0)
+}
+
+/// Verifies the exact bytes already present in a local `.part` against the
+/// current remote source before resuming a download.
+async fn download_prefix_matches(
+    local_part: &str,
+    backend: &dyn SftpBackend,
+    remote_path: &str,
+    length: u64,
+) -> Result<bool, SftpError> {
+    use tokio::io::AsyncReadExt;
+    let mut local = tokio::fs::File::open(local_part)
+        .await
+        .map_err(|error| SftpError::Backend(format!("prefix local part open: {error}")))?;
+    let mut remote = backend.open_read(remote_path).await?;
+    let mut left = length;
+    let mut local_buf = vec![0u8; 64 * 1024];
+    let mut remote_buf = vec![0u8; 64 * 1024];
+    let mut equal = true;
+    while left > 0 {
+        let wanted = left.min(local_buf.len() as u64) as usize;
+        let local_n = local
+            .read(&mut local_buf[..wanted])
+            .await
+            .map_err(|error| SftpError::Backend(format!("prefix local part read: {error}")))?;
+        let remote_n = remote.read(&mut remote_buf[..wanted]).await?;
+        if local_n != remote_n || local_buf[..local_n] != remote_buf[..remote_n] {
+            equal = false;
+            break;
+        }
+        if local_n == 0 {
+            equal = false;
+            break;
+        }
+        left -= local_n as u64;
+    }
+    remote.close().await?;
+    Ok(equal && left == 0)
 }
 
 async fn wait_while_paused(controls: &TransferControls) {

@@ -30,6 +30,7 @@ tauri-plugin-single-instance = "2"
 thiserror = "2"
 tauri-plugin-updater = "2.10.1"
 zeroize = "1"
+tokio = { version = "1", features = ["time"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = ["codegen"] }

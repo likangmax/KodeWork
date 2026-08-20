@@ -96,11 +96,22 @@ file bytes -> streaming SFTP -> .part -> atomic rename -> completion event
 
 KodeWork is a client, not the process supervisor for the remote coding task. Herdr or tmux runs on the Linux host. A Windows restart, tray exit, sleep cycle, or network flap therefore leaves the remote job alive; the next connection re-attaches to the same durable session. Local PTY sessions are intentionally separate and are terminated with the desktop process.
 
+Quick and Background Actions are persisted separately from their mutable Action
+definition. Each Run stores the host, project, command, mode, and working-folder
+snapshot captured at launch. A detached Background Run starts as `Running`; the
+tmux launcher returning zero is not treated as command success. The remote
+wrapper atomically writes an exit-code marker under
+`~/.cache/kodework/runs/<run-id>/`, and `run_reconcile` compares that marker and
+the tmux session after reconnect. If neither source is authoritative, the UI
+shows `Unknown` instead of guessing failure or success. Deleting an Action or
+Project does not erase its historical Run; deleting the Host intentionally
+removes all host-owned records.
+
 ## Address and authentication flow
 
 1. Resolve a host into ordered candidates (manual, LAN, Tailscale, public, or jump-host route).
 2. Try candidates with bounded timeouts and typed failure classification.
-3. Verify the SSH host-key fingerprint before accepting the session; a changed key is a hard failure.
+3. Verify the SSH host-key fingerprint before accepting the session. Trust is bound to the logical `HostId`, so LAN, Tailscale, and public fallback paths for one workstation must present the same identity; legacy address-scoped records remain a compatibility fallback. A changed key is a hard failure.
 4. Authenticate with password, private key, Windows SSH Agent/Pageant, or keyboard-interactive prompts.
 5. Create independent PTY, exec, SFTP, and tunnel channels under one connection generation.
 
@@ -112,7 +123,13 @@ Tailscale supplies a network path or address discovery. It does not replace SSH 
 - Windows credentials use native protected storage; private-key material is handled by the platform adapter.
 - Auth keys are short-lived inputs and are never written to README files, fixtures, logs, or ordinary renderer persistence.
 - Remote paths are validated before clipboard-asset upload; uploads are staged and atomically renamed.
-- Dangerous Actions are reclassified in Rust. A UI flag cannot downgrade a destructive command.
+- Dangerous Actions are reclassified in Rust. Clearly observational commands
+  are Safe, known destructive commands are Dangerous, and unknown shell
+  constructs are Review; a UI flag cannot downgrade the server decision.
+- Herdr socket bridges record the exact remote `socat` PID, verify readiness,
+  and stop only that owned process. They never use broad `pkill -f` matching.
+- Host-key identities are stored per logical Host in schema v10, preventing an
+  address fallback from silently becoming a different trusted workstation.
 - Production CSP is restrictive; loopback frames are allowed only for an explicit SSH Web Preview tunnel.
 
 See the numbered decisions in [`adr/`](adr/) for the rationale behind these boundaries.
@@ -121,9 +138,12 @@ See the numbered decisions in [`adr/`](adr/) for the rationale behind these boun
 
 - Bounded queues and bounded terminal replay buffers.
 - No `read_to_end` for large transfers; a 512 MiB fixture is covered by the test suite.
+- Resume never trusts `.part` length alone: the existing prefix is compared
+  byte-for-byte with the current source, and a mismatch restarts safely.
 - At most 20 local/remote terminal sessions per workspace, with inactive renderers detached or paused.
 - Fixed-row virtual windows for large remote directories.
 - Single-flight reconnect, host-key, and keyboard-interactive polling.
+- Native reconnect retry/backoff is single-flight per logical `HostId`; the renderer only requests supervision and reflects state.
 - Generation guards on reconnect and explicit cleanup of dead subscribers.
 
 ## Verification

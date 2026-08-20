@@ -177,6 +177,7 @@ impl SessionManager {
                 Arc::clone(&self.host_key),
                 generation,
             );
+            options.logical_host_id = Some(host.id);
             options.connect_timeout = self.connect_timeout;
             if host.jump.is_none() {
                 if let Some(proxy) = candidate.proxy {
@@ -825,10 +826,25 @@ impl SessionManager {
         let socket_path = socket;
         let quoted_socket = shell_quote(&socket_path)?;
         let start = format!(
-            "nohup setsid socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket} >/dev/null 2>&1 </dev/null & echo started"
+            "(nohup setsid socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket} >/dev/null 2>&1 </dev/null & echo $!)"
         );
         let output = self.run_remote(host_id, &start).await?;
-        if !output.stdout.windows(7).any(|window| window == b"started") {
+        let remote_pid = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .find_map(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| {
+                format!(
+                    "socat 启动失败: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+            })?;
+        let ready = self
+            .run_remote(
+                host_id,
+                &format!("kill -0 {remote_pid} 2>/dev/null && echo ready || echo failed"),
+            )
+            .await?;
+        if !String::from_utf8_lossy(&ready.stdout).contains("ready") {
             return Err(format!(
                 "socat 启动失败: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -841,13 +857,23 @@ impl SessionManager {
             tunnel,
             remote_socket: socket_path,
             remote_port,
+            remote_pid,
         })
     }
 
     /// Stops the remote socat bridge (idempotent). The local tunnel is
     /// closed separately via close_tunnel.
-    pub async fn herdr_bridge_stop(&self, host_id: HostId, remote_port: u16) -> Result<(), String> {
-        let command = format!("pkill -f 'socat.*{remote_port}' 2>/dev/null || true");
+    pub async fn herdr_bridge_stop(
+        &self,
+        host_id: HostId,
+        remote_port: u16,
+        remote_pid: Option<u32>,
+    ) -> Result<(), String> {
+        let pid = remote_pid
+            .ok_or_else(|| "bridge owner pid is required; reconnect to refresh it".to_string())?;
+        let command = format!(
+            "args=$(ps -o args= -p {pid} 2>/dev/null || true); case \"$args\" in *socat*{remote_port}*) kill {pid} 2>/dev/null || true ;; esac"
+        );
         self.run_remote(host_id, &command).await.map(|_| ())
     }
 
@@ -880,12 +906,25 @@ impl SessionManager {
         action: &Action,
         confirmed: bool,
     ) -> Result<RunOutcome, String> {
+        self.run_action_with_id(host_id, action, confirmed, None)
+            .await
+    }
+
+    /// Runs an action with a caller-owned RunId. Persisted background runs use
+    /// the same identity in SQLite, tmux and remote completion metadata.
+    pub async fn run_action_with_id(
+        &self,
+        host_id: HostId,
+        action: &Action,
+        confirmed: bool,
+        run_id: Option<kodework_domain::RunId>,
+    ) -> Result<RunOutcome, String> {
         // Recompute the danger level server-side: the renderer-declared
         // field is only a hint and must never gate confirmation.
         let danger = classify_danger(&action.command);
         let requires_confirmation = match action.confirmation {
             ConfirmationPolicy::Always => true,
-            ConfirmationPolicy::OnDangerous => danger == DangerLevel::Dangerous,
+            ConfirmationPolicy::OnDangerous => danger != DangerLevel::Safe,
             ConfirmationPolicy::Never => danger == DangerLevel::Dangerous,
         };
         if requires_confirmation && !confirmed {
@@ -901,6 +940,7 @@ impl SessionManager {
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(RunOutcome {
+                    disposition: RunDisposition::InteractiveDispatched,
                     exit_code: None,
                     stdout_preview: "interactive: 命令已发送到终端".to_string(),
                     stderr_preview: String::new(),
@@ -922,6 +962,7 @@ impl SessionManager {
                     trimmed
                 };
                 Ok(RunOutcome {
+                    disposition: RunDisposition::Completed,
                     exit_code: output.exit_code,
                     stdout_preview: preview(&output.stdout),
                     stderr_preview: preview(&output.stderr),
@@ -933,20 +974,24 @@ impl SessionManager {
                 // A background action must survive UI/SSH disconnects. Run it
                 // inside a detached tmux session and return the external
                 // session name in the bounded preview for observability.
-                let session_name = format!(
-                    "kodework-run-{}",
-                    kodework_domain::RunId::new().as_uuid().simple()
+                let run_id = run_id.unwrap_or_default();
+                let session_name = format!("kodework-run-{}", run_id.as_uuid().simple());
+                let run_key = run_id.as_uuid().simple().to_string();
+                let run_script = format!(
+                    "umask 077; base=\"$HOME/.cache/kodework/runs/{run_key}\"; mkdir -p -- \"$base\"; date +%s > \"$base/started_at_s.tmp\"; mv -f -- \"$base/started_at_s.tmp\" \"$base/started_at_s\"; sh -lc {} ; code=$?; date +%s > \"$base/finished_at_s.tmp\"; mv -f -- \"$base/finished_at_s.tmp\" \"$base/finished_at_s\"; printf '%s\\n' \"$code\" > \"$base/exit_code.tmp\"; mv -f -- \"$base/exit_code.tmp\" \"$base/exit_code\"; exit \"$code\"",
+                    shell_quote(&command)?,
                 );
                 let tmux_command = format!(
                     "tmux new-session -d -s {} -- sh -lc {}",
                     session_name,
-                    shell_quote(&command)?
+                    shell_quote(&run_script)?
                 );
                 let output = self
                     .run_remote_with_timeout(host_id, &tmux_command, DEFAULT_COMMAND_TIMEOUT)
                     .await?;
                 if output.exit_code != Some(0) {
                     return Ok(RunOutcome {
+                        disposition: RunDisposition::Completed,
                         exit_code: output.exit_code,
                         stdout_preview: String::from_utf8_lossy(&output.stdout).trim().to_string(),
                         stderr_preview: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -955,13 +1000,42 @@ impl SessionManager {
                     });
                 }
                 Ok(RunOutcome {
-                    exit_code: Some(0),
+                    disposition: RunDisposition::BackgroundStarted,
+                    // tmux accepted the launcher; the user command has not
+                    // finished yet. The caller must reconcile it later.
+                    exit_code: None,
                     stdout_preview: format!("background tmux session: {session_name}"),
                     stderr_preview: String::new(),
                     output_bytes: 0,
                     remote_session_ref: Some(format!("tmux:{session_name}")),
                 })
             }
+        }
+    }
+
+    /// Reconciles one persisted background run using authoritative remote
+    /// metadata. Missing metadata is deliberately reported as Unknown.
+    pub async fn reconcile_background_run(
+        &self,
+        host_id: HostId,
+        run_id: kodework_domain::RunId,
+    ) -> Result<RemoteRunState, String> {
+        let id = run_id.as_uuid().simple().to_string();
+        let command = format!(
+            "base=\"$HOME/.cache/kodework/runs/{id}\"; if [ -f \"$base/exit_code\" ]; then printf 'completed\\t%s\\t%s\\t%s\\n' \"$(cat -- \"$base/exit_code\")\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif tmux has-session -t 'kodework-run-{id}' >/dev/null 2>&1; then printf 'running\\n'; else printf 'unknown\\n'; fi"
+        );
+        let output = self.run_remote(host_id, &command).await?;
+        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("completed") => Ok(RemoteRunState::Completed {
+                exit_code: fields
+                    .next()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or_else(|| "remote run exit code is invalid".to_string())?,
+            }),
+            Some("running") => Ok(RemoteRunState::Running),
+            _ => Ok(RemoteRunState::Unknown),
         }
     }
     /// Lists remote tmux sessions (empty when tmux is unavailable).
@@ -1472,15 +1546,31 @@ pub struct HerdrBridgeInfo {
     pub tunnel: crate::tunnel::TunnelInfo,
     pub remote_socket: String,
     pub remote_port: u16,
+    pub remote_pid: u32,
 }
 /// Result of running one action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunOutcome {
+    pub disposition: RunDisposition,
     pub exit_code: Option<i32>,
     pub stdout_preview: String,
     pub stderr_preview: String,
     pub output_bytes: u64,
     pub remote_session_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoteRunState {
+    Running,
+    Completed { exit_code: i32 },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RunDisposition {
+    Completed,
+    BackgroundStarted,
+    InteractiveDispatched,
 }
 
 /// Quotes data fields before they are embedded in a POSIX remote shell

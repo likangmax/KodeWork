@@ -5,11 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import type { Action, HerdrAgentInfo, Host, HostKeyRequest, KeyboardInteractiveRequest, Project, RemoteFileMeta, Run, RunOutcome, Snippet, TmuxSession, TunnelInfo, UpdateCheck } from './api'
 import {
-  answerHostKey, answerKeyboardInteractive, connectHost, deleteHost, isDesktop,
+  answerHostKey, answerKeyboardInteractive, connectHost, reconnectHost, deleteHost, isDesktop,
   listHosts, pendingHostKeyRequests, pendingKeyboardInteractiveRequests, prepareHostNetwork, saveHost, saveHostPassword, saveTailscaleAuthKey, sessionState, disconnectHost, tailscaleRuntimeInfo,
   actionDelete, actionList, actionSave,
   closePane, herdrAgents, herdrAttach, herdrBridge, herdrBridgeStop, herdrDetect, openPane,
-  projectDelete, projectList, projectSave, runAction, runList, sendInput,
+  projectDelete, projectList, projectSave, runAction, runList, runReconcile, sendInput,
   autostartStatus, checkForUpdates, installUpdate, sftpCancel, sftpDownload, sftpList, sftpPause, sftpResume, sftpUpload, setAutostart, subscribeSftp,
   snippetDelete, snippetList, snippetSave,
   tmuxKill, tmuxList, tmuxNew,
@@ -126,7 +126,7 @@ export default function App() {
   const [tunnelRemoteHost, setTunnelRemoteHost] = useState('127.0.0.1')
   const [tunnelRemotePort, setTunnelRemotePort] = useState('3000')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [bridgeInfo, setBridgeInfo] = useState<{ local: string; socket: string; tunnelId: string; remotePort: number } | null>(null)
+  const [bridgeInfo, setBridgeInfo] = useState<{ local: string; socket: string; tunnelId: string; remotePort: number; remotePid: number } | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const [snippetsOpen, setSnippetsOpen] = useState(false)
   const [snippetDraft, setSnippetDraft] = useState<Snippet | null>(null)
@@ -354,14 +354,13 @@ export default function App() {
             host.auth_mode === 'SshAgent' ||
             host.auth_mode === 'KeyboardInteractive'
           )
-          if (canReconnectWithoutPassword && host && reconnectAttemptsRef.current < 3) {
-            const attempt = reconnectAttemptsRef.current
+          if (canReconnectWithoutPassword && host) {
             reconnectAttemptsRef.current += 1
             setMessage('连接断开，正在自动重连…')
-            // Bounded backoff so bursts of drops do not hammer the host.
-            await new Promise((resolve) => window.setTimeout(resolve, attempt * 1200))
             if (active && connectSeq.current > 0 && lastHostRef.current?.id === host.id) {
-              void runConnect(host)
+              void reconnectHost(host.id).catch((error) => {
+                if (active) setMessage('自动重连失败：' + String(error))
+              })
             }
           } else if (host && host.auth_ref === null && (host.auth_mode === 'Password' || host.auth_mode === 'PublicKey')) {
             reconnectAttemptsRef.current += 1
@@ -625,7 +624,7 @@ export default function App() {
     if (!selected) return
     try {
       const info = await herdrBridge(selected.id, 0)
-      setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, remotePort: info.remote_port })
+      setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, remotePort: info.remote_port, remotePid: info.remote_pid })
       setMessage('herdr socket 已桥接：' + info.tunnel.local_addr)
     } catch (error) {
       setMessage('桥接失败：' + String(error))
@@ -638,7 +637,7 @@ export default function App() {
       // The local tunnel must be closed explicitly; the remote socat is
       // killed with the real remote port (never the local loopback one).
       await tunnelClose(bridgeInfo.tunnelId).catch(() => {})
-      await herdrBridgeStop(selected.id, bridgeInfo.remotePort).catch(() => {})
+      await herdrBridgeStop(selected.id, bridgeInfo.remotePort, bridgeInfo.remotePid).catch(() => {})
       setBridgeInfo(null)
       setTunnels(await tunnelList())
       setMessage('herdr 桥接已停止')
@@ -688,6 +687,7 @@ export default function App() {
   useEffect(() => {
     if (!isDesktop() || !selectedId) return
     void projectList(selectedId).then(setProjects).catch(() => {})
+    void runReconcile(selectedId).then(() => runList(undefined, 50, selectedId).then(setRuns)).catch(() => {})
     if (activeTab === 'actions') {
       void runList(undefined, 50, selectedId).then(setRuns).catch(() => {})
     }

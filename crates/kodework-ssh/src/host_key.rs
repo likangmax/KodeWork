@@ -8,6 +8,7 @@
 //! deadline. Unconditional acceptance is never allowed.
 
 use crate::SshError;
+use kodework_domain::HostId;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::PublicKeyBase64;
 use std::collections::{HashMap, VecDeque};
@@ -48,12 +49,27 @@ pub enum HostKeyDecision {
 pub trait KnownHosts: Send + Sync {
     fn lookup(&self, hostname: &str, port: u16) -> Option<HostKeyInfo>;
     fn save(&self, hostname: &str, port: u16, key: &HostKeyInfo) -> Result<(), String>;
+
+    fn lookup_for_host(&self, _host_id: HostId, hostname: &str, port: u16) -> Option<HostKeyInfo> {
+        self.lookup(hostname, port)
+    }
+
+    fn save_for_host(
+        &self,
+        _host_id: HostId,
+        hostname: &str,
+        port: u16,
+        key: &HostKeyInfo,
+    ) -> Result<(), String> {
+        self.save(hostname, port, key)
+    }
 }
 
 /// In-memory known-hosts store (tests and pre-SQLite use).
 #[derive(Default)]
 pub struct MemoryKnownHosts {
     keys: Mutex<HashMap<(String, u16), HostKeyInfo>>,
+    host_keys: Mutex<HashMap<HostId, HostKeyInfo>>,
 }
 
 impl MemoryKnownHosts {
@@ -78,6 +94,28 @@ impl KnownHosts for MemoryKnownHosts {
             .lock()
             .map_err(|_| "known-hosts lock poisoned".to_string())?;
         guard.insert((hostname.to_string(), port), key.clone());
+        Ok(())
+    }
+
+    fn lookup_for_host(&self, host_id: HostId, hostname: &str, port: u16) -> Option<HostKeyInfo> {
+        self.host_keys
+            .lock()
+            .ok()
+            .and_then(|keys| keys.get(&host_id).cloned())
+            .or_else(|| self.lookup(hostname, port))
+    }
+
+    fn save_for_host(
+        &self,
+        host_id: HostId,
+        _hostname: &str,
+        _port: u16,
+        key: &HostKeyInfo,
+    ) -> Result<(), String> {
+        self.host_keys
+            .lock()
+            .map_err(|_| "known-hosts lock poisoned".to_string())?
+            .insert(host_id, key.clone());
         Ok(())
     }
 }
@@ -162,6 +200,16 @@ impl HostKeyBroker {
         port: u16,
         key: &PublicKey,
     ) -> Result<bool, SshError> {
+        self.verify_for_host(None, hostname, port, key).await
+    }
+
+    pub async fn verify_for_host(
+        &self,
+        host_id: Option<HostId>,
+        hostname: &str,
+        port: u16,
+        key: &PublicKey,
+    ) -> Result<bool, SshError> {
         let fingerprint = Self::fingerprint_for(key);
         let info = HostKeyInfo {
             hostname: hostname.to_string(),
@@ -171,7 +219,10 @@ impl HostKeyBroker {
             key_blob_base64: key.public_key_base64(),
         };
 
-        if let Some(saved) = self.known.lookup(hostname, port) {
+        let saved = host_id
+            .and_then(|id| self.known.lookup_for_host(id, hostname, port))
+            .or_else(|| self.known.lookup(hostname, port));
+        if let Some(saved) = saved {
             if saved.fingerprint == fingerprint && !saved.key_blob_base64.is_empty() {
                 if saved.key_blob_base64 == info.key_blob_base64 {
                     return Ok(true);
@@ -204,9 +255,11 @@ impl HostKeyBroker {
         let result = match outcome {
             Ok(Ok(HostKeyDecision::TrustOnce)) => Ok(true),
             Ok(Ok(HostKeyDecision::TrustAndSave)) => {
-                self.known
-                    .save(hostname, port, &info)
-                    .map_err(SshError::InvalidConfiguration)?;
+                match host_id {
+                    Some(host_id) => self.known.save_for_host(host_id, hostname, port, &info),
+                    None => self.known.save(hostname, port, &info),
+                }
+                .map_err(SshError::InvalidConfiguration)?;
                 Ok(true)
             }
             Ok(Ok(HostKeyDecision::Reject)) | Ok(Err(_)) => Err(SshError::HostKeyRejected),
@@ -316,6 +369,38 @@ mod tests {
             broker.drain_requests().is_empty(),
             "no prompt for known key"
         );
+    }
+
+    #[tokio::test]
+    async fn logical_host_identity_is_shared_across_addresses() {
+        let known = Arc::new(MemoryKnownHosts::new());
+        let host_id = HostId::new();
+        let key = test_key();
+        let info = HostKeyInfo {
+            hostname: "100.64.0.10".into(),
+            port: 22,
+            algorithm: key.algorithm().to_string(),
+            fingerprint: HostKeyBroker::fingerprint_for(&key),
+            key_blob_base64: key.public_key_base64(),
+        };
+        known
+            .save_for_host(host_id, "100.64.0.10", 22, &info)
+            .unwrap_or_else(|error| unreachable!("test save failed: {error}"));
+        let broker = HostKeyBroker::new(known, Duration::from_secs(5));
+
+        assert_eq!(
+            broker
+                .verify_for_host(Some(host_id), "192.168.1.10", 22, &key)
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            broker
+                .verify_for_host(Some(host_id), "203.0.113.10", 22, &test_key())
+                .await,
+            Err(SshError::HostKeyChanged)
+        );
+        assert!(broker.drain_requests().is_empty());
     }
 
     #[tokio::test]

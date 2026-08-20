@@ -235,20 +235,67 @@ impl<'a> RunRepository<'a> {
 
     pub fn create(&self, run: &Run) -> Result<(), StorageError> {
         self.connection.execute(
-            "INSERT INTO runs (id, action_id, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, output_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id_to_blob!(run.id),
-                id_to_blob!(run.action_id),
+                run.action_id.map(|id| id_to_blob!(id)),
+                id_to_blob!(run.host_id),
+                run.project_id.map(|id| id_to_blob!(id)),
+                run.action_name,
+                run.command_snapshot,
+                json_from(&run.mode)?,
+                run.cwd_snapshot,
                 json_from(&run.status)?,
                 run.started_at_ms,
                 run.finished_at_ms,
                 run.exit_code,
                 run.remote_session_ref,
+                run.stdout_preview,
+                run.stderr_preview,
                 run.output_bytes,
+                run.last_reconciled_at_ms,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn get(&self, id: RunId) -> Result<Option<Run>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms FROM runs WHERE id = ?1",
+                params![id_to_blob!(id)],
+                read_run,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn list_reconcilable_by_host(
+        &self,
+        host_id: HostId,
+        limit: usize,
+    ) -> Result<Vec<Run>, StorageError> {
+        let statuses = [
+            json_from(&RunStatus::Queued)?,
+            json_from(&RunStatus::Running)?,
+            json_from(&RunStatus::Unknown)?,
+        ];
+        let mut statement = self.connection.prepare(
+            "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms FROM runs WHERE host_id = ?1 AND mode = ?2 AND status IN (?3, ?4, ?5) ORDER BY COALESCE(started_at_ms, 0) DESC LIMIT ?6",
+        )?;
+        let rows = statement.query_map(
+            params![
+                id_to_blob!(host_id),
+                json_from(&kodework_domain::ActionMode::Background)?,
+                statuses[0],
+                statuses[1],
+                statuses[2],
+                limit.min(500) as i64
+            ],
+            read_run,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn update_status(
@@ -258,6 +305,10 @@ impl<'a> RunRepository<'a> {
         exit_code: Option<i32>,
         finished_at_ms: Option<u64>,
     ) -> Result<(), StorageError> {
+        let current = self.current_status(id)?;
+        if !kodework_domain::run_transition(current, status) {
+            return Err(StorageError::InvalidRunTransition(current, status));
+        }
         self.connection.execute(
             "UPDATE runs SET status = ?1, exit_code = ?2, finished_at_ms = ?3 WHERE id = ?4",
             params![
@@ -270,6 +321,7 @@ impl<'a> RunRepository<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish(
         &self,
         id: RunId,
@@ -278,19 +330,42 @@ impl<'a> RunRepository<'a> {
         finished_at_ms: Option<u64>,
         remote_session_ref: Option<&str>,
         output_bytes: u64,
+        stdout_preview: &str,
+        stderr_preview: &str,
+        reconciled_at_ms: Option<u64>,
     ) -> Result<(), StorageError> {
+        let current = self.current_status(id)?;
+        if !kodework_domain::run_transition(current, status) {
+            return Err(StorageError::InvalidRunTransition(current, status));
+        }
         self.connection.execute(
-            "UPDATE runs SET status = ?1, exit_code = ?2, finished_at_ms = ?3, remote_session_ref = ?4, output_bytes = ?5 WHERE id = ?6",
+            "UPDATE runs SET status = ?1, exit_code = ?2, finished_at_ms = ?3, remote_session_ref = ?4, output_bytes = ?5, stdout_preview = ?6, stderr_preview = ?7, last_reconciled_at_ms = ?8 WHERE id = ?9",
             params![
                 json_from(&status)?,
                 exit_code,
                 finished_at_ms,
                 remote_session_ref,
                 output_bytes,
+                stdout_preview,
+                stderr_preview,
+                reconciled_at_ms,
                 id_to_blob!(id)
             ],
         )?;
         Ok(())
+    }
+
+    fn current_status(&self, id: RunId) -> Result<RunStatus, StorageError> {
+        let raw = self
+            .connection
+            .query_row(
+                "SELECT status FROM runs WHERE id = ?1",
+                params![id_to_blob!(id)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StorageError::RunNotFound(id))?;
+        serde_json::from_str(&raw).map_err(StorageError::Serialization)
     }
 
     pub fn list_by_action(
@@ -299,7 +374,7 @@ impl<'a> RunRepository<'a> {
         limit: usize,
     ) -> Result<Vec<Run>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, action_id, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, output_bytes
+            "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms
              FROM runs WHERE action_id = ?1 ORDER BY started_at_ms DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![id_to_blob!(action_id), limit as i64], read_run)?;
@@ -310,7 +385,7 @@ impl<'a> RunRepository<'a> {
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Run>, StorageError> {
         let limit = limit.min(500);
         let mut statement = self.connection.prepare(
-            "SELECT id, action_id, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, output_bytes
+            "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms
              FROM runs ORDER BY COALESCE(started_at_ms, 0) DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], read_run)?;
@@ -327,12 +402,13 @@ impl<'a> RunRepository<'a> {
     ) -> Result<Vec<Run>, StorageError> {
         let limit = limit.min(500);
         let mut statement = self.connection.prepare(
-            "SELECT runs.id, runs.action_id, runs.status, runs.started_at_ms, runs.finished_at_ms,
-                    runs.exit_code, runs.remote_session_ref, runs.output_bytes
+            "SELECT runs.id, runs.action_id, runs.host_id, runs.project_id, runs.action_name,
+                    runs.command_snapshot, runs.mode, runs.cwd_snapshot, runs.status,
+                    runs.started_at_ms, runs.finished_at_ms, runs.exit_code,
+                    runs.remote_session_ref, runs.stdout_preview, runs.stderr_preview,
+                    runs.output_bytes, runs.last_reconciled_at_ms
              FROM runs
-             INNER JOIN actions ON actions.id = runs.action_id
-             INNER JOIN projects ON projects.id = actions.project_id
-             WHERE projects.host_id = ?1
+             WHERE runs.host_id = ?1
              ORDER BY COALESCE(runs.started_at_ms, 0) DESC
              LIMIT ?2",
         )?;
@@ -344,19 +420,46 @@ impl<'a> RunRepository<'a> {
 fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         id: blob_to_id!(row, 0, RunId),
-        action_id: blob_to_id!(row, 1, ActionId),
-        status: serde_json::from_str(&row.get::<_, String>(2)?).map_err(|error| {
+        action_id: row
+            .get::<_, Option<Vec<u8>>>(1)?
+            .map(|value| uuid_from_blob(value).map(ActionId::from_uuid))
+            .transpose()?,
+        host_id: HostId::from_uuid(uuid_from_blob(row.get(2)?)?),
+        project_id: row
+            .get::<_, Option<Vec<u8>>>(3)?
+            .map(|value| uuid_from_blob(value).map(ProjectId::from_uuid))
+            .transpose()?,
+        action_name: row.get(4)?,
+        command_snapshot: row.get(5)?,
+        mode: serde_json::from_str(&row.get::<_, String>(6)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                2,
+                6,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        started_at_ms: row.get(3)?,
-        finished_at_ms: row.get(4)?,
-        exit_code: row.get(5)?,
-        remote_session_ref: row.get(6)?,
-        output_bytes: row.get(7)?,
+        cwd_snapshot: row.get(7)?,
+        status: serde_json::from_str(&row.get::<_, String>(8)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        started_at_ms: row.get(9)?,
+        finished_at_ms: row.get(10)?,
+        exit_code: row.get(11)?,
+        remote_session_ref: row.get(12)?,
+        stdout_preview: row.get(13)?,
+        stderr_preview: row.get(14)?,
+        output_bytes: row.get(15)?,
+        last_reconciled_at_ms: row.get(16)?,
+    })
+}
+
+fn uuid_from_blob(value: Vec<u8>) -> rusqlite::Result<Uuid> {
+    Uuid::from_slice(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error))
     })
 }
 
@@ -724,13 +827,22 @@ mod tests {
         let runs = RunRepository::new(db.connection());
         let run = Run {
             id: RunId::new(),
-            action_id: action.id,
+            action_id: Some(action.id),
+            host_id: project.host_id,
+            project_id: Some(project.id),
+            action_name: action.name.clone(),
+            command_snapshot: action.command.clone(),
+            mode: action.mode,
+            cwd_snapshot: action.cwd.clone(),
             status: RunStatus::Running,
             started_at_ms: Some(now_millis() as u64),
             finished_at_ms: None,
             exit_code: None,
             remote_session_ref: None,
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
             output_bytes: 0,
+            last_reconciled_at_ms: None,
         };
         assert!(runs.create(&run).is_ok());
         assert!(runs
@@ -741,6 +853,9 @@ mod tests {
                 Some(1),
                 Some("tmux:kodework-run-test"),
                 4096,
+                "ok",
+                "",
+                Some(now_millis() as u64),
             )
             .is_ok());
         let runs = runs
@@ -754,6 +869,7 @@ mod tests {
             Some("tmux:kodework-run-test")
         );
         assert_eq!(runs[0].output_bytes, 4096);
+        assert_eq!(runs[0].stdout_preview, "ok");
         assert_eq!(
             RunRepository::new(db.connection())
                 .list_recent_by_host(project.host_id, 10)
@@ -764,6 +880,23 @@ mod tests {
 
         assert!(actions.delete(action.id).ok() == Some(true));
         assert!(projects.delete(project.id).ok() == Some(true));
+        assert!(matches!(
+            RunRepository::new(db.connection()).finish(
+                run.id,
+                RunStatus::Running,
+                None,
+                None,
+                None,
+                0,
+                "",
+                "",
+                None,
+            ),
+            Err(StorageError::InvalidRunTransition(
+                RunStatus::Succeeded,
+                RunStatus::Running
+            ))
+        ));
     }
 
     #[test]

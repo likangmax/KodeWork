@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub mod host_keys;
 pub mod repositories;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -49,7 +49,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         name: "global_snippets",
-        sql: "DROP TABLE IF EXISTS snippets;\nCREATE TABLE IF NOT EXISTS snippets (id BLOB PRIMARY KEY, name TEXT NOT NULL, text TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);",
+        sql: "ALTER TABLE snippets RENAME TO snippets_v5;\nCREATE TABLE snippets (id BLOB PRIMARY KEY, name TEXT NOT NULL, text TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);\nINSERT INTO snippets (id, name, text, sort_order) SELECT id, name, text, sort_order FROM snippets_v5;\nDROP TABLE snippets_v5;",
     },
     Migration {
         version: 7,
@@ -60,6 +60,16 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "host_default_remote_path",
         sql: "ALTER TABLE hosts ADD COLUMN default_remote_path TEXT NOT NULL DEFAULT '/';",
+    },
+    Migration {
+        version: 9,
+        name: "durable_run_history",
+        sql: "CREATE TABLE runs_v9 (id BLOB PRIMARY KEY, action_id BLOB REFERENCES actions(id) ON DELETE SET NULL, host_id BLOB NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, project_id BLOB REFERENCES projects(id) ON DELETE SET NULL, action_name TEXT NOT NULL, command_snapshot TEXT NOT NULL, mode TEXT NOT NULL, cwd_snapshot TEXT, status TEXT NOT NULL, started_at_ms INTEGER, finished_at_ms INTEGER, exit_code INTEGER, remote_session_ref TEXT, stdout_preview TEXT NOT NULL DEFAULT '', stderr_preview TEXT NOT NULL DEFAULT '', output_bytes INTEGER NOT NULL DEFAULT 0, last_reconciled_at_ms INTEGER);\nINSERT INTO runs_v9 (id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms) SELECT runs.id, runs.action_id, projects.host_id, actions.project_id, actions.name, actions.command, actions.mode, actions.cwd, runs.status, runs.started_at_ms, runs.finished_at_ms, runs.exit_code, runs.remote_session_ref, '', '', runs.output_bytes, NULL FROM runs INNER JOIN actions ON actions.id = runs.action_id INNER JOIN projects ON projects.id = actions.project_id;\nDROP TABLE runs;\nALTER TABLE runs_v9 RENAME TO runs;\nCREATE INDEX idx_runs_host_started ON runs(host_id, started_at_ms DESC);\nCREATE INDEX idx_runs_action_started ON runs(action_id, started_at_ms DESC);\nCREATE INDEX idx_runs_status ON runs(status);",
+    },
+    Migration {
+        version: 10,
+        name: "host_scoped_host_key_identities",
+        sql: "CREATE TABLE host_key_identities (host_id BLOB PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL, fingerprint TEXT NOT NULL, key_blob_base64 TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);",
     },
 ];
 
@@ -75,6 +85,10 @@ pub enum StorageError {
     Serialization(#[from] serde_json::Error),
     #[error("invalid UUID bytes in storage")]
     InvalidId,
+    #[error("run not found: {0:?}")]
+    RunNotFound(kodework_domain::RunId),
+    #[error("invalid run status transition: {0:?} -> {1:?}")]
+    InvalidRunTransition(kodework_domain::RunStatus, kodework_domain::RunStatus),
 }
 
 pub fn validate_migrations() -> Result<(), StorageError> {
@@ -286,8 +300,27 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
         _ => None,
     };
     let auth_mode_json = row.get::<_, String>(10)?;
-    let auth_mode = serde_json::from_str::<AuthenticationMode>(&auth_mode_json)
-        .unwrap_or(AuthenticationMode::Password);
+    // Credential semantics must fail closed. Treating corrupted or unknown
+    // data as Password can send the wrong secret through the wrong SSH method.
+    let auth_mode = match serde_json::from_str::<AuthenticationMode>(&auth_mode_json) {
+        Ok(mode) => mode,
+        Err(error) => match auth_mode_json.as_str() {
+            // v7 seeded this field with a bare enum name. Accept only the
+            // finite legacy spellings; every other malformed value fails
+            // closed instead of silently changing credential semantics.
+            "Password" => AuthenticationMode::Password,
+            "PublicKey" => AuthenticationMode::PublicKey,
+            "SshAgent" => AuthenticationMode::SshAgent,
+            "KeyboardInteractive" => AuthenticationMode::KeyboardInteractive,
+            _ => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                ));
+            }
+        },
+    };
     Ok(Host {
         id: HostId::from_uuid(id),
         label: row.get(1)?,

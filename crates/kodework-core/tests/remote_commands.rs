@@ -365,7 +365,11 @@ async fn background_action_is_detached_into_tmux_and_returns_reference() {
         .run_action(host.id, &action, false)
         .await
         .unwrap_or_else(|error| unreachable!("background action: {error}"));
-    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        outcome.disposition,
+        kodework_core::session::RunDisposition::BackgroundStarted
+    );
+    assert_eq!(outcome.exit_code, None);
     assert!(outcome
         .remote_session_ref
         .as_deref()

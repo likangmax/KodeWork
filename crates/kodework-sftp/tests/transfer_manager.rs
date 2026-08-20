@@ -391,6 +391,63 @@ async fn resume_upload_continues_from_part() {
 }
 
 #[tokio::test]
+async fn same_size_wrong_upload_part_is_rebuilt() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("wrong-upload-prefix", 4 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/wrong-upload-prefix.bin");
+    backend.seed(
+        &format!("{remote}.part"),
+        vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE],
+    );
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, true), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await,
+        Some(TransferStatus::Completed)
+    );
+    assert_eq!(
+        backend.read(&remote),
+        Some(vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE])
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn same_size_wrong_download_part_is_rebuilt() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let remote = format!("{REMOTE_DIR}/wrong-download-prefix.bin");
+    backend.seed(&remote, vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE]);
+    let local = std::env::temp_dir().join(format!(
+        "kodework-sftp-test-{}-wrong-download-prefix",
+        std::process::id()
+    ));
+    std::fs::write(
+        format!("{}.part", local.display()),
+        vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE],
+    )
+    .unwrap_or_else(|error| unreachable!("part write: {error}"));
+
+    let id = manager
+        .enqueue(download_request(&local, &remote, true), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await,
+        Some(TransferStatus::Completed)
+    );
+    assert_eq!(
+        std::fs::read(&local).ok(),
+        Some(vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE])
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
 async fn stale_oversized_part_is_discarded_and_rebuilt() {
     let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
     let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);

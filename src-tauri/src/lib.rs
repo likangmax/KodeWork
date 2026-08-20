@@ -5,6 +5,7 @@ use kodework_network::{CandidateResolver, ResolverPolicy};
 use kodework_ssh::host_key::HostKeyBroker;
 use kodework_ssh::keyboard_interactive::KeyboardInteractiveBroker;
 use kodework_storage::Database;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +32,8 @@ pub struct AppState {
     /// Local ConPTY sessions (PowerShell, CMD and WSL), deliberately separate
     /// from remote SSH lifecycle and reconnect state.
     pub(crate) local_terminals: kodework_local_pty::LocalTerminalManager,
+    /// Host ids currently owned by the native reconnect supervisor.
+    pub(crate) reconnecting: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
 }
 
 #[derive(Debug, Error)]
@@ -92,6 +95,7 @@ impl AppState {
             secrets,
             tailscale,
             local_terminals,
+            reconnecting: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 }
@@ -206,6 +210,7 @@ pub fn run() -> Result<(), AppError> {
             commands::save_host_password,
             commands::delete_host,
             commands::connect_host,
+            commands::reconnect_host,
             commands::prepare_host_network,
             commands::disconnect_host,
             commands::session_state,
@@ -254,6 +259,7 @@ pub fn run() -> Result<(), AppError> {
             commands::action_delete,
             commands::run_action,
             commands::run_list,
+            commands::run_reconcile,
             commands::tailscale_status,
             commands::tailscale_runtime_info,
             commands::save_tailscale_auth_key,
