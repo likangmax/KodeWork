@@ -362,7 +362,7 @@ async fn background_action_is_detached_into_tmux_and_returns_reference() {
         env: std::collections::BTreeMap::new(),
     };
     let outcome = manager
-        .run_action(host.id, &action, false)
+        .run_action(host.id, &action, true)
         .await
         .unwrap_or_else(|error| unreachable!("background action: {error}"));
     assert_eq!(

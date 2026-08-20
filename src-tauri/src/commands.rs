@@ -194,6 +194,9 @@ pub(crate) async fn delete_host(
 ) -> Result<bool, String> {
     // Deleting a host must not leave an SSH transport, tunnel or PTY alive
     // after its persistent record and credential references are gone.
+    if let Ok(mut active) = state.reconnecting.lock() {
+        active.remove(&host_id);
+    }
     let _ = state.sessions.disconnect(host_id).await;
     let (auth_ref, tailscale_auth_ref) = state
         .database
@@ -280,6 +283,19 @@ pub(crate) fn save_host_password(
         provider: crate::secrets::provider(),
         opaque_id: format!("{credential_kind}/{}", host.id.as_uuid()),
     };
+    // The reference is deterministic, so replacing a credential can overwrite
+    // the only copy of the old value. Keep the previous bytes until the DB
+    // transaction succeeds, then restore them if SQLite rejects the update.
+    let previous_secret = if previous_reference.as_ref() == Some(&reference) {
+        state
+            .secrets
+            .lock()
+            .ok()
+            .and_then(|store| store.get(&reference).ok())
+            .map(|secret| Zeroizing::new(secret.expose().to_vec()))
+    } else {
+        None
+    };
     {
         let mut secrets = state
             .secrets
@@ -297,7 +313,11 @@ pub(crate) fn save_host_password(
         .upsert_host(&host);
     if let Err(error) = stored {
         if let Ok(mut secrets) = state.secrets.lock() {
-            let _ = secrets.delete(&reference);
+            if let Some(previous_secret) = previous_secret {
+                let _ = secrets.put(reference.clone(), previous_secret.as_slice());
+            } else {
+                let _ = secrets.delete(&reference);
+            }
         }
         return Err(error.to_string());
     }
@@ -454,6 +474,9 @@ pub(crate) async fn reconnect_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<String, String> {
+    if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+        return Err("session is not waiting for reconnect".to_string());
+    }
     let host = state
         .database
         .lock()
@@ -464,7 +487,9 @@ pub(crate) async fn reconnect_host(
     let automatic = host.auth_ref.is_some()
         || matches!(
             host.auth_mode,
-            AuthenticationMode::SshAgent | AuthenticationMode::KeyboardInteractive
+            AuthenticationMode::PublicKey
+                | AuthenticationMode::SshAgent
+                | AuthenticationMode::KeyboardInteractive
         );
     if !automatic {
         return Err("interactive credentials are required".to_string());
@@ -481,12 +506,28 @@ pub(crate) async fn reconnect_host(
     let result = async {
         let mut last_error = String::from("reconnect failed");
         for attempt in 0..3u32 {
+            if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+                return Err("reconnect cancelled".to_string());
+            }
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(1200 * attempt as u64)).await;
+                if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+                    return Err("reconnect cancelled".to_string());
+                }
             }
             match connect_host_inner(&state, host.clone(), None).await {
-                Ok(message) => return Ok(message),
-                Err(error) => last_error = error,
+                Ok(message) => {
+                    if state.sessions.state(host_id) == ConnectionState::Ready {
+                        return Ok(message);
+                    }
+                    return Err("reconnect cancelled".to_string());
+                }
+                Err(error) => {
+                    last_error = error.clone();
+                    if !reconnect_error_is_retryable(&error) {
+                        break;
+                    }
+                }
             }
         }
         Err(last_error)
@@ -498,6 +539,20 @@ pub(crate) async fn reconnect_host(
         .map_err(|_| AppError::StatePoisoned.to_string())?
         .remove(&host_id);
     result
+}
+
+fn reconnect_error_is_retryable(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    !lowered.starts_with("fatal connection error")
+        && !lowered.contains("authentication failed")
+        && !lowered.contains("permission denied")
+        && !lowered.contains("private key")
+        && !lowered.contains("invalid configuration")
+        && !lowered.contains("key error")
+        && !lowered.contains("encrypted")
+        && !lowered.contains("decryption")
+        && !lowered.contains("credential")
+        && !lowered.contains("passphrase")
 }
 
 fn expand_user_path(value: &str) -> std::path::PathBuf {
@@ -692,6 +747,9 @@ pub(crate) async fn disconnect_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<(), String> {
+    if let Ok(mut active) = state.reconnecting.lock() {
+        active.remove(&host_id);
+    }
     state.sessions.disconnect(host_id).await
 }
 
@@ -1227,9 +1285,16 @@ pub(crate) fn action_list(
         .database
         .lock()
         .map_err(|_| AppError::StatePoisoned.to_string())?;
-    ActionRepository::new(db.connection())
+    let mut actions = ActionRepository::new(db.connection())
         .list_by_project(project_id)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // Older databases may contain a renderer-supplied danger label from
+    // before server-side classification was enforced. Recompute it before
+    // rendering so the confirmation dialog matches the backend decision.
+    for action in &mut actions {
+        action.danger_level = classify_danger(&action.command);
+    }
+    Ok(actions)
 }
 
 #[tauri::command]
@@ -1312,8 +1377,8 @@ pub(crate) async fn run_action(
         stored
     };
     validate_action(&action).map_err(|error| error.to_string())?;
-    if action.mode == kodework_domain::ActionMode::Interactive {
-        return state.sessions.run_action(host_id, &action, confirmed).await;
+    if kodework_core::action_requires_confirmation(&action) && !confirmed {
+        return Err("该动作需要确认后才能运行".to_string());
     }
 
     let started_at_ms = SystemTime::now()
@@ -1399,14 +1464,26 @@ pub(crate) async fn run_action(
                 value.stderr_preview.as_str(),
             ),
         },
-        Err(_) => (
+        Err(error) if action.mode == kodework_domain::ActionMode::Background => (
+            // A transport/launcher error does not prove that the detached
+            // tmux session was never created. Keep the row reconcilable so a
+            // later connection can inspect the atomic remote marker.
+            RunStatus::Unknown,
+            None,
+            None,
+            None,
+            0,
+            "",
+            error.as_str(),
+        ),
+        Err(error) => (
             RunStatus::Failed,
             None,
             Some(finished_at_ms),
             None,
             0,
             "",
-            "",
+            error.as_str(),
         ),
     };
     let db = state
@@ -1531,4 +1608,22 @@ pub(crate) async fn run_reconcile(
         reconciled += 1;
     }
     Ok(reconciled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconnect_error_is_retryable;
+
+    #[test]
+    fn reconnect_does_not_retry_fatal_or_credential_errors() {
+        assert!(!reconnect_error_is_retryable(
+            "fatal connection error for host: host key changed"
+        ));
+        assert!(!reconnect_error_is_retryable("authentication failed"));
+        assert!(!reconnect_error_is_retryable(
+            "invalid configuration: key error: encrypted key"
+        ));
+        assert!(reconnect_error_is_retryable("connection timed out"));
+        assert!(reconnect_error_is_retryable("remote host is unreachable"));
+    }
 }

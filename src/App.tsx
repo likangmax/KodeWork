@@ -351,6 +351,7 @@ export default function App() {
           const host = lastHostRef.current
           const canReconnectWithoutPassword = host && (
             host.auth_ref !== null ||
+            host.auth_mode === 'PublicKey' ||
             host.auth_mode === 'SshAgent' ||
             host.auth_mode === 'KeyboardInteractive'
           )
@@ -359,15 +360,23 @@ export default function App() {
             setMessage('连接断开，正在自动重连…')
             if (active && connectSeq.current > 0 && lastHostRef.current?.id === host.id) {
               void reconnectHost(host.id).catch((error) => {
-                if (active) setMessage('自动重连失败：' + String(error))
+                if (active) {
+                  const errorText = String(error).toLowerCase()
+                  const missingKey = errorText.includes('private key does not exist')
+                  const passphraseHint = /passphrase|encrypted|decrypt|key error/.test(errorText)
+                  if (host.auth_mode === 'PublicKey' && host.auth_ref === null && !missingKey && passphraseHint) {
+                    setMessage('自动重连失败：如果私钥已加密，请输入私钥口令后重试。')
+                    setPromptPassword(true)
+                  } else {
+                    setMessage('自动重连失败：' + String(error))
+                  }
+                }
               })
             }
-          } else if (host && host.auth_ref === null && (host.auth_mode === 'Password' || host.auth_mode === 'PublicKey')) {
+          } else if (host && host.auth_ref === null && host.auth_mode === 'Password') {
             reconnectAttemptsRef.current += 1
             if (reconnectAttemptsRef.current === 1) {
-              setMessage(host.auth_mode === 'PublicKey'
-                ? '连接已断开：请确认私钥口令后重新连接。'
-                : '连接已断开：请输入密码重新连接。')
+              setMessage('连接已断开：请输入密码重新连接。')
               setPromptPassword(true)
             }
           }
@@ -427,6 +436,15 @@ export default function App() {
       void refreshState(host.id)
     } catch (error) {
       if (seq !== connectSeq.current) return
+      const errorText = String(error).toLowerCase()
+      const passphraseHint = /passphrase|encrypted|decrypt|key error/.test(errorText)
+      if (host.auth_mode === 'PublicKey' && host.auth_ref === null && !passwordValue && !errorText.includes('private key does not exist') && passphraseHint) {
+        setPhase('failed')
+        setStateLabel(t('stateFailed'))
+        setMessage('连接失败：如果私钥已加密，请输入私钥口令后重试。')
+        setPromptPassword(true)
+        return
+      }
       setPhase('failed')
       setStateLabel(t('stateFailed'))
       setMessage('连接失败：' + String(error))
@@ -435,7 +453,7 @@ export default function App() {
 
   const onConnectClick = () => {
     if (!selected) return
-    if ((selected.auth_mode === 'Password' || selected.auth_mode === 'PublicKey') && selected.auth_ref === null) {
+    if (selected.auth_mode === 'Password' && selected.auth_ref === null) {
       setPromptPassword(true)
     } else {
       void runConnect(selected)
@@ -685,13 +703,13 @@ export default function App() {
 
   // ---- workspace controls ----
   useEffect(() => {
-    if (!isDesktop() || !selectedId) return
+    if (!isDesktop() || !selectedId || phase !== 'ready') return
     void projectList(selectedId).then(setProjects).catch(() => {})
     void runReconcile(selectedId).then(() => runList(undefined, 50, selectedId).then(setRuns)).catch(() => {})
     if (activeTab === 'actions') {
       void runList(undefined, 50, selectedId).then(setRuns).catch(() => {})
     }
-  }, [selectedId, activeTab])
+  }, [selectedId, activeTab, phase])
 
   const refreshActions = async (projectId: string) => {
     try {
@@ -729,10 +747,9 @@ export default function App() {
 
   const onRunAction = async (action: Action) => {
     if (!selected) return
-    // Dangerous commands always require an explicit user confirmation.  The
-    // backend independently recomputes the level, so this only keeps the UI
-    // from presenting a misleading one-click path.
-    if (action.danger_level === 'Dangerous') {
+    // The backend independently recomputes the level. Review and Always
+    // actions need the same explicit confirmation path as Dangerous actions.
+    if (action.confirmation === 'Always' || action.danger_level !== 'Safe') {
       setConfirmAction(action)
       return
     }
@@ -1030,7 +1047,7 @@ export default function App() {
                       <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                         <button className="mini" onClick={() => setProjectDraft({ ...project })}>编辑</button>
                         <button className="mini danger" onClick={() => void projectDelete(project.id).then(() => setProjects((items) => items.filter((p) => p.id !== project.id))).catch((e) => setMessage('删除失败：' + String(e)))}>删除</button>
-                        <button className="mini" onClick={() => setActionDraft({ id: crypto.randomUUID(), project_id: project.id, name: '', command: '', mode: 'Quick', cwd: project.remote_cwd, timeout_ms: 60000, danger_level: 'Safe', confirmation: 'Never', env: {} })}>＋动作</button>
+                        <button className="mini" onClick={() => setActionDraft({ id: crypto.randomUUID(), project_id: project.id, name: '', command: '', mode: 'Quick', cwd: project.remote_cwd, timeout_ms: 60000, danger_level: 'Safe', confirmation: 'OnDangerous', env: {} })}>＋动作</button>
                       </span>
                     </div>
                     {(actionsByProject[project.id] ?? []).map((action) => (
@@ -1275,9 +1292,9 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">CONFIRM</div><h2>确认运行危险动作</h2></div>
+              <div><div className="eyebrow">CONFIRM</div><h2>确认运行动作</h2></div>
             </div>
-            <p className="modal-note">动作 <strong>{confirmAction.name}</strong> 被标记为危险，将在远程执行：</p>
+            <p className="modal-note">动作 <strong>{confirmAction.name}</strong>（{confirmAction.danger_level}）将在远程执行：</p>
             <code className="fingerprint">{confirmAction.command}</code>
             <div className="modal-actions">
               <button className="ghost" onClick={() => setConfirmAction(null)}>取消</button>

@@ -564,6 +564,25 @@ async fn dangerous_action_requires_confirmation_even_if_declared_safe() {
         rejected.is_err(),
         "declared-safe dangerous command must still be rejected without confirmation"
     );
+    let review_action = Action {
+        id: ActionId::new(),
+        project_id: ProjectId::new(),
+        name: "review".into(),
+        command: "python -c 'print(1)'".into(),
+        mode: ActionMode::Quick,
+        cwd: None,
+        timeout_ms: Some(2_000),
+        danger_level: DangerLevel::Safe, // malicious declaration
+        confirmation: ConfirmationPolicy::Never,
+        env: BTreeMap::new(),
+    };
+    assert!(
+        manager
+            .run_action(host.id, &review_action, false)
+            .await
+            .is_err(),
+        "review commands must not bypass confirmation through Never"
+    );
     let _ = manager.disconnect(host.id).await;
     server.shutdown().await;
 }

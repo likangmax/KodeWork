@@ -7,6 +7,7 @@ use crate::backend::SftpBackend;
 use crate::{part_path, SftpError, TransferProgress, TransferRequest, DEFAULT_CHUNK_SIZE};
 use kodework_domain::{TransferDirection, TransferId, TransferStatus};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -578,9 +579,48 @@ async fn download(
         .map_err(|error| SftpError::Backend(format!("local sync: {error}")))?;
     drop(file);
     reader.close().await?;
-    std::fs::rename(&local_part, &request.local_path)
+    replace_local_file(Path::new(&local_part), Path::new(&request.local_path))
         .map_err(|error| SftpError::Backend(format!("local rename: {error}")))?;
     Ok(())
+}
+
+/// Replaces a completed download without failing when the destination already
+/// exists on Windows. The old destination is moved aside first so a failed
+/// final rename can restore it instead of leaving the user without a file.
+fn replace_local_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if !to.exists() {
+            return std::fs::rename(from, to);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = to
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("destination");
+        let backup = to.with_file_name(format!(
+            ".{name}.kodework-old-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::rename(to, &backup)?;
+        match std::fs::rename(from, to) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(backup);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::rename(&backup, to);
+                Err(error)
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
 }
 
 /// Emits progress events at most once per interval or byte step.

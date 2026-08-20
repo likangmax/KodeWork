@@ -7,8 +7,8 @@
 
 use crate::tunnel::{TunnelInfo, TunnelManager};
 use kodework_domain::{
-    classify_danger, validate_remote_path, Action, ActionMode, ConfirmationPolicy, ConnectionState,
-    DangerLevel, Host, HostId, TransferDirection, TransferId,
+    validate_remote_path, Action, ActionMode, ConnectionState, Host, HostId, TransferDirection,
+    TransferId,
 };
 use kodework_herdr::cli::{ExecOutput, HerdrClient, RemoteExecutor};
 use kodework_herdr::HerdrError;
@@ -921,14 +921,9 @@ impl SessionManager {
     ) -> Result<RunOutcome, String> {
         // Recompute the danger level server-side: the renderer-declared
         // field is only a hint and must never gate confirmation.
-        let danger = classify_danger(&action.command);
-        let requires_confirmation = match action.confirmation {
-            ConfirmationPolicy::Always => true,
-            ConfirmationPolicy::OnDangerous => danger != DangerLevel::Safe,
-            ConfirmationPolicy::Never => danger == DangerLevel::Dangerous,
-        };
+        let requires_confirmation = crate::action_requires_confirmation(action);
         if requires_confirmation && !confirmed {
-            return Err("危险动作需要确认后才能运行".to_string());
+            return Err("该动作需要确认后才能运行".to_string());
         }
         let command = build_action_command(action)?;
         match action.mode {

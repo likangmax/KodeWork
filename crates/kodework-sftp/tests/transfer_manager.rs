@@ -160,6 +160,27 @@ async fn download_completes_atomically() {
 }
 
 #[tokio::test]
+async fn download_replaces_existing_destination() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let remote = format!("{REMOTE_DIR}/overwrite.bin");
+    backend.seed(&remote, vec![BYTE_Y; 128 * 1024]);
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    // Windows rename does not replace an existing destination. The transfer
+    // must still complete and leave the new payload in place.
+    let local = temp_file("download-overwrite", 32);
+
+    let id = manager
+        .enqueue(download_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let status = wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await;
+    assert_eq!(status, Some(TransferStatus::Completed));
+    let data = std::fs::read(&local).unwrap_or_else(|error| unreachable!("read: {error}"));
+    assert_eq!(data, vec![BYTE_Y; 128 * 1024]);
+    cleanup(&local);
+}
+
+#[tokio::test]
 async fn pause_then_resume_completes() {
     let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
     let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
