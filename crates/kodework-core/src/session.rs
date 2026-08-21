@@ -208,7 +208,7 @@ impl SessionManager {
                 }
                 Err(error) => {
                     last_error = error.to_string();
-                    if kodework_ssh::host_key_error_is_fatal(&error) {
+                    if !kodework_ssh::address_fallback_is_retryable(&error) {
                         self.set_state(host.id, ConnectionState::Failed);
                         return Err(format!(
                             "fatal connection error for {}: {}",
@@ -1036,6 +1036,8 @@ impl SessionManager {
                     .next()
                     .and_then(|value| value.parse::<i32>().ok())
                     .ok_or_else(|| "remote run exit code is invalid".to_string())?,
+                started_at_ms: parse_epoch_seconds(fields.next()),
+                finished_at_ms: parse_epoch_seconds(fields.next()),
             }),
             Some("running") => Ok(RemoteRunState::Running),
             _ => Ok(RemoteRunState::Unknown),
@@ -1571,8 +1573,16 @@ pub struct RunOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RemoteRunState {
     Running,
-    Completed { exit_code: i32 },
+    Completed {
+        exit_code: i32,
+        started_at_ms: Option<u64>,
+        finished_at_ms: Option<u64>,
+    },
     Unknown,
+}
+
+fn parse_epoch_seconds(value: Option<&str>) -> Option<u64> {
+    value?.parse::<u64>().ok()?.checked_mul(1_000)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1667,6 +1677,17 @@ mod command_safety_tests {
             .unwrap_or_else(|error| unreachable!("valid action should build: {error}"));
         assert!(command.contains("cd -- \"$HOME\" && cd -- 'workspace/project'"));
         assert!(!command.contains("'~/workspace/project'"));
+    }
+
+    #[test]
+    fn remote_epoch_seconds_are_converted_without_overflow() {
+        assert_eq!(
+            parse_epoch_seconds(Some("1720000000")),
+            Some(1_720_000_000_000)
+        );
+        assert_eq!(parse_epoch_seconds(Some("invalid")), None);
+        assert_eq!(parse_epoch_seconds(None), None);
+        assert_eq!(parse_epoch_seconds(Some(&u64::MAX.to_string())), None);
     }
 
     #[tokio::test]

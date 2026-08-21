@@ -106,17 +106,15 @@ impl From<io::Error> for SshError {
     }
 }
 
-/// Marker for errors that must never trigger automatic address fallback.
+/// Returns whether trying another address for the same logical host is safe.
+/// Keep this as an explicit transport-error allowlist: configuration,
+/// authentication, host identity, cancellation and protocol failures require
+/// user action or investigation and must not be hidden by address fallback.
 #[must_use]
-pub fn host_key_error_is_fatal(error: &SshError) -> bool {
+pub fn address_fallback_is_retryable(error: &SshError) -> bool {
     matches!(
         error,
-        SshError::HostKeyChanged
-            | SshError::HostKeyRejected
-            | SshError::HostKeyDecisionTimeout
-            | SshError::HostKeyStoreUnavailable(_)
-            | SshError::AuthenticationFailed
-            | SshError::AuthMethodUnavailable(_)
+        SshError::Timeout | SshError::ConnectionRefused | SshError::Unreachable
     )
 }
 
@@ -125,12 +123,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_key_and_auth_failures_do_not_fallback() {
-        assert!(host_key_error_is_fatal(&SshError::HostKeyChanged));
-        assert!(host_key_error_is_fatal(&SshError::AuthenticationFailed));
-        assert!(!host_key_error_is_fatal(&SshError::Timeout));
-        assert!(!host_key_error_is_fatal(&SshError::ConnectionRefused));
-        assert!(!host_key_error_is_fatal(&SshError::Cancelled));
+    fn only_address_transport_failures_fallback() {
+        assert!(!address_fallback_is_retryable(&SshError::HostKeyChanged));
+        assert!(!address_fallback_is_retryable(
+            &SshError::AuthenticationFailed
+        ));
+        assert!(!address_fallback_is_retryable(
+            &SshError::InvalidConfiguration("bad key".into())
+        ));
+        assert!(!address_fallback_is_retryable(&SshError::Cancelled));
+        assert!(address_fallback_is_retryable(&SshError::Timeout));
+        assert!(address_fallback_is_retryable(&SshError::ConnectionRefused));
+        assert!(address_fallback_is_retryable(&SshError::Unreachable));
     }
 
     #[test]

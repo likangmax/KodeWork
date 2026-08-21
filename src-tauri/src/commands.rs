@@ -1628,20 +1628,21 @@ pub(crate) async fn run_reconcile(
         }));
     }
     let mut completed_probes = Vec::with_capacity(probes.len());
-    let mut probe_error = None;
     for probe in probes {
         match probe.await {
             Ok((run, Ok(remote))) => completed_probes.push((run, remote)),
-            Ok((_, Err(error))) => {
-                probe_error.get_or_insert(error);
+            // A transport/probe failure is not evidence that the remote
+            // command stopped. Persist Unknown for this row and continue
+            // committing successful probes instead of making the batch
+            // all-or-nothing.
+            Ok((run, Err(_))) => {
+                completed_probes.push((run, kodework_core::session::RemoteRunState::Unknown))
             }
-            Err(error) => {
-                probe_error.get_or_insert(format!("reconcile probe stopped: {error}"));
-            }
+            // A panicked/cancelled task cannot safely identify its run here.
+            // Other completed probes are still authoritative and must be
+            // committed; this row remains reconcilable on the next pass.
+            Err(_) => {}
         }
-    }
-    if let Some(error) = probe_error {
-        return Err(error);
     }
 
     let mut reconciled = 0usize;
@@ -1675,21 +1676,25 @@ pub(crate) async fn run_reconcile(
 
 fn reconciled_run_fields(
     remote: kodework_core::session::RemoteRunState,
-    finished_at_ms: u64,
+    observed_at_ms: u64,
 ) -> (kodework_domain::RunStatus, Option<i32>, Option<u64>) {
     use kodework_core::session::RemoteRunState;
     use kodework_domain::RunStatus;
 
     match remote {
         RemoteRunState::Running => (RunStatus::Running, None, None),
-        RemoteRunState::Completed { exit_code } => (
+        RemoteRunState::Completed {
+            exit_code,
+            finished_at_ms,
+            ..
+        } => (
             if exit_code == 0 {
                 RunStatus::Succeeded
             } else {
                 RunStatus::Failed
             },
             Some(exit_code),
-            Some(finished_at_ms),
+            Some(finished_at_ms.unwrap_or(observed_at_ms)),
         ),
         // Unknown means that the remote source of truth is temporarily
         // unavailable; it remains reconcilable and must not look finished.
@@ -1723,11 +1728,25 @@ mod tests {
             (RunStatus::Unknown, None, None)
         );
         assert_eq!(
-            reconciled_run_fields(RemoteRunState::Completed { exit_code: 0 }, 123),
-            (RunStatus::Succeeded, Some(0), Some(123))
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 0,
+                    started_at_ms: Some(1_000),
+                    finished_at_ms: Some(2_000),
+                },
+                123,
+            ),
+            (RunStatus::Succeeded, Some(0), Some(2_000))
         );
         assert_eq!(
-            reconciled_run_fields(RemoteRunState::Completed { exit_code: 17 }, 123),
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 17,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+                123,
+            ),
             (RunStatus::Failed, Some(17), Some(123))
         );
     }
