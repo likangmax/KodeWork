@@ -20,10 +20,13 @@ KodeWork is under active development. The currently distributable desktop produc
 - Background Runs remain `Running` until remote exit metadata is reconciled; launcher success is not command success.
 - Run history snapshots its command and ownership so editing or deleting an Action does not rewrite or erase old records.
 - SFTP resume verifies the existing partial prefix byte-for-byte before seeking.
+- SFTP destination leases reject concurrent writes to the same local or scoped remote target, and transfers verify source metadata again before final commit.
 - Herdr bridge shutdown is PID-owned and readiness-checked rather than pattern-killing unrelated processes.
 - SSH host-key trust is bound to the logical HostId across LAN, Tailscale, and public fallback addresses (schema v10), with legacy address records retained for compatibility.
-- Reconnect retry/backoff is owned by the native layer and guarded single-flight per HostId.
+- Host-key store read failures block verification instead of being treated as an unknown key; lookups do not mutate trust state.
+- Reconnect attempts/backoff are bounded and guarded single-flight in the native command; the renderer triggers the policy, while a process-owned always-on supervisor remains future work.
 - Unknown Action commands require review confirmation by default; only clearly observational commands are classified Safe.
+- Interactive Actions are dispatched to the PTY and intentionally excluded from terminal Run history because the native layer cannot observe their eventual shell exit.
 
 ## Verification policy
 

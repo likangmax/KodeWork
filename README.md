@@ -68,7 +68,7 @@ Most SSH clients stop at “open a shell”. KodeWork treats the remote machine 
 | Clipboard | Mouse selection copy, Herdr/tmux/Vim OSC 52 writes to the Windows clipboard, clipboard reads disabled |
 | Files | Virtualized large directories, SFTP streaming, resume/pause/retry/cancel, per-host pinned folders |
 | Assets | Paste screenshots, images, and PDFs; validate and upload them into the active remote workspace |
-| Automation | Interactive, quick, and background Actions with server-side danger classification and Run history |
+| Automation | Interactive, quick, and background Actions with server-side danger classification; Quick and Background runs have durable history |
 | Preview | SSH local port forwarding and loopback Web Preview |
 | Desktop | English/Chinese UI preference, themes, tray, single instance, autostart, local PowerShell/CMD/WSL terminals, signed updater verification |
 

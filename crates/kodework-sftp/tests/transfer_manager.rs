@@ -4,7 +4,7 @@
 
 use kodework_domain::{TransferDirection, TransferStatus};
 use kodework_sftp::manager::{TransferEvent, TransferManager};
-use kodework_sftp::{TransferRequest, DEFAULT_CHUNK_SIZE};
+use kodework_sftp::{SftpError, TransferRequest, DEFAULT_CHUNK_SIZE};
 use kodework_testkit::fake_sftp::{FakeSftpBackend, FakeSftpFaults};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,6 +99,101 @@ async fn upload_completes_atomically() {
     assert!(
         !backend.contains(&format!("{remote}.part")),
         "no .part may remain after success"
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn same_destination_is_rejected_while_transfer_is_active() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    let local = temp_file("lease", 16 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/lease.bin");
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    let duplicate = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await;
+    assert!(
+        matches!(duplicate, Err(SftpError::DestinationBusy)),
+        "duplicate destination must be rejected: {duplicate:?}"
+    );
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Completed)
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn upload_fails_when_source_changes_before_commit() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("source-changed-upload", 16 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/source-changed-upload.bin");
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    std::fs::write(&local, vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE])
+        .unwrap_or_else(|error| unreachable!("mutate source: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Failed)
+    );
+    assert!(
+        !backend.contains(&remote),
+        "changed source must not be committed"
+    );
+    assert!(backend.contains(&format!("{remote}.part")));
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn download_fails_when_remote_source_changes_before_commit() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        read_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let remote = format!("{REMOTE_DIR}/source-changed-download.bin");
+    backend.seed(&remote, vec![BYTE_X; 16 * DEFAULT_CHUNK_SIZE]);
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("source-changed-download", 8);
+    let id = manager
+        .enqueue(download_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    backend.seed(&remote, vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE]);
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Failed)
+    );
+    assert_eq!(
+        std::fs::read(&local).unwrap_or_else(|error| unreachable!("read destination: {error}")),
+        vec![BYTE_X; 8]
     );
     cleanup(&local);
 }
@@ -253,8 +348,16 @@ async fn cancel_keeps_part_file_for_resume() {
         }
     }
     assert!(started, "transfer must start");
-    // Let a few chunks land, then cancel mid-flight.
-    tokio::time::sleep(Duration::from_millis(3)).await;
+    // Wait until a chunk is durable in the remote `.part`, then cancel
+    // mid-flight. Seeing `Transferring` alone is earlier than `open_write`.
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < progress_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "partial upload must exist"
+    );
     manager
         .cancel(id)
         .unwrap_or_else(|error| unreachable!("cancel: {error}"));
@@ -384,8 +487,16 @@ async fn resume_upload_continues_from_part() {
         }
     }
     assert!(started, "transfer must start");
-    // Let a few chunks land, then cancel mid-flight.
-    tokio::time::sleep(Duration::from_millis(3)).await;
+    // Wait until a chunk is durable in the remote `.part`, then cancel
+    // mid-flight. Seeing `Transferring` alone is earlier than `open_write`.
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < progress_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "partial upload must exist"
+    );
     manager
         .cancel(id)
         .unwrap_or_else(|error| unreachable!("cancel: {error}"));

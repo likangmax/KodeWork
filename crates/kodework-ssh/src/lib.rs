@@ -30,6 +30,11 @@ pub enum SshError {
     /// No host-key decision arrived before the decision deadline.
     #[error("host key decision timed out")]
     HostKeyDecisionTimeout,
+    /// The local trust database could not be read. This is intentionally
+    /// distinct from an absent record so storage failures cannot become an
+    /// unknown-host prompt.
+    #[error("host-key trust store unavailable: {0}")]
+    HostKeyStoreUnavailable(String),
     /// Authentication failed after all configured methods were tried.
     #[error("authentication failed")]
     AuthenticationFailed,
@@ -109,6 +114,7 @@ pub fn host_key_error_is_fatal(error: &SshError) -> bool {
         SshError::HostKeyChanged
             | SshError::HostKeyRejected
             | SshError::HostKeyDecisionTimeout
+            | SshError::HostKeyStoreUnavailable(_)
             | SshError::AuthenticationFailed
             | SshError::AuthMethodUnavailable(_)
     )

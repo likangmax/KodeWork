@@ -53,6 +53,10 @@ pub enum SftpError {
     DiskFull,
     #[error("source file not found")]
     SourceNotFound,
+    #[error("transfer destination is already busy")]
+    DestinationBusy,
+    #[error("source changed during transfer")]
+    SourceChanged,
     #[error("transfer failed after {0} retries")]
     RetriesExhausted(u32),
     #[error("unknown transfer id")]

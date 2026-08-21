@@ -45,6 +45,11 @@ struct TransferControls {
     transferred: AtomicU64,
 }
 
+/// Shared destination lease registry. A registry can be shared by multiple
+/// per-host managers so two workflows cannot write the same local destination
+/// (or the same scoped remote destination) concurrently.
+pub type TransferLeaseRegistry = Arc<Mutex<HashMap<String, TransferId>>>;
+
 impl TransferControls {
     fn new(retries: u32) -> Self {
         Self {
@@ -69,6 +74,8 @@ pub struct TransferManager {
     semaphore: Arc<Semaphore>,
     controls: Arc<Mutex<HashMap<TransferId, Arc<TransferControls>>>>,
     requests: Arc<Mutex<HashMap<TransferId, TransferRequest>>>,
+    leases: TransferLeaseRegistry,
+    lease_scope: String,
     events: mpsc::Sender<TransferEvent>,
     chunk_size: usize,
 }
@@ -82,6 +89,26 @@ impl TransferManager {
         max_concurrency: usize,
         event_buffer: usize,
     ) -> (Self, mpsc::Receiver<TransferEvent>) {
+        Self::new_with_leases(
+            backend,
+            max_concurrency,
+            event_buffer,
+            Arc::new(Mutex::new(HashMap::new())),
+            "default",
+        )
+    }
+
+    /// Creates a manager using a caller-owned lease registry and namespace.
+    /// The namespace should identify the remote host when several managers
+    /// share one registry; local destinations remain globally protected while
+    /// remote paths are isolated per namespace.
+    pub fn new_with_leases(
+        backend: Arc<dyn SftpBackend>,
+        max_concurrency: usize,
+        event_buffer: usize,
+        leases: TransferLeaseRegistry,
+        lease_scope: impl Into<String>,
+    ) -> (Self, mpsc::Receiver<TransferEvent>) {
         let max_concurrency = max_concurrency.clamp(1, crate::MAX_CONCURRENCY_CEILING);
         let (events, receiver) = mpsc::channel(event_buffer.max(8));
         let manager = Self {
@@ -90,6 +117,8 @@ impl TransferManager {
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             controls: Arc::new(Mutex::new(HashMap::new())),
             requests: Arc::new(Mutex::new(HashMap::new())),
+            leases,
+            lease_scope: lease_scope.into(),
             events,
             chunk_size: DEFAULT_CHUNK_SIZE,
         };
@@ -135,13 +164,36 @@ impl TransferManager {
     ) -> Result<(TransferId, Option<oneshot::Receiver<Result<(), SftpError>>>), SftpError> {
         crate::validate_request(&request)?;
         let id = TransferId::new();
+        let lease = lease_key(&self.lease_scope, &request);
+        {
+            let mut guard = self.leases.lock().map_err(lock_error)?;
+            if guard.contains_key(&lease) {
+                return Err(SftpError::DestinationBusy);
+            }
+            guard.insert(lease.clone(), id);
+        }
         let controls = Arc::new(TransferControls::new(retries));
         {
-            let mut guard = self.controls.lock().map_err(lock_error)?;
+            let mut guard = match self.controls.lock() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    release_lease(&self.leases, &lease, id);
+                    return Err(lock_error(error));
+                }
+            };
             guard.insert(id, Arc::clone(&controls));
         }
         {
-            let mut guard = self.requests.lock().map_err(lock_error)?;
+            let mut guard = match self.requests.lock() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    if let Ok(mut controls) = self.controls.lock() {
+                        controls.remove(&id);
+                    }
+                    release_lease(&self.leases, &lease, id);
+                    return Err(lock_error(error));
+                }
+            };
             guard.insert(id, request.clone());
         }
         self.emit_state(id, TransferStatus::Queued).await;
@@ -151,7 +203,7 @@ impl TransferManager {
         } else {
             (None, None)
         };
-        self.spawn_worker(id, request, controls, completion_tx);
+        self.spawn_worker(id, request, controls, completion_tx, lease);
         Ok((id, completion_rx))
     }
 
@@ -202,8 +254,16 @@ impl TransferManager {
             .retries_left
             .store(controls.max_retries, Ordering::SeqCst);
         controls.transferred.store(0, Ordering::SeqCst);
+        let lease = lease_key(&self.lease_scope, &request);
+        {
+            let mut guard = self.leases.lock().map_err(lock_error)?;
+            if guard.get(&lease).is_some_and(|owner| *owner != id) {
+                return Err(SftpError::DestinationBusy);
+            }
+            guard.insert(lease.clone(), id);
+        }
         self.emit_state(id, TransferStatus::Queued).await;
-        self.spawn_worker(id, request, controls, None);
+        self.spawn_worker(id, request, controls, None, lease);
         Ok(())
     }
 
@@ -221,6 +281,7 @@ impl TransferManager {
         request: TransferRequest,
         controls: Arc<TransferControls>,
         completion: Option<oneshot::Sender<Result<(), SftpError>>>,
+        lease: String,
     ) {
         let backend = Arc::clone(&self.backend);
         let semaphore = Arc::clone(&self.semaphore);
@@ -228,11 +289,16 @@ impl TransferManager {
         let chunk_size = self.chunk_size;
         let controls_map = Arc::clone(&self.controls);
         let requests_map = Arc::clone(&self.requests);
+        let leases = Arc::clone(&self.leases);
         let generation = controls.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let reaper_controls = Arc::clone(&controls);
         tokio::spawn(async move {
             let permit = semaphore.acquire().await;
             let outcome = run_transfer(backend, id, request, controls, events, chunk_size).await;
+            // The worker has stopped touching the destination, so a new
+            // enqueue may proceed immediately. Reaper cleanup remains a
+            // second defensive release for abnormal timing.
+            release_lease(&leases, &lease, id);
             if let Some(completion) = completion {
                 let _ = completion.send(outcome);
             }
@@ -252,6 +318,7 @@ impl TransferManager {
                 if let Ok(mut guard) = requests_map.lock() {
                     guard.remove(&id);
                 }
+                release_lease(&leases, &lease, id);
             }
         });
     }
@@ -268,6 +335,51 @@ impl TransferManager {
 
 fn lock_error<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> SftpError {
     SftpError::Backend("transfer manager lock poisoned".into())
+}
+
+fn release_lease(leases: &TransferLeaseRegistry, lease: &str, id: TransferId) {
+    if let Ok(mut guard) = leases.lock() {
+        if guard.get(lease).copied() == Some(id) {
+            guard.remove(lease);
+        }
+    }
+}
+
+fn lease_key(scope: &str, request: &TransferRequest) -> String {
+    match request.direction {
+        kodework_domain::TransferDirection::Upload => {
+            format!(
+                "remote:{scope}:{}",
+                normalize_remote_path(&request.remote_path)
+            )
+        }
+        kodework_domain::TransferDirection::Download => {
+            format!("local:{}", normalize_local_path(&request.local_path))
+        }
+    }
+}
+
+fn normalize_remote_path(path: &str) -> String {
+    let mut normalized = path.to_string();
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn normalize_local_path(path: &str) -> String {
+    let path = Path::new(path);
+    let normalized = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    normalized.to_string_lossy().to_ascii_lowercase()
 }
 
 async fn run_transfer(
@@ -312,6 +424,24 @@ async fn run_transfer(
                 })
                 .await;
             return Err(SftpError::Cancelled);
+        }
+        // A changed source is a correctness failure, not a transient network
+        // failure. Retrying automatically could silently publish a different
+        // payload, so leave the .part file for an explicit user retry.
+        if matches!(error, SftpError::SourceChanged) {
+            let _ = events
+                .send(TransferEvent::Failed {
+                    id,
+                    message: error.to_string(),
+                })
+                .await;
+            let _ = events
+                .send(TransferEvent::State {
+                    id,
+                    status: TransferStatus::Failed,
+                })
+                .await;
+            return Err(error);
         }
         let retries_left = controls.retries_left.load(Ordering::SeqCst);
         if retries_left == 0 {
@@ -403,11 +533,22 @@ async fn upload(
                 SftpError::Backend(format!("local open: {error}"))
             }
         })?;
-    let total = local
+    let initial_handle_meta = local
         .metadata()
         .await
-        .map_err(|error| SftpError::Backend(format!("local metadata: {error}")))?
-        .len();
+        .map_err(|error| SftpError::Backend(format!("local metadata: {error}")))?;
+    let initial_handle_identity = LocalFileIdentity::from_metadata(&initial_handle_meta);
+    let total = initial_handle_meta.len();
+    let initial_path_meta = tokio::fs::metadata(&request.local_path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SftpError::SourceChanged
+            } else {
+                SftpError::Backend(format!("local path metadata: {error}"))
+            }
+        })?;
+    let initial_identity = LocalFileIdentity::from_metadata(&initial_path_meta);
 
     let remote_part = part_path(&request.remote_path);
     // Resume only when the partial file is consistent: it must not be
@@ -470,6 +611,25 @@ async fn upload(
 
     writer.flush().await?;
     writer.close().await?;
+    let final_handle_meta = local
+        .metadata()
+        .await
+        .map_err(|error| SftpError::Backend(format!("local final handle metadata: {error}")))?;
+    let final_path_meta = tokio::fs::metadata(&request.local_path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SftpError::SourceChanged
+            } else {
+                SftpError::Backend(format!("local final metadata: {error}"))
+            }
+        })?;
+    if transferred != total
+        || LocalFileIdentity::from_metadata(&final_handle_meta) != initial_handle_identity
+        || LocalFileIdentity::from_metadata(&final_path_meta) != initial_identity
+    {
+        return Err(SftpError::SourceChanged);
+    }
     backend
         .rename(&remote_part, &request.remote_path)
         .await
@@ -579,9 +739,31 @@ async fn download(
         .map_err(|error| SftpError::Backend(format!("local sync: {error}")))?;
     drop(file);
     reader.close().await?;
+    let final_meta = backend.stat(&request.remote_path).await?;
+    let source_unchanged = final_meta.as_ref().is_some_and(|current| {
+        !current.is_dir && current.size == meta.size && current.modified_ms == meta.modified_ms
+    });
+    if transferred != total || !source_unchanged {
+        return Err(SftpError::SourceChanged);
+    }
     replace_local_file(Path::new(&local_part), Path::new(&request.local_path))
         .map_err(|error| SftpError::Backend(format!("local rename: {error}")))?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalFileIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl LocalFileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
 }
 
 /// Replaces a completed download without failing when the destination already

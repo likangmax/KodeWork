@@ -506,12 +506,17 @@ pub(crate) async fn reconnect_host(
     let result = async {
         let mut last_error = String::from("reconnect failed");
         for attempt in 0..3u32 {
-            if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+            // `connect_host_inner` legitimately moves the session through
+            // Resolving/Connecting and leaves it Failed after a transient
+            // attempt. The reconnect ownership set, not the transient
+            // connection state, is the retry gate; otherwise the first
+            // failure cancels attempts 2 and 3.
+            if !reconnect_is_active(&state, host_id)? {
                 return Err("reconnect cancelled".to_string());
             }
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(1200 * attempt as u64)).await;
-                if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+                if !reconnect_is_active(&state, host_id)? {
                     return Err("reconnect cancelled".to_string());
                 }
             }
@@ -539,6 +544,14 @@ pub(crate) async fn reconnect_host(
         .map_err(|_| AppError::StatePoisoned.to_string())?
         .remove(&host_id);
     result
+}
+
+fn reconnect_is_active(state: &AppState, host_id: HostId) -> Result<bool, String> {
+    Ok(state
+        .reconnecting
+        .lock()
+        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .contains(&host_id))
 }
 
 fn reconnect_error_is_retryable(error: &str) -> bool {
@@ -1381,6 +1394,17 @@ pub(crate) async fn run_action(
         return Err("该动作需要确认后才能运行".to_string());
     }
 
+    // An interactive command has no native exit boundary: the PTY shell owns
+    // its eventual status and may run indefinitely. Persisting it as a
+    // terminal Run would create a misleading permanent Unknown row, so only
+    // Quick and Background actions enter Run History.
+    if action.mode == kodework_domain::ActionMode::Interactive {
+        return state
+            .sessions
+            .run_action_with_id(host_id, &action, confirmed, None)
+            .await;
+    }
+
     let started_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -1565,12 +1589,41 @@ pub(crate) async fn run_reconcile(
             .list_reconcilable_by_host(host_id, 100)
             .map_err(|error| error.to_string())?
     };
-    let mut reconciled = 0usize;
+    // Probe several detached runs concurrently, but keep a small bound so a
+    // reconnect cannot turn a large history page into an SSH channel storm.
+    let probe_limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut probes = Vec::with_capacity(runs.len());
     for run in runs {
-        let remote = state
-            .sessions
-            .reconcile_background_run(host_id, run.id)
-            .await?;
+        let permit = std::sync::Arc::clone(&probe_limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| "reconcile probe limit closed".to_string())?;
+        let sessions = state.sessions.clone();
+        probes.push(tauri::async_runtime::spawn(async move {
+            let _permit = permit;
+            let result = sessions.reconcile_background_run(host_id, run.id).await;
+            (run, result)
+        }));
+    }
+    let mut completed_probes = Vec::with_capacity(probes.len());
+    let mut probe_error = None;
+    for probe in probes {
+        match probe.await {
+            Ok((run, Ok(remote))) => completed_probes.push((run, remote)),
+            Ok((_, Err(error))) => {
+                probe_error.get_or_insert(error);
+            }
+            Err(error) => {
+                probe_error.get_or_insert(format!("reconcile probe stopped: {error}"));
+            }
+        }
+    }
+    if let Some(error) = probe_error {
+        return Err(error);
+    }
+
+    let mut reconciled = 0usize;
+    for (run, remote) in completed_probes {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?

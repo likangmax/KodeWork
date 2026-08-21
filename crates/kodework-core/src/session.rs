@@ -14,7 +14,7 @@ use kodework_herdr::cli::{ExecOutput, HerdrClient, RemoteExecutor};
 use kodework_herdr::HerdrError;
 use kodework_network::CandidateResolver;
 use kodework_sftp::backend::{RemoteFileMeta, RusshSftpBackend, SftpBackend};
-use kodework_sftp::manager::{TransferEvent, TransferManager};
+use kodework_sftp::manager::{TransferEvent, TransferLeaseRegistry, TransferManager};
 use kodework_sftp::{TransferRequest, DEFAULT_MAX_CONCURRENCY};
 use kodework_ssh::connection::{
     AuthMethod, CommandOutput, ConnectionOptions, JumpSpec, ProxyCommand, SshConnection, SshPty,
@@ -66,6 +66,7 @@ pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<HostId, ActiveSession>>>,
     event_buffer: usize,
     connect_timeout: Duration,
+    transfer_leases: TransferLeaseRegistry,
 }
 
 /// A session-event subscription: optional channel filter plus sender.
@@ -138,6 +139,7 @@ impl SessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: event_buffer.max(8),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            transfer_leases: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -579,7 +581,13 @@ impl SessionManager {
         }
         let sftp = self.sftp_session(host_id).await?;
         let backend: Arc<dyn SftpBackend> = Arc::new(RusshSftpBackend::new(sftp));
-        let (manager, events) = TransferManager::new(backend, DEFAULT_MAX_CONCURRENCY, 512);
+        let (manager, events) = TransferManager::new_with_leases(
+            backend,
+            DEFAULT_MAX_CONCURRENCY,
+            512,
+            Arc::clone(&self.transfer_leases),
+            host_id.as_uuid().simple().to_string(),
+        );
         let manager = Arc::new(manager);
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let dropped_events = Arc::new(AtomicU64::new(0));

@@ -173,7 +173,11 @@ impl SftpBackend for RusshSftpBackend {
             name: path.rsplit('/').next().unwrap_or(path).to_string(),
             size: meta.len(),
             is_dir: meta.is_dir(),
-            modified_ms: None,
+            modified_ms: meta
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64),
         }))
     }
 

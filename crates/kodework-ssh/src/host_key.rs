@@ -47,10 +47,15 @@ pub enum HostKeyDecision {
 
 /// Persistent store for trusted host keys (metadata only).
 pub trait KnownHosts: Send + Sync {
-    fn lookup(&self, hostname: &str, port: u16) -> Option<HostKeyInfo>;
+    fn lookup(&self, hostname: &str, port: u16) -> Result<Option<HostKeyInfo>, String>;
     fn save(&self, hostname: &str, port: u16, key: &HostKeyInfo) -> Result<(), String>;
 
-    fn lookup_for_host(&self, _host_id: HostId, hostname: &str, port: u16) -> Option<HostKeyInfo> {
+    fn lookup_for_host(
+        &self,
+        _host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<HostKeyInfo>, String> {
         self.lookup(hostname, port)
     }
 
@@ -80,12 +85,13 @@ impl MemoryKnownHosts {
 }
 
 impl KnownHosts for MemoryKnownHosts {
-    fn lookup(&self, hostname: &str, port: u16) -> Option<HostKeyInfo> {
-        self.keys
+    fn lookup(&self, hostname: &str, port: u16) -> Result<Option<HostKeyInfo>, String> {
+        Ok(self
+            .keys
             .lock()
-            .ok()?
+            .map_err(|_| "known-hosts lock poisoned".to_string())?
             .get(&(hostname.to_string(), port))
-            .cloned()
+            .cloned())
     }
 
     fn save(&self, hostname: &str, port: u16, key: &HostKeyInfo) -> Result<(), String> {
@@ -97,12 +103,22 @@ impl KnownHosts for MemoryKnownHosts {
         Ok(())
     }
 
-    fn lookup_for_host(&self, host_id: HostId, hostname: &str, port: u16) -> Option<HostKeyInfo> {
-        self.host_keys
+    fn lookup_for_host(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<HostKeyInfo>, String> {
+        let host_key = self
+            .host_keys
             .lock()
-            .ok()
-            .and_then(|keys| keys.get(&host_id).cloned())
-            .or_else(|| self.lookup(hostname, port))
+            .map_err(|_| "known-hosts lock poisoned".to_string())?
+            .get(&host_id)
+            .cloned();
+        match host_key {
+            Some(key) => Ok(Some(key)),
+            None => self.lookup(hostname, port),
+        }
     }
 
     fn save_for_host(
@@ -219,9 +235,16 @@ impl HostKeyBroker {
             key_blob_base64: key.public_key_base64(),
         };
 
-        let saved = host_id
-            .and_then(|id| self.known.lookup_for_host(id, hostname, port))
-            .or_else(|| self.known.lookup(hostname, port));
+        let saved = match host_id {
+            Some(id) => self
+                .known
+                .lookup_for_host(id, hostname, port)
+                .map_err(SshError::HostKeyStoreUnavailable)?,
+            None => self
+                .known
+                .lookup(hostname, port)
+                .map_err(SshError::HostKeyStoreUnavailable)?,
+        };
         if let Some(saved) = saved {
             if saved.fingerprint == fingerprint && !saved.key_blob_base64.is_empty() {
                 if saved.key_blob_base64 == info.key_blob_base64 {
@@ -285,6 +308,18 @@ impl HostKeyBroker {
 mod tests {
     use super::*;
     use russh::keys::ssh_key::PrivateKey;
+
+    struct BrokenKnownHosts;
+
+    impl KnownHosts for BrokenKnownHosts {
+        fn lookup(&self, _hostname: &str, _port: u16) -> Result<Option<HostKeyInfo>, String> {
+            Err("database unavailable".to_string())
+        }
+
+        fn save(&self, _hostname: &str, _port: u16, _key: &HostKeyInfo) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     fn test_key() -> PublicKey {
         let mut rng = rand::rng();
@@ -368,6 +403,20 @@ mod tests {
         assert!(
             broker.drain_requests().is_empty(),
             "no prompt for known key"
+        );
+    }
+
+    #[tokio::test]
+    async fn known_hosts_store_error_blocks_without_prompt() {
+        let broker = HostKeyBroker::new(Arc::new(BrokenKnownHosts), Duration::from_secs(5));
+        let result = broker.verify("lab.example", 22, &test_key()).await;
+        assert!(matches!(
+            result,
+            Err(SshError::HostKeyStoreUnavailable(message)) if message == "database unavailable"
+        ));
+        assert!(
+            broker.drain_requests().is_empty(),
+            "storage failures must not turn into an unknown-key prompt"
         );
     }
 

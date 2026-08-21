@@ -21,10 +21,15 @@ impl SqliteKnownHosts {
 }
 
 impl KnownHosts for SqliteKnownHosts {
-    fn lookup(&self, hostname: &str, port: u16) -> Option<HostKeyInfo> {
-        let guard = self.database.lock().ok()?;
+    fn lookup(&self, hostname: &str, port: u16) -> Result<Option<HostKeyInfo>, String> {
+        let guard = self
+            .database
+            .lock()
+            .map_err(|_| "host-key database lock poisoned".to_string())?;
         let repo = HostKeyRepository::new(guard.connection());
-        repo.get(hostname, port).ok().flatten().map(record_to_info)
+        repo.get(hostname, port)
+            .map(|record| record.map(record_to_info))
+            .map_err(|error| error.to_string())
     }
 
     fn save(&self, hostname: &str, port: u16, key: &HostKeyInfo) -> Result<(), String> {
@@ -43,35 +48,46 @@ impl KnownHosts for SqliteKnownHosts {
         repo.save(&record).map_err(|error| error.to_string())
     }
 
-    fn lookup_for_host(&self, host_id: HostId, hostname: &str, port: u16) -> Option<HostKeyInfo> {
-        let guard = self.database.lock().ok()?;
+    fn lookup_for_host(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<HostKeyInfo>, String> {
+        let guard = self
+            .database
+            .lock()
+            .map_err(|_| "host-key database lock poisoned".to_string())?;
         let repo = HostKeyRepository::new(guard.connection());
-        if let Some(record) = repo.get_for_host(host_id).ok().flatten() {
-            return Some(HostKeyInfo {
+        if let Some(record) = repo
+            .get_for_host(host_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(HostKeyInfo {
                 hostname: hostname.to_string(),
                 port,
                 algorithm: record.algorithm,
                 fingerprint: record.fingerprint,
                 key_blob_base64: record.key_blob_base64,
-            });
+            }));
         }
-        let legacy = repo.get(hostname, port).ok().flatten()?;
-        let info = record_to_info(legacy);
-        let promoted = HostKeyIdentityRecord::new(
-            host_id,
-            info.algorithm.clone(),
-            info.fingerprint.clone(),
-            info.key_blob_base64.clone(),
-        );
-        // A matching legacy address record is authoritative enough to avoid a
-        // new prompt. Promote it immediately so future fallback addresses for
-        // this logical Host use the same identity.
-        repo.save_for_host(&promoted).ok()?;
-        Some(HostKeyInfo {
-            hostname: hostname.to_string(),
-            port,
-            ..info
-        })
+        let Some(legacy) = repo
+            .get(hostname, port)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        // Lookup is intentionally read-only. A legacy address record can
+        // authenticate this exact endpoint, but promoting it to a HostId
+        // identity changes trust state and must happen only through the
+        // explicit TrustAndSave decision path (`save_for_host`).
+        Ok(Some(HostKeyInfo {
+            hostname: legacy.hostname,
+            port: legacy.port,
+            algorithm: legacy.algorithm,
+            fingerprint: legacy.fingerprint,
+            key_blob_base64: legacy.key_blob_base64,
+        }))
     }
 
     fn save_for_host(
