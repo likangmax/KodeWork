@@ -998,14 +998,22 @@ mod tests {
 
     #[test]
     fn local_lease_key_collapses_parent_components() {
+        let (first_path, second_path) = if cfg!(windows) {
+            (
+                r"C:\workspace\models\..\model.bin",
+                r"C:\workspace\model.bin",
+            )
+        } else {
+            ("/workspace/models/../model.bin", "/workspace/model.bin")
+        };
         let first = TransferRequest {
-            local_path: r"C:\workspace\models\..\model.bin".into(),
+            local_path: first_path.into(),
             remote_path: "~/model.bin".into(),
             direction: TransferDirection::Download,
             resume: false,
         };
         let second = TransferRequest {
-            local_path: r"C:\workspace\model.bin".into(),
+            local_path: second_path.into(),
             ..first.clone()
         };
         assert_eq!(
