@@ -134,7 +134,10 @@ Tailscale supplies a network path or address discovery. It does not replace SSH 
 
 ## Security boundary
 
-- SQLite stores host/project metadata and opaque credential references, never secret values.
+- SQLite stores host/project metadata and opaque credential references, never
+  managed credentials or persisted command output. User-authored Actions,
+  environment values, and snippets are workspace text, so users must not use
+  those fields as a credential store.
 - Windows credentials use native protected storage; private-key material is handled by the platform adapter.
 - Auth keys are short-lived inputs and are never written to README files, fixtures, logs, or ordinary renderer persistence.
 - Remote paths are validated before clipboard-asset upload; uploads are staged and atomically renamed.
