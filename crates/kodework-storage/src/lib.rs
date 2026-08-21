@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub mod host_keys;
 pub mod repositories;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -70,6 +70,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 10,
         name: "host_scoped_host_key_identities",
         sql: "CREATE TABLE host_key_identities (host_id BLOB PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL, fingerprint TEXT NOT NULL, key_blob_base64 TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);",
+    },
+    Migration {
+        version: 11,
+        name: "remove_persisted_run_output_previews",
+        sql: "UPDATE runs SET stdout_preview = '', stderr_preview = '';",
     },
 ];
 
@@ -388,7 +393,8 @@ pub(crate) fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use kodework_domain::{
-        AddressKind, CredentialProvider, CredentialRef, RuntimeKind, TailscaleConfig, TailscaleMode,
+        AddressKind, CredentialProvider, CredentialRef, RunId, RuntimeKind, TailscaleConfig,
+        TailscaleMode,
     };
 
     fn fixture_host() -> Host {
@@ -456,6 +462,52 @@ mod tests {
     #[test]
     fn migration_plan_is_strictly_ordered() {
         assert!(validate_migrations().is_ok());
+    }
+
+    #[test]
+    fn migration_11_clears_legacy_run_output_previews() {
+        let connection = rusqlite::Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("open migration fixture: {error}"));
+        for migration in &MIGRATIONS[..10] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| {
+                    unreachable!("apply migration {}: {error}", migration.version)
+                });
+        }
+        let host_id = HostId::new();
+        connection
+            .execute(
+                "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path)
+                 VALUES (?1, 'legacy host', 'tester', 22, NULL, NULL, 'Tmux', NULL, NULL, NULL, 'Password', NULL, '/')",
+                rusqlite::params![host_id.as_uuid().as_bytes()],
+            )
+            .unwrap_or_else(|error| unreachable!("insert legacy host: {error}"));
+        let run_id = RunId::new();
+        connection
+            .execute(
+                "INSERT INTO runs (id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms)
+                 VALUES (?1, NULL, ?2, NULL, 'legacy', 'echo legacy', 'Background', NULL, 'Running', NULL, NULL, NULL, NULL, ?3, ?4, 7, NULL)",
+                rusqlite::params![
+                    run_id.as_uuid().as_bytes(),
+                    host_id.as_uuid().as_bytes(),
+                    "legacy stdout secret",
+                    "legacy stderr secret",
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("insert legacy run: {error}"));
+
+        connection
+            .execute_batch(MIGRATIONS[10].sql)
+            .unwrap_or_else(|error| unreachable!("apply migration 11: {error}"));
+        let previews: (String, String) = connection
+            .query_row(
+                "SELECT stdout_preview, stderr_preview FROM runs WHERE id = ?1",
+                rusqlite::params![run_id.as_uuid().as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|error| unreachable!("read migrated run: {error}"));
+        assert_eq!(previews, (String::new(), String::new()));
     }
 
     #[test]

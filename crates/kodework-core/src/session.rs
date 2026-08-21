@@ -1293,6 +1293,12 @@ async fn pump_events(
     // subscribers for the same filter are best-effort mirrors.
     let mut primaries: HashMap<Option<u32>, mpsc::Sender<SessionEvent>> = HashMap::new();
     while let Some(event) = events.recv().await {
+        // A reconnect installs a new transport generation while an older
+        // pump may still be draining its channel. Drop stale events before
+        // they can reach subscribers or the bounded pending-event replay.
+        if session.generation.load(Ordering::SeqCst) != generation {
+            continue;
+        }
         let subscribers = {
             let Ok(mut guard) = session.subscribers.lock() else {
                 break;
@@ -1661,6 +1667,42 @@ mod command_safety_tests {
             .unwrap_or_else(|error| unreachable!("valid action should build: {error}"));
         assert!(command.contains("cd -- \"$HOME\" && cd -- 'workspace/project'"));
         assert!(!command.contains("'~/workspace/project'"));
+    }
+
+    #[tokio::test]
+    async fn stale_generation_events_are_dropped_before_replay() {
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (subscriber_tx, mut subscriber_rx) = mpsc::channel(2);
+        let session = Arc::new(ActiveSession {
+            state: Arc::new(Mutex::new(ConnectionState::Ready)),
+            generation: Arc::new(AtomicU64::new(2)),
+            connect_guard: Arc::new(tokio::sync::Mutex::new(())),
+            connection: Arc::new(Mutex::new(None::<Arc<SshConnection>>)),
+            panes: Arc::new(Mutex::new(HashMap::new())),
+            next_pane: Arc::new(AtomicU32::new(0)),
+            sftp: Arc::new(Mutex::new(None::<Arc<russh_sftp::client::SftpSession>>)),
+            transfers: Arc::new(Mutex::new(None::<TransferSlot>)),
+            subscribers: Arc::new(Mutex::new(vec![(None, subscriber_tx)])),
+            pending_events: Arc::new(Mutex::new(HashMap::new())),
+            dropped_events: Arc::new(AtomicU64::new(0)),
+        });
+
+        event_tx
+            .send(SessionEvent::Data {
+                channel: 7,
+                bytes: b"stale transport output".to_vec(),
+            })
+            .await
+            .unwrap_or_else(|error| unreachable!("send stale event: {error}"));
+        drop(event_tx);
+        pump_events(session.clone(), event_rx, 1).await;
+
+        assert!(subscriber_rx.try_recv().is_err());
+        assert!(session
+            .pending_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 }
 

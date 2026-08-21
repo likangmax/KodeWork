@@ -1575,8 +1575,6 @@ pub(crate) async fn run_reconcile(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<usize, String> {
-    use kodework_core::session::RemoteRunState;
-    use kodework_domain::RunStatus;
     use kodework_storage::repositories::RunRepository;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1628,19 +1626,7 @@ pub(crate) async fn run_reconcile(
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_millis() as u64;
-        let (status, exit_code, finished) = match remote {
-            RemoteRunState::Running => (RunStatus::Running, None, None),
-            RemoteRunState::Completed { exit_code } => (
-                if exit_code == 0 {
-                    RunStatus::Succeeded
-                } else {
-                    RunStatus::Failed
-                },
-                Some(exit_code),
-                Some(now),
-            ),
-            RemoteRunState::Unknown => (RunStatus::Unknown, None, Some(now)),
-        };
+        let (status, exit_code, finished) = reconciled_run_fields(remote, now);
         let db = state
             .database
             .lock()
@@ -1663,9 +1649,35 @@ pub(crate) async fn run_reconcile(
     Ok(reconciled)
 }
 
+fn reconciled_run_fields(
+    remote: kodework_core::session::RemoteRunState,
+    finished_at_ms: u64,
+) -> (kodework_domain::RunStatus, Option<i32>, Option<u64>) {
+    use kodework_core::session::RemoteRunState;
+    use kodework_domain::RunStatus;
+
+    match remote {
+        RemoteRunState::Running => (RunStatus::Running, None, None),
+        RemoteRunState::Completed { exit_code } => (
+            if exit_code == 0 {
+                RunStatus::Succeeded
+            } else {
+                RunStatus::Failed
+            },
+            Some(exit_code),
+            Some(finished_at_ms),
+        ),
+        // Unknown means that the remote source of truth is temporarily
+        // unavailable; it remains reconcilable and must not look finished.
+        RemoteRunState::Unknown => (RunStatus::Unknown, None, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::reconnect_error_is_retryable;
+    use super::{reconciled_run_fields, reconnect_error_is_retryable};
+    use kodework_core::session::RemoteRunState;
+    use kodework_domain::RunStatus;
 
     #[test]
     fn reconnect_does_not_retry_fatal_or_credential_errors() {
@@ -1678,5 +1690,21 @@ mod tests {
         ));
         assert!(reconnect_error_is_retryable("connection timed out"));
         assert!(reconnect_error_is_retryable("remote host is unreachable"));
+    }
+
+    #[test]
+    fn unknown_reconciliation_keeps_run_open_for_later_evidence() {
+        assert_eq!(
+            reconciled_run_fields(RemoteRunState::Unknown, 123),
+            (RunStatus::Unknown, None, None)
+        );
+        assert_eq!(
+            reconciled_run_fields(RemoteRunState::Completed { exit_code: 0 }, 123),
+            (RunStatus::Succeeded, Some(0), Some(123))
+        );
+        assert_eq!(
+            reconciled_run_fields(RemoteRunState::Completed { exit_code: 17 }, 123),
+            (RunStatus::Failed, Some(17), Some(123))
+        );
     }
 }

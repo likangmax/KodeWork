@@ -107,6 +107,11 @@ shows `Unknown` instead of guessing failure or success. Deleting an Action or
 Project does not erase its historical Run; deleting the Host intentionally
 removes all host-owned records.
 
+Run history stores lifecycle metadata, command snapshots, and byte counts only.
+Stdout/stderr previews are kept in memory for the active result view and are
+never persisted to SQLite; migration 11 also clears previews written by older
+versions.
+
 ## Address and authentication flow
 
 1. Resolve a host into ordered candidates (manual, LAN, Tailscale, public, or jump-host route).
@@ -114,6 +119,9 @@ removes all host-owned records.
 3. Verify the SSH host-key fingerprint before accepting the session. Trust is bound to the logical `HostId`, so LAN, Tailscale, and public fallback paths for one workstation must present the same identity; legacy address-scoped records remain a compatibility fallback. A changed key is a hard failure.
 4. Authenticate with password, private key, Windows SSH Agent/Pageant, or keyboard-interactive prompts.
 5. Create independent PTY, exec, SFTP, and tunnel channels under one connection generation.
+6. Event pumps reject stale transport generations before forwarding data or
+   adding it to the bounded pane replay buffer, so reconnects cannot mix old
+   output into the new session.
 
 Tailscale supplies a network path or address discovery. It does not replace SSH authentication or host-key verification.
 
@@ -128,8 +136,9 @@ Tailscale supplies a network path or address discovery. It does not replace SSH 
   constructs are Review; a UI flag cannot downgrade the server decision.
 - Herdr socket bridges record the exact remote `socat` PID, verify readiness,
   and stop only that owned process. They never use broad `pkill -f` matching.
-- Host-key identities are stored per logical Host in schema v10, preventing an
-  address fallback from silently becoming a different trusted workstation.
+- Host-key identities were introduced per logical Host in schema v10, preventing
+  an address fallback from silently becoming a different trusted workstation;
+  the current storage schema is v11, which also removes persisted run output.
 - Production CSP is restrictive; loopback frames are allowed only for an explicit SSH Web Preview tunnel.
 
 See the numbered decisions in [`adr/`](adr/) for the rationale behind these boundaries.

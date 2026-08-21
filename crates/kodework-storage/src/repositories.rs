@@ -222,7 +222,11 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<Action> {
         })?,
     })
 }
-/// Runs: execution records for actions.
+/// Runs: durable lifecycle records for actions.
+///
+/// Command output is intentionally ephemeral. The native command may return a
+/// bounded preview to the active renderer, but this repository never writes
+/// stdout/stderr previews to SQLite because remote output can contain secrets.
 pub struct RunRepository<'a> {
     connection: &'a Connection,
 }
@@ -251,8 +255,8 @@ impl<'a> RunRepository<'a> {
                 run.finished_at_ms,
                 run.exit_code,
                 run.remote_session_ref,
-                run.stdout_preview,
-                run.stderr_preview,
+                "",
+                "",
                 run.output_bytes,
                 run.last_reconciled_at_ms,
             ],
@@ -330,8 +334,8 @@ impl<'a> RunRepository<'a> {
         finished_at_ms: Option<u64>,
         remote_session_ref: Option<&str>,
         output_bytes: u64,
-        stdout_preview: &str,
-        stderr_preview: &str,
+        _stdout_preview: &str,
+        _stderr_preview: &str,
         reconciled_at_ms: Option<u64>,
     ) -> Result<(), StorageError> {
         let current = self.current_status(id)?;
@@ -346,8 +350,8 @@ impl<'a> RunRepository<'a> {
                 finished_at_ms,
                 remote_session_ref,
                 output_bytes,
-                stdout_preview,
-                stderr_preview,
+                "",
+                "",
                 reconciled_at_ms,
                 id_to_blob!(id)
             ],
@@ -839,8 +843,8 @@ mod tests {
             finished_at_ms: None,
             exit_code: None,
             remote_session_ref: None,
-            stdout_preview: String::new(),
-            stderr_preview: String::new(),
+            stdout_preview: "secret-from-remote-output".into(),
+            stderr_preview: "another-secret".into(),
             output_bytes: 0,
             last_reconciled_at_ms: None,
         };
@@ -869,7 +873,11 @@ mod tests {
             Some("tmux:kodework-run-test")
         );
         assert_eq!(runs[0].output_bytes, 4096);
-        assert_eq!(runs[0].stdout_preview, "ok");
+        assert_eq!(
+            runs[0].stdout_preview, "",
+            "run output previews must never be persisted"
+        );
+        assert_eq!(runs[0].stderr_preview, "");
         assert_eq!(
             RunRepository::new(db.connection())
                 .list_recent_by_host(project.host_id, 10)
