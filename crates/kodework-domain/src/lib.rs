@@ -210,6 +210,9 @@ pub enum RunStatus {
     Failed,
     Cancelled,
     TimedOut,
+    /// The local application stopped before it could observe a terminal
+    /// result (for example, a crash or forced process termination).
+    Interrupted,
     /// The run was previously active, but neither a live remote session nor
     /// authoritative completion metadata can currently be found.
     Unknown,
@@ -415,6 +418,9 @@ pub fn validate_action(action: &Action) -> Result<(), DomainError> {
 pub fn validate_remote_path(path: &str) -> Result<(), DomainError> {
     if !(path == "~" || path.starts_with("~/") || path.starts_with('/'))
         || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component == "." || component == "..")
     {
         return Err(DomainError::InvalidRemotePath);
     }
@@ -587,13 +593,18 @@ pub fn run_transition(from: RunStatus, to: RunStatus) -> bool {
             RunStatus::Queued | RunStatus::Failed | RunStatus::Cancelled
         ) | (
             RunStatus::Queued,
-            RunStatus::Running | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Unknown
+            RunStatus::Running
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::Interrupted
+                | RunStatus::Unknown
         ) | (
             RunStatus::Running,
             RunStatus::Succeeded
                 | RunStatus::Failed
                 | RunStatus::Cancelled
                 | RunStatus::TimedOut
+                | RunStatus::Interrupted
                 | RunStatus::Unknown
         ) | (
             RunStatus::Unknown,
@@ -636,6 +647,8 @@ mod tests {
         assert!(validate_remote_path("~/code/project").is_ok());
         assert!(validate_remote_path("~").is_ok());
         assert!(validate_remote_path("relative/path").is_err());
+        assert!(validate_remote_path("~/code/../secret").is_err());
+        assert!(validate_remote_path("/tmp/./file").is_err());
 
         let mut invalid_default = host();
         invalid_default.default_remote_path = "~/code/project".into();
@@ -718,9 +731,16 @@ mod tests {
         assert!(run_transition(RunStatus::Running, RunStatus::Running));
         assert!(run_transition(RunStatus::Running, RunStatus::Succeeded));
         assert!(run_transition(RunStatus::Running, RunStatus::Unknown));
+        assert!(run_transition(RunStatus::Running, RunStatus::Interrupted));
+        assert!(run_transition(RunStatus::Queued, RunStatus::Interrupted));
         assert!(run_transition(RunStatus::Unknown, RunStatus::Failed));
         assert!(!run_transition(RunStatus::Succeeded, RunStatus::Running));
         assert!(!run_transition(RunStatus::Failed, RunStatus::Succeeded));
+        assert!(!run_transition(RunStatus::Interrupted, RunStatus::Running));
+        assert!(!run_transition(
+            RunStatus::Interrupted,
+            RunStatus::Succeeded
+        ));
     }
 
     #[test]

@@ -737,8 +737,11 @@ export default function App() {
   const onActionSave = async () => {
     if (!actionDraft) return
     try {
-      await actionSave(actionDraft)
-      await refreshActions(actionDraft.project_id)
+      const action = actionDraft.mode === 'Quick'
+        ? actionDraft
+        : { ...actionDraft, timeout_ms: null }
+      await actionSave(action)
+      await refreshActions(action.project_id)
       setActionDraft(null)
     } catch (error) {
       setMessage('动作保存失败：' + String(error))
@@ -763,7 +766,14 @@ export default function App() {
       const outcome = await runAction(selected.id, action, confirmed)
       setRunResult(outcome)
       void runList(undefined, 50, selected.id).then(setRuns).catch(() => {})
-      setMessage('动作完成：退出码 ' + String(outcome.exit_code ?? '交互式') + (outcome.output_bytes > 400 ? '（输出已截断）' : ''))
+      const resultMessage = outcome.disposition === 'Completed'
+        ? (outcome.exit_code === 0
+          ? '动作已完成'
+          : '动作失败：退出码 ' + String(outcome.exit_code ?? '未知'))
+        : outcome.disposition === 'BackgroundStarted'
+          ? '后台任务已启动，等待远端完成状态'
+          : '命令已发送到终端'
+      setMessage(resultMessage + (outcome.output_bytes > 400 ? '（输出已截断）' : ''))
     } catch (error) {
       setMessage('动作失败：' + String(error))
     } finally {
@@ -1262,7 +1272,10 @@ export default function App() {
             </label>
             <div className="form-row">
               <label>模式
-                <select value={actionDraft.mode} onChange={(e) => setActionDraft({ ...actionDraft, mode: e.target.value as Action['mode'] })}>
+                <select value={actionDraft.mode} onChange={(e) => {
+                  const mode = e.target.value as Action['mode']
+                  setActionDraft({ ...actionDraft, mode, timeout_ms: mode === 'Quick' ? actionDraft.timeout_ms : null })
+                }}>
                   <option value="Quick">Quick（快速）</option>
                   <option value="Interactive">Interactive（终端）</option>
                   <option value="Background">Background（后台）</option>
@@ -1277,8 +1290,14 @@ export default function App() {
                 <span className="modal-note">保存时按命令内容自动判定（服务端强制），不可手动设置。</span>
               </label>
             </div>
-            <label>超时（毫秒，留空默认 30s）
-              <input type="number" value={actionDraft.timeout_ms ?? ''} onChange={(e) => setActionDraft({ ...actionDraft, timeout_ms: e.target.value ? Number(e.target.value) : null })} />
+            <label>超时（毫秒，仅 Quick；留空默认 30s）
+              <input
+                type="number"
+                disabled={actionDraft.mode !== 'Quick'}
+                value={actionDraft.mode === 'Quick' ? actionDraft.timeout_ms ?? '' : ''}
+                onChange={(e) => setActionDraft({ ...actionDraft, timeout_ms: e.target.value ? Number(e.target.value) : null })}
+              />
+              {actionDraft.mode !== 'Quick' && <span className="modal-note">Interactive/Background 没有本地可观测的超时边界。</span>}
             </label>
             <div className="modal-actions">
               <button className="ghost" onClick={() => setActionDraft(null)}>取消</button>

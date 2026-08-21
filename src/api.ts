@@ -308,7 +308,7 @@ export type RunOutcome = {
   remote_session_ref: string | null
 }
 
-export type RunStatus = 'Created' | 'Confirming' | 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled' | 'TimedOut' | 'Unknown'
+export type RunStatus = 'Created' | 'Confirming' | 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled' | 'TimedOut' | 'Interrupted' | 'Unknown'
 export type Run = {
   id: string
   action_id: string | null

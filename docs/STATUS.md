@@ -18,6 +18,8 @@ KodeWork is under active development. The currently distributable desktop produc
 ## Reliability hardening in progress
 
 - Background Runs remain `Running` until remote exit metadata is reconciled; launcher success is not command success.
+- Quick Actions enforce their configured local execution timeout and record `TimedOut`; Interactive and Background Actions do not expose a local command timeout.
+- On startup, queued or running Quick Runs left by a terminated desktop process are marked `Interrupted`; Background Runs remain reconcilable from remote metadata.
 - Run history snapshots its command and ownership so editing or deleting an Action does not rewrite or erase old records.
 - Run history stores lifecycle metadata and byte counts only; stdout/stderr previews are ephemeral, and migration 11 clears previews persisted by older versions.
 - SFTP resume verifies the existing partial prefix byte-for-byte before seeking.
@@ -31,7 +33,7 @@ KodeWork is under active development. The currently distributable desktop produc
 
 ## Verification policy
 
-Every pull request must pass formatting, Clippy with warnings denied, the full Rust workspace tests, and frontend lint/tests/build. Repository secret scanning and push protection are GitHub security settings, not a CI job; contributors must run the documented local pattern scan before staging. The current local verification includes Rust workspace tests, strict Clippy, frontend tests/lint/build, diff checks, and changed-file secret-pattern scanning on August 20, 2026. Platform or network behavior is marked verified only when it has been exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for current evidence and explicit gaps.
+Every pull request must pass formatting, Clippy with warnings denied, the full Rust workspace tests, and frontend lint/tests/build. Repository secret scanning and push protection are GitHub security settings, not a CI job; contributors must run the documented local pattern scan before staging. The repository pins Rust CI to 1.98.0 so toolchain upgrades happen deliberately. The current local verification includes Rust workspace tests, strict Clippy, frontend tests/lint/build, diff checks, and changed-file secret-pattern scanning on August 21, 2026. Platform or network behavior is marked verified only when it has been exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for current evidence and explicit gaps.
 
 ## Known distribution limits
 

@@ -1317,6 +1317,12 @@ pub(crate) fn action_save(
 ) -> Result<(), String> {
     use kodework_storage::repositories::ActionRepository;
     validate_action(&action).map_err(|error| error.to_string())?;
+    if action.mode != kodework_domain::ActionMode::Quick {
+        // Only Quick has a locally observable exec deadline. Do not retain a
+        // stale timeout on Interactive/Background actions where it would
+        // falsely suggest enforcement.
+        action.timeout_ms = None;
+    }
     // Danger classification is a server-side decision; never trust the
     // renderer-declared level (it gates the confirmation dialog).
     action.danger_level = classify_danger(&action.command);
@@ -1488,6 +1494,19 @@ pub(crate) async fn run_action(
                 value.stderr_preview.as_str(),
             ),
         },
+        Err(error)
+            if action.mode == kodework_domain::ActionMode::Quick && is_run_timeout(error) =>
+        {
+            (
+                RunStatus::TimedOut,
+                None,
+                Some(finished_at_ms),
+                None,
+                0,
+                "",
+                error.as_str(),
+            )
+        }
         Err(error) if action.mode == kodework_domain::ActionMode::Background => (
             // A transport/launcher error does not prove that the detached
             // tmux session was never created. Keep the row reconcilable so a
@@ -1528,6 +1547,11 @@ pub(crate) async fn run_action(
         )
         .map_err(|error| error.to_string())?;
     outcome
+}
+
+fn is_run_timeout(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("timed out") || lowered.contains("timeout")
 }
 
 /// Lists persisted Action runs for the Activity surface with a bounded page.
@@ -1675,7 +1699,7 @@ fn reconciled_run_fields(
 
 #[cfg(test)]
 mod tests {
-    use super::{reconciled_run_fields, reconnect_error_is_retryable};
+    use super::{is_run_timeout, reconciled_run_fields, reconnect_error_is_retryable};
     use kodework_core::session::RemoteRunState;
     use kodework_domain::RunStatus;
 
@@ -1706,5 +1730,12 @@ mod tests {
             reconciled_run_fields(RemoteRunState::Completed { exit_code: 17 }, 123),
             (RunStatus::Failed, Some(17), Some(123))
         );
+    }
+
+    #[test]
+    fn timeout_errors_are_classified_as_run_timeouts() {
+        assert!(is_run_timeout("connection timed out"));
+        assert!(is_run_timeout("remote command timeout"));
+        assert!(!is_run_timeout("authentication failed"));
     }
 }

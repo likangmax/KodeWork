@@ -359,6 +359,22 @@ impl<'a> RunRepository<'a> {
         Ok(())
     }
 
+    /// Marks Quick runs left active by a previous process as interrupted.
+    /// Background runs are intentionally excluded because their lifecycle is
+    /// owned by the remote tmux wrapper and remains reconcilable after a
+    /// desktop restart.
+    pub fn interrupt_orphaned_quick_runs(&self) -> Result<usize, StorageError> {
+        let quick = json_from(&kodework_domain::ActionMode::Quick)?;
+        let queued = json_from(&RunStatus::Queued)?;
+        let running = json_from(&RunStatus::Running)?;
+        let interrupted = json_from(&RunStatus::Interrupted)?;
+        let changed = self.connection.execute(
+            "UPDATE runs SET status = ?1, finished_at_ms = ?2 WHERE mode = ?3 AND status IN (?4, ?5)",
+            params![interrupted, crate::now_millis() as u64, quick, queued, running],
+        )?;
+        Ok(changed)
+    }
+
     fn current_status(&self, id: RunId) -> Result<RunStatus, StorageError> {
         let raw = self
             .connection
@@ -849,6 +865,46 @@ mod tests {
             last_reconciled_at_ms: None,
         };
         assert!(runs.create(&run).is_ok());
+        let background_run = Run {
+            id: RunId::new(),
+            action_id: None,
+            host_id: project.host_id,
+            project_id: Some(project.id),
+            action_name: action.name.clone(),
+            command_snapshot: action.command.clone(),
+            mode: ActionMode::Background,
+            cwd_snapshot: action.cwd.clone(),
+            status: RunStatus::Running,
+            started_at_ms: Some(now_millis() as u64),
+            finished_at_ms: None,
+            exit_code: None,
+            remote_session_ref: Some("tmux:kodework-run-background".into()),
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+            output_bytes: 0,
+            last_reconciled_at_ms: None,
+        };
+        assert!(runs.create(&background_run).is_ok());
+        let orphan_quick = Run {
+            id: RunId::new(),
+            action_id: None,
+            host_id: project.host_id,
+            project_id: Some(project.id),
+            action_name: action.name.clone(),
+            command_snapshot: action.command.clone(),
+            mode: ActionMode::Quick,
+            cwd_snapshot: action.cwd.clone(),
+            status: RunStatus::Running,
+            started_at_ms: Some(now_millis() as u64),
+            finished_at_ms: None,
+            exit_code: None,
+            remote_session_ref: None,
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+            output_bytes: 0,
+            last_reconciled_at_ms: None,
+        };
+        assert!(runs.create(&orphan_quick).is_ok());
         assert!(runs
             .finish(
                 run.id,
@@ -862,6 +918,25 @@ mod tests {
                 Some(now_millis() as u64),
             )
             .is_ok());
+        assert_eq!(runs.interrupt_orphaned_quick_runs().ok(), Some(1));
+        assert_eq!(
+            runs.get(run.id).ok().flatten().map(|value| value.status),
+            Some(RunStatus::Succeeded)
+        );
+        assert_eq!(
+            runs.get(orphan_quick.id)
+                .ok()
+                .flatten()
+                .map(|value| value.status),
+            Some(RunStatus::Interrupted)
+        );
+        assert_eq!(
+            runs.get(background_run.id)
+                .ok()
+                .flatten()
+                .map(|value| value.status),
+            Some(RunStatus::Running)
+        );
         let runs = runs
             .list_by_action(action.id, 10)
             .unwrap_or_else(|error| unreachable!("list runs: {error}"));
@@ -883,7 +958,7 @@ mod tests {
                 .list_recent_by_host(project.host_id, 10)
                 .unwrap_or_else(|error| unreachable!("list host runs: {error}"))
                 .len(),
-            1
+            3
         );
 
         assert!(actions.delete(action.id).ok() == Some(true));

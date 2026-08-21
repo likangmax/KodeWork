@@ -7,7 +7,7 @@ use crate::backend::SftpBackend;
 use crate::{part_path, SftpError, TransferProgress, TransferRequest, DEFAULT_CHUNK_SIZE};
 use kodework_domain::{TransferDirection, TransferId, TransferStatus};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -372,14 +372,35 @@ fn normalize_remote_path(path: &str) -> String {
 
 fn normalize_local_path(path: &str) -> String {
     let path = Path::new(path);
-    let normalized = if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from(path))
     };
-    normalized.to_string_lossy().to_ascii_lowercase()
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_)))
+                {
+                    let _ = normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 async fn run_transfer(
@@ -425,10 +446,7 @@ async fn run_transfer(
                 .await;
             return Err(SftpError::Cancelled);
         }
-        // A changed source is a correctness failure, not a transient network
-        // failure. Retrying automatically could silently publish a different
-        // payload, so leave the .part file for an explicit user retry.
-        if matches!(error, SftpError::SourceChanged) {
+        if !error.is_retryable() {
             let _ = events
                 .send(TransferEvent::Failed {
                     id,
@@ -969,5 +987,35 @@ fn map_disk_error(error: SftpError) -> SftpError {
     match error {
         SftpError::Backend(message) if message.contains("No space left") => SftpError::DiskFull,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lease_key, normalize_local_path};
+    use crate::TransferRequest;
+    use kodework_domain::TransferDirection;
+
+    #[test]
+    fn local_lease_key_collapses_parent_components() {
+        let first = TransferRequest {
+            local_path: r"C:\workspace\models\..\model.bin".into(),
+            remote_path: "~/model.bin".into(),
+            direction: TransferDirection::Download,
+            resume: false,
+        };
+        let second = TransferRequest {
+            local_path: r"C:\workspace\model.bin".into(),
+            ..first.clone()
+        };
+        assert_eq!(
+            lease_key("host-a", &first),
+            lease_key("host-a", &second),
+            "equivalent Windows paths must share one destination lease"
+        );
+        assert_eq!(
+            normalize_local_path(&first.local_path),
+            normalize_local_path(&second.local_path)
+        );
     }
 }

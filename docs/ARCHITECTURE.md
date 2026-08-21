@@ -107,6 +107,13 @@ shows `Unknown` instead of guessing failure or success. Deleting an Action or
 Project does not erase its historical Run; deleting the Host intentionally
 removes all host-owned records.
 
+Quick Actions apply their configured timeout to the observed SSH command and
+record `TimedOut` when that deadline expires. Interactive and Background
+Actions have no local command deadline: Interactive is dispatched to the PTY,
+while Background execution is owned by the remote tmux wrapper. During startup,
+queued or running Quick Runs left by a terminated desktop process are marked
+`Interrupted`; detached Background Runs are left available for reconciliation.
+
 Run history stores lifecycle metadata, command snapshots, and byte counts only.
 Stdout/stderr previews are kept in memory for the active result view and are
 never persisted to SQLite; migration 11 also clears previews written by older

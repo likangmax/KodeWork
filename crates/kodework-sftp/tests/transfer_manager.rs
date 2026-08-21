@@ -145,7 +145,7 @@ async fn upload_fails_when_source_changes_before_commit() {
     let local = temp_file("source-changed-upload", 16 * DEFAULT_CHUNK_SIZE);
     let remote = format!("{REMOTE_DIR}/source-changed-upload.bin");
     let id = manager
-        .enqueue(upload_request(&local, &remote, false), 0)
+        .enqueue(upload_request(&local, &remote, false), 2)
         .await
         .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -178,7 +178,7 @@ async fn download_fails_when_remote_source_changes_before_commit() {
     let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
     let local = temp_file("source-changed-download", 8);
     let id = manager
-        .enqueue(download_request(&local, &remote, false), 0)
+        .enqueue(download_request(&local, &remote, false), 2)
         .await
         .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

@@ -429,12 +429,12 @@ fn decode_wsl_distributions(input: &[u8]) -> Vec<String> {
         bytes = bytes[2..].to_vec();
     }
     let text = if bytes.len() >= 2 && bytes.iter().skip(1).step_by(2).all(|byte| *byte == 0) {
-        String::from_utf16_lossy(
-            &bytes
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                .collect::<Vec<_>>(),
-        )
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let units = pairs
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
     };

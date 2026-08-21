@@ -59,6 +59,11 @@ impl AppState {
         let database = Arc::new(Mutex::new(Database::open(
             directory.join("kodework.sqlite3"),
         )?));
+        {
+            let db = database.lock().map_err(|_| AppError::StatePoisoned)?;
+            kodework_storage::repositories::RunRepository::new(db.connection())
+                .interrupt_orphaned_quick_runs()?;
+        }
 
         // Host-key persistence is a metadata table; the broker owns the
         // user decision flow (trust once / trust and save / reject).
