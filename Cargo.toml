@@ -23,7 +23,9 @@ members = [
 version = "0.2.3"
 edition = "2021"
 license = "MIT"
-repository = "local"
+repository = "https://github.com/likangmax/KodeWork"
+homepage = "https://github.com/likangmax/KodeWork"
+rust-version = "1.98"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

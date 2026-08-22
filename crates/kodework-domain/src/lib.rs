@@ -114,6 +114,15 @@ pub struct JumpHost {
     pub hostname: String,
     pub port: u16,
     pub username: String,
+    /// Jump-host authentication is independent from the target host. The
+    /// secret itself remains in the OS credential store and is referenced by
+    /// this opaque id only.
+    #[serde(default)]
+    pub auth_ref: Option<CredentialRef>,
+    #[serde(default)]
+    pub auth_mode: AuthenticationMode,
+    #[serde(default)]
+    pub private_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,6 +257,10 @@ pub enum ConnectionState {
     Connecting,
     VerifyingHostKey,
     Authenticating,
+    /// The native supervisor is waiting for a user credential or an
+    /// interactive authentication response. This is distinct from Failed:
+    /// retrying without new user input would be pointless and unsafe.
+    WaitingForCredential,
     Ready,
     Reconnecting,
     Failed,
@@ -567,11 +580,19 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::VerifyingHostKey,
             ConnectionState::Authenticating
         ) | (
-            ConnectionState::Authenticating | ConnectionState::Reconnecting,
+            ConnectionState::Authenticating
+                | ConnectionState::Reconnecting
+                | ConnectionState::WaitingForCredential,
             ConnectionState::Ready
         ) | (
             ConnectionState::Ready,
             ConnectionState::Reconnecting | ConnectionState::Disconnected
+        ) | (
+            ConnectionState::Authenticating | ConnectionState::WaitingForCredential,
+            ConnectionState::Disconnected | ConnectionState::Failed
+        ) | (
+            ConnectionState::Reconnecting,
+            ConnectionState::WaitingForCredential | ConnectionState::Failed
         ) | (ConnectionState::Failed, ConnectionState::Disconnected)
     )
 }

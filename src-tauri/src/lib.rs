@@ -34,6 +34,9 @@ pub struct AppState {
     pub(crate) local_terminals: kodework_local_pty::LocalTerminalManager,
     /// Host ids currently owned by the native reconnect supervisor.
     pub(crate) reconnecting: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
+    /// Host ids with a native reconnect profile. Credential bytes are never
+    /// cached here; the supervisor resolves managed secrets on each attempt.
+    pub(crate) reconnect_profiles: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
     /// Host ids currently undergoing run reconciliation. UI refreshes are
     /// single-flight per host so tab changes cannot duplicate SSH probes.
     pub(crate) reconciling: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
@@ -104,6 +107,7 @@ impl AppState {
             tailscale,
             local_terminals,
             reconnecting: Arc::new(Mutex::new(HashSet::new())),
+            reconnect_profiles: Arc::new(Mutex::new(HashSet::new())),
             reconciling: Arc::new(Mutex::new(HashSet::new())),
         })
     }
@@ -203,6 +207,7 @@ pub fn run() -> Result<(), AppError> {
         ))
         .setup(|app| {
             setup_tray(app)?;
+            commands::start_connection_supervisor(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

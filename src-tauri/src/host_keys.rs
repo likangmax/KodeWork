@@ -60,7 +60,7 @@ impl KnownHosts for SqliteKnownHosts {
             .map_err(|_| "host-key database lock poisoned".to_string())?;
         let repo = HostKeyRepository::new(guard.connection());
         if let Some(record) = repo
-            .get_for_host(host_id)
+            .get_for_host(host_id, "ssh-ed25519")
             .map_err(|error| error.to_string())?
         {
             return Ok(Some(HostKeyInfo {
@@ -102,7 +102,7 @@ impl KnownHosts for SqliteKnownHosts {
             .map_err(|_| "host-key database lock poisoned".to_string())?;
         let repo = HostKeyRepository::new(guard.connection());
         if let Some(record) = repo
-            .get_for_host(host_id)
+            .get_for_host(host_id, "ssh-ed25519")
             .map_err(|error| error.to_string())?
         {
             return Ok(Some(KnownHostMatch::HostScoped(HostKeyInfo {
@@ -119,6 +119,48 @@ impl KnownHosts for SqliteKnownHosts {
         else {
             return Ok(None);
         };
+        Ok(Some(KnownHostMatch::LegacyEndpoint(HostKeyInfo {
+            hostname: legacy.hostname,
+            port: legacy.port,
+            algorithm: legacy.algorithm,
+            fingerprint: legacy.fingerprint,
+            key_blob_base64: legacy.key_blob_base64,
+        })))
+    }
+
+    fn lookup_for_host_match_algorithm(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+        algorithm: &str,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        let guard = self
+            .database
+            .lock()
+            .map_err(|_| "host-key database lock poisoned".to_string())?;
+        let repo = HostKeyRepository::new(guard.connection());
+        if let Some(record) = repo
+            .get_for_host(host_id, algorithm)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(KnownHostMatch::HostScoped(HostKeyInfo {
+                hostname: hostname.to_string(),
+                port,
+                algorithm: record.algorithm,
+                fingerprint: record.fingerprint,
+                key_blob_base64: record.key_blob_base64,
+            })));
+        }
+        let Some(legacy) = repo
+            .get(hostname, port)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        if legacy.algorithm != algorithm {
+            return Ok(None);
+        }
         Ok(Some(KnownHostMatch::LegacyEndpoint(HostKeyInfo {
             hostname: legacy.hostname,
             port: legacy.port,

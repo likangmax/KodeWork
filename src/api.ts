@@ -9,7 +9,7 @@ export type RuntimeKind = 'Tmux' | 'Herdr' | 'PlainShell'
 export type AuthenticationMode = 'Password' | 'PublicKey' | 'SshAgent' | 'KeyboardInteractive'
 export type ConnectionState =
   | 'Disconnected' | 'ResolvingAddress' | 'Connecting' | 'VerifyingHostKey'
-  | 'Authenticating' | 'Ready' | 'Reconnecting' | 'Failed'
+  | 'Authenticating' | 'WaitingForCredential' | 'Ready' | 'Reconnecting' | 'Failed'
 
 export type HostAddress = {
   id: string
@@ -37,7 +37,14 @@ export type Host = {
   auth_mode: AuthenticationMode
   private_key_path: string | null
   default_remote_path: string
-  jump: { hostname: string; port: number; username: string } | null
+  jump: {
+    hostname: string
+    port: number
+    username: string
+    auth_ref?: { provider: string; opaque_id: string } | null
+    auth_mode?: AuthenticationMode
+    private_key_path?: string | null
+  } | null
   addresses: HostAddress[]
   tailscale: TailscaleConfig | null
   default_runtime: RuntimeKind

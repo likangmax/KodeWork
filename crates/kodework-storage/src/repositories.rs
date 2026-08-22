@@ -286,11 +286,12 @@ impl<'a> RunRepository<'a> {
             json_from(&RunStatus::Unknown)?,
         ];
         let mut statement = self.connection.prepare(
-            "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms FROM runs WHERE host_id = ?1 AND mode = ?2 AND status IN (?3, ?4, ?5) ORDER BY COALESCE(started_at_ms, 0) DESC LIMIT ?6",
+            "SELECT id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms FROM runs WHERE host_id = ?1 AND mode IN (?2, ?3) AND status IN (?4, ?5, ?6) ORDER BY COALESCE(started_at_ms, 0) DESC LIMIT ?7",
         )?;
         let rows = statement.query_map(
             params![
                 id_to_blob!(host_id),
+                json_from(&kodework_domain::ActionMode::Quick)?,
                 json_from(&kodework_domain::ActionMode::Background)?,
                 statuses[0],
                 statuses[1],

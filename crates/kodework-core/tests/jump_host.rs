@@ -74,6 +74,9 @@ fn host_with_jump(bastion_port: u16, target_port: u16) -> Host {
             hostname: "127.0.0.1".into(),
             port: bastion_port,
             username: USER.into(),
+            auth_ref: None,
+            auth_mode: kodework_domain::AuthenticationMode::Password,
+            private_key_path: None,
         }),
         addresses: vec![Address {
             id: AddressId::new(),

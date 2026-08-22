@@ -78,6 +78,19 @@ pub trait KnownHosts: Send + Sync {
             .map(|key| key.map(KnownHostMatch::HostScoped))
     }
 
+    /// Algorithm-aware lookup. The default preserves compatibility with
+    /// older stores; implementations with a per-algorithm schema override it
+    /// so adding a new negotiated algorithm does not look like key rotation.
+    fn lookup_for_host_match_algorithm(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+        _algorithm: &str,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        self.lookup_for_host_match(host_id, hostname, port)
+    }
+
     fn promote_legacy_for_host(
         &self,
         host_id: HostId,
@@ -103,7 +116,7 @@ pub trait KnownHosts: Send + Sync {
 #[derive(Default)]
 pub struct MemoryKnownHosts {
     keys: Mutex<HashMap<(String, u16), HostKeyInfo>>,
-    host_keys: Mutex<HashMap<HostId, HostKeyInfo>>,
+    host_keys: Mutex<HashMap<(HostId, String), HostKeyInfo>>,
 }
 
 impl MemoryKnownHosts {
@@ -142,8 +155,8 @@ impl KnownHosts for MemoryKnownHosts {
             .host_keys
             .lock()
             .map_err(|_| "known-hosts lock poisoned".to_string())?
-            .get(&host_id)
-            .cloned();
+            .iter()
+            .find_map(|((id, _), key)| (*id == host_id).then_some(key.clone()));
         match host_key {
             Some(key) => Ok(Some(key)),
             None => self.lookup(hostname, port),
@@ -160,8 +173,8 @@ impl KnownHosts for MemoryKnownHosts {
             .host_keys
             .lock()
             .map_err(|_| "known-hosts lock poisoned".to_string())?
-            .get(&host_id)
-            .cloned();
+            .iter()
+            .find_map(|((id, _), key)| (*id == host_id).then_some(key.clone()));
         if let Some(key) = host_key {
             return Ok(Some(KnownHostMatch::HostScoped(key)));
         }
@@ -180,8 +193,30 @@ impl KnownHosts for MemoryKnownHosts {
         self.host_keys
             .lock()
             .map_err(|_| "known-hosts lock poisoned".to_string())?
-            .insert(host_id, key.clone());
+            .insert((host_id, key.algorithm.clone()), key.clone());
         Ok(())
+    }
+
+    fn lookup_for_host_match_algorithm(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+        algorithm: &str,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        let host_key = self
+            .host_keys
+            .lock()
+            .map_err(|_| "known-hosts lock poisoned".to_string())?
+            .get(&(host_id, algorithm.to_string()))
+            .cloned();
+        if let Some(key) = host_key {
+            return Ok(Some(KnownHostMatch::HostScoped(key)));
+        }
+        Ok(self
+            .lookup(hostname, port)?
+            .filter(|key| key.algorithm == algorithm)
+            .map(KnownHostMatch::LegacyEndpoint))
     }
 }
 
@@ -287,7 +322,7 @@ impl HostKeyBroker {
         let saved = match host_id {
             Some(id) => self
                 .known
-                .lookup_for_host_match(id, hostname, port)
+                .lookup_for_host_match_algorithm(id, hostname, port, info.algorithm.as_str())
                 .map_err(SshError::HostKeyStoreUnavailable)?,
             None => self
                 .known

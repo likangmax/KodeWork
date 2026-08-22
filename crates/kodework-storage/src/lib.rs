@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub mod host_keys;
 pub mod repositories;
 
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -75,6 +75,19 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 11,
         name: "remove_persisted_run_output_previews",
         sql: "UPDATE runs SET stdout_preview = '', stderr_preview = '';",
+    },
+    Migration {
+        version: 12,
+        name: "host_key_identities_per_algorithm",
+        sql: "CREATE TABLE host_key_identities_v12 (host_id BLOB NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL, fingerprint TEXT NOT NULL, key_blob_base64 TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, PRIMARY KEY (host_id, algorithm));
+INSERT INTO host_key_identities_v12 (host_id, algorithm, fingerprint, key_blob_base64, created_at_ms, updated_at_ms) SELECT host_id, algorithm, fingerprint, key_blob_base64, created_at_ms, updated_at_ms FROM host_key_identities;
+DROP TABLE host_key_identities;
+ALTER TABLE host_key_identities_v12 RENAME TO host_key_identities;",
+    },
+    Migration {
+        version: 13,
+        name: "jump_host_independent_authentication",
+        sql: "ALTER TABLE hosts ADD COLUMN jump_auth_json TEXT;",
     },
 ];
 
@@ -187,7 +200,7 @@ impl Database {
     pub fn upsert_host(&self, host: &Host) -> Result<(), StorageError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET label = excluded.label, username = excluded.username, port = excluded.port, auth_ref = excluded.auth_ref, tailscale_json = excluded.tailscale_json, default_runtime = excluded.default_runtime, jump_hostname = excluded.jump_hostname, jump_port = excluded.jump_port, jump_username = excluded.jump_username, auth_mode = excluded.auth_mode, private_key_path = excluded.private_key_path, default_remote_path = excluded.default_remote_path",
+            "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(id) DO UPDATE SET label = excluded.label, username = excluded.username, port = excluded.port, auth_ref = excluded.auth_ref, tailscale_json = excluded.tailscale_json, default_runtime = excluded.default_runtime, jump_hostname = excluded.jump_hostname, jump_port = excluded.jump_port, jump_username = excluded.jump_username, jump_auth_json = excluded.jump_auth_json, auth_mode = excluded.auth_mode, private_key_path = excluded.private_key_path, default_remote_path = excluded.default_remote_path",
             params![
                 host.id.as_uuid().as_bytes().to_vec(),
                 host.label,
@@ -199,6 +212,7 @@ impl Database {
                 host.jump.as_ref().map(|jump| jump.hostname.as_str()),
                 host.jump.as_ref().map(|jump| jump.port),
                 host.jump.as_ref().map(|jump| jump.username.as_str()),
+                optional_json(&host.jump)?,
                 serde_json::to_string(&host.auth_mode)?,
                 host.private_key_path.as_deref(),
                 host.default_remote_path,
@@ -228,7 +242,7 @@ impl Database {
 
     pub fn get_host(&self, id: HostId) -> Result<Option<Host>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path FROM hosts WHERE id = ?1",
+            "SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path FROM hosts WHERE id = ?1",
         )?;
         let row = statement
             .query_row(params![id.as_uuid().as_bytes().to_vec()], read_host_row)
@@ -237,7 +251,7 @@ impl Database {
     }
 
     pub fn list_hosts(&self) -> Result<Vec<Host>, StorageError> {
-        let mut statement = self.connection.prepare("SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path FROM hosts ORDER BY label COLLATE NOCASE")?;
+        let mut statement = self.connection.prepare("SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path FROM hosts ORDER BY label COLLATE NOCASE")?;
         let rows = statement.query_map([], read_host_row)?;
         let base_hosts = rows.collect::<Result<Vec<_>, _>>()?;
         base_hosts
@@ -298,15 +312,33 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
     let jump_hostname = row.get::<_, Option<String>>(7)?;
     let jump_port = row.get::<_, Option<u16>>(8)?;
     let jump_username = row.get::<_, Option<String>>(9)?;
-    let jump = match (jump_hostname, jump_port, jump_username) {
+    let legacy_jump = match (jump_hostname, jump_port, jump_username) {
         (Some(hostname), Some(port), Some(username)) => Some(kodework_domain::JumpHost {
             hostname,
             port,
             username,
+            auth_ref: None,
+            // Legacy jump rows had no independent credential reference. Do
+            // not reuse the target credential; default them to the OS SSH
+            // agent until the user configures a dedicated jump credential.
+            auth_mode: AuthenticationMode::SshAgent,
+            private_key_path: None,
         }),
         _ => None,
     };
-    let auth_mode_json = row.get::<_, String>(10)?;
+    let jump_auth = row
+        .get::<_, Option<String>>(10)?
+        .map(|raw| serde_json::from_str::<kodework_domain::JumpHost>(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let jump = jump_auth.or(legacy_jump);
+    let auth_mode_json = row.get::<_, String>(11)?;
     // Credential semantics must fail closed. Treating corrupted or unknown
     // data as Password can send the wrong secret through the wrong SSH method.
     let auth_mode = match serde_json::from_str::<AuthenticationMode>(&auth_mode_json) {
@@ -321,7 +353,7 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
             "KeyboardInteractive" => AuthenticationMode::KeyboardInteractive,
             _ => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
-                    10,
+                    11,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 ));
@@ -335,8 +367,8 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
         port: row.get(3)?,
         auth_ref,
         auth_mode,
-        private_key_path: row.get(11)?,
-        default_remote_path: row.get(12)?,
+        private_key_path: row.get(12)?,
+        default_remote_path: row.get(13)?,
         addresses: Vec::new(),
         tailscale,
         default_runtime,
@@ -459,6 +491,30 @@ mod tests {
         assert_eq!(database.list_hosts().map(|hosts| hosts.len()).ok(), Some(1));
         assert_eq!(database.delete_host(host.id).ok(), Some(true));
         assert_eq!(database.get_host(host.id).ok().flatten(), None);
+    }
+
+    #[test]
+    fn jump_host_round_trip_preserves_independent_auth_metadata() {
+        let database =
+            Database::open_in_memory().unwrap_or_else(|_| unreachable!("in-memory database"));
+        let mut host = fixture_host();
+        host.jump = Some(kodework_domain::JumpHost {
+            hostname: "bastion.example".into(),
+            port: 2222,
+            username: "bastion-user".into(),
+            auth_ref: Some(CredentialRef {
+                provider: CredentialProvider::Test,
+                opaque_id: "jump-password".into(),
+            }),
+            auth_mode: AuthenticationMode::Password,
+            private_key_path: None,
+        });
+        assert!(database.upsert_host(&host).is_ok());
+        let loaded = database
+            .get_host(host.id)
+            .unwrap_or_else(|_| unreachable!("host query"))
+            .unwrap_or_else(|| unreachable!("host was inserted"));
+        assert_eq!(loaded.jump, host.jump);
     }
 
     #[test]

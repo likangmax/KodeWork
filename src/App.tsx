@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import type { Action, HerdrAgentInfo, Host, HostKeyRequest, KeyboardInteractiveRequest, Project, RemoteFileMeta, Run, RunOutcome, Snippet, TmuxSession, TunnelInfo, UpdateCheck } from './api'
 import {
-  answerHostKey, answerKeyboardInteractive, connectHost, reconnectHost, deleteHost, isDesktop,
+  answerHostKey, answerKeyboardInteractive, connectHost, deleteHost, isDesktop,
   listHosts, pendingHostKeyRequests, pendingKeyboardInteractiveRequests, prepareHostNetwork, saveHost, saveHostPassword, saveTailscaleAuthKey, sessionState, disconnectHost, tailscaleRuntimeInfo,
   actionDelete, actionList, actionSave,
   closePane, herdrAgents, herdrAttach, herdrBridge, herdrBridgeStop, herdrDetect, openPane,
@@ -145,7 +145,6 @@ export default function App() {
   const herdrMissingPolls = useRef(0)
   const connectSeq = useRef(0)
   const lastHostRef = useRef<Host | null>(null)
-  const reconnectAttemptsRef = useRef(0)
   const filesSeq = useRef(0)
   const selectedIdRef = useRef<string | null>(null)
   const pollRef = useRef<number | null>(null)
@@ -243,7 +242,7 @@ export default function App() {
       const labels: Record<string, string> = {
         Disconnected: t('stateDisconnected'), ResolvingAddress: t('stateResolving'), Connecting: t('stateConnecting'),
         VerifyingHostKey: t('stateVerifyingHostKey'), Authenticating: t('stateAuthenticating'), Ready: t('stateReady'),
-        Reconnecting: t('stateReconnecting'), Failed: t('stateFailed'),
+        Reconnecting: t('stateReconnecting'), WaitingForCredential: t('stateWaitingForCredential'), Failed: t('stateFailed'),
       }
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
@@ -330,8 +329,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, selectedId, activeTab])
 
-  // Detect disconnects and recover: key-auth hosts reconnect
-  // automatically (bounded attempts); password hosts are prompted.
+  // Observe native connection supervision. The renderer updates its view and
+  // prompts for credentials, but never owns reconnect timing or retry loops.
   useEffect(() => {
     if (!isDesktop() || !selectedId) return
     let active = true
@@ -356,35 +355,22 @@ export default function App() {
             host.auth_mode === 'KeyboardInteractive'
           )
           if (canReconnectWithoutPassword && host) {
-            reconnectAttemptsRef.current += 1
             setMessage('连接断开，正在自动重连…')
-            if (active && connectSeq.current > 0 && lastHostRef.current?.id === host.id) {
-              void reconnectHost(host.id).catch((error) => {
-                if (active) {
-                  const errorText = String(error).toLowerCase()
-                  const missingKey = errorText.includes('private key does not exist')
-                  const passphraseHint = /passphrase|encrypted|decrypt|key error/.test(errorText)
-                  if (host.auth_mode === 'PublicKey' && host.auth_ref === null && !missingKey && passphraseHint) {
-                    setMessage('自动重连失败：如果私钥已加密，请输入私钥口令后重试。')
-                    setPromptPassword(true)
-                  } else {
-                    setMessage('自动重连失败：' + String(error))
-                  }
-                }
-              })
-            }
           } else if (host && host.auth_ref === null && host.auth_mode === 'Password') {
-            reconnectAttemptsRef.current += 1
-            if (reconnectAttemptsRef.current === 1) {
-              setMessage('连接已断开：请输入密码重新连接。')
-              setPromptPassword(true)
-            }
+            setMessage('连接已断开：请输入密码重新连接。')
+            setPromptPassword(true)
+          }
+        } else if (state === 'WaitingForCredential') {
+          setPhase('connecting')
+          setStateLabel(t('stateWaitingForCredential'))
+          if (lastHostRef.current?.auth_mode === 'Password') {
+            setMessage('自动重连需要凭据，请重新输入。')
+            setPromptPassword(true)
           }
         } else if (state === 'Failed') {
           setPhase('failed')
           setStateLabel(t('stateFailed'))
         } else if (state === 'Ready') {
-          reconnectAttemptsRef.current = 0
           if (phase !== 'ready') {
             setPhase('ready')
             setStateLabel(t('stateReady'))

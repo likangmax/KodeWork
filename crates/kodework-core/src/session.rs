@@ -105,6 +105,7 @@ struct ActiveSession {
     /// Bounded output received before a pane-specific renderer subscription.
     pending_events: Arc<Mutex<HashMap<u32, PendingPaneEvents>>>,
     dropped_events: Arc<AtomicU64>,
+    herdr_bridges: Arc<Mutex<HashMap<u16, Arc<kodework_ssh::connection::SshExec>>>>,
 }
 
 impl Clone for ActiveSession {
@@ -121,6 +122,7 @@ impl Clone for ActiveSession {
             subscribers: Arc::clone(&self.subscribers),
             pending_events: Arc::clone(&self.pending_events),
             dropped_events: Arc::clone(&self.dropped_events),
+            herdr_bridges: Arc::clone(&self.herdr_bridges),
         }
     }
 }
@@ -150,6 +152,21 @@ impl SessionManager {
         host: &Host,
         auth: Vec<AuthMethod>,
     ) -> Result<SessionOutcome, String> {
+        // Kept for library compatibility. The desktop command path uses
+        // `connect_with_jump_auth` whenever a bastion has its own credential.
+        self.connect_with_jump_auth(host, auth, None).await
+    }
+
+    /// Connects with explicitly separate target and jump-host credentials.
+    /// `None` is retained only for older library callers that have no jump
+    /// credential model yet; the Tauri production path passes `Some(...)` and
+    /// therefore never reuses target credentials implicitly.
+    pub async fn connect_with_jump_auth(
+        &self,
+        host: &Host,
+        auth: Vec<AuthMethod>,
+        jump_auth: Option<Vec<AuthMethod>>,
+    ) -> Result<SessionOutcome, String> {
         self.ensure_session(host.id);
         let connect_guard = self
             .sessions
@@ -167,6 +184,7 @@ impl SessionManager {
             return Err("no enabled address candidates".into());
         }
         let generation = self.next_generation(host.id);
+        let jump_auth = jump_auth.unwrap_or_else(|| auth.clone());
 
         let mut last_error = String::from("no candidate attempted");
         for candidate in candidates {
@@ -194,7 +212,7 @@ impl SessionManager {
                     hostname: jump.hostname.clone(),
                     port: jump.port,
                     username: jump.username.clone(),
-                    auth: auth.clone(),
+                    auth: jump_auth.clone(),
                 });
             }
             match SshConnection::connect(options).await {
@@ -268,6 +286,19 @@ impl SessionManager {
             .lock()
             .map(|guard| *guard)
             .unwrap_or(ConnectionState::Disconnected)
+    }
+
+    /// Marks a transport as waiting for fresh user input. The native
+    /// supervisor uses this instead of retrying a credential failure forever.
+    pub fn mark_waiting_for_credential(&self, host_id: HostId) {
+        self.set_state(host_id, ConnectionState::WaitingForCredential);
+    }
+
+    /// Keeps a transient network failure under native supervisor ownership so
+    /// the next supervisor tick can make another bounded attempt. This is
+    /// intentionally separate from `WaitingForCredential` and `Failed`.
+    pub fn mark_reconnecting(&self, host_id: HostId) {
+        self.set_state(host_id, ConnectionState::Reconnecting);
     }
 
     #[must_use]
@@ -804,9 +835,10 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
-    /// Bridges the remote herdr control socket to a local loopback port:
-    /// starts a detached socat UNIX->TCP bridge on the remote host and
-    /// opens an SSH local tunnel to it. Returns the local endpoint.
+    /// Bridges the remote herdr control socket to a local loopback port.
+    /// The remote socat process is owned by a long-lived SSH exec channel;
+    /// closing the local tunnel or transport therefore closes the owner and
+    /// cannot leave a detached remote process behind.
     /// Requires socat on the remote (documented; herdr's own --remote
     /// mechanism is the alternative on managed setups).
     pub async fn herdr_bridge(
@@ -829,58 +861,62 @@ impl SessionManager {
         {
             return Err("远程需要 socat 才能桥接 herdr socket（apt install socat）".to_string());
         }
-        // Stable per-host remote port so a stale bridge can be reused.
+        // Stable per-host remote port so the bridge can be identified without
+        // persisting a remote PID.
         let remote_port = 28000u16 + u16::try_from(host_id.as_uuid().as_u128() % 2000).unwrap_or(0);
         let socket_path = socket;
         let quoted_socket = shell_quote(&socket_path)?;
-        let start = format!(
-            "(nohup setsid socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket} >/dev/null 2>&1 </dev/null & echo $!)"
-        );
-        let output = self.run_remote(host_id, &start).await?;
-        let remote_pid = String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .find_map(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| {
-                format!(
-                    "socat 启动失败: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| "no session for host".to_string())?;
+        let connection = session
+            .connection
+            .lock()
+            .map_err(|_| "connection lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "not connected".to_string())?;
+        let owner = Arc::new(
+            connection
+                .exec(
+                    &format!(
+                        "exec socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket}"
+                    ),
+                    false,
+                    0,
+                    0,
                 )
-            })?;
-        let ready = self
-            .run_remote(
-                host_id,
-                &format!("kill -0 {remote_pid} 2>/dev/null && echo ready || echo failed"),
-            )
-            .await?;
-        if !String::from_utf8_lossy(&ready.stdout).contains("ready") {
-            let _ = self
-                .stop_owned_herdr_bridge(host_id, remote_port, remote_pid)
-                .await;
-            return Err(format!(
-                "socat 启动失败: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+                .await
+                .map_err(|error| format!("socat 启动失败: {error}"))?,
+        );
         let tunnel = match self
             .open_tunnel(host_id, local_port, "127.0.0.1", remote_port)
             .await
         {
             Ok(tunnel) => tunnel,
             Err(error) => {
-                // The remote bridge is owned by this attempt. If local
-                // listener creation or tunnel setup fails, do not leave a
-                // detached socat process behind on the workstation.
-                let _ = self
-                    .stop_owned_herdr_bridge(host_id, remote_port, remote_pid)
-                    .await;
+                let _ = owner.close().await;
                 return Err(error);
             }
         };
+        let previous = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .insert(remote_port, Arc::clone(&owner));
+        if let Some(previous) = previous {
+            let _ = previous.close().await;
+        }
         Ok(HerdrBridgeInfo {
             tunnel,
             remote_socket: socket_path,
             remote_port,
-            remote_pid,
+            // Kept for IPC compatibility with older renderers. Ownership is
+            // now the SSH channel, not a remotely discovered PID.
+            remote_pid: 0,
         })
     }
 
@@ -890,24 +926,24 @@ impl SessionManager {
         &self,
         host_id: HostId,
         remote_port: u16,
-        remote_pid: Option<u32>,
+        _remote_pid: Option<u32>,
     ) -> Result<(), String> {
-        let pid = remote_pid
-            .ok_or_else(|| "bridge owner pid is required; reconnect to refresh it".to_string())?;
-        self.stop_owned_herdr_bridge(host_id, remote_port, pid)
-            .await
-    }
-
-    async fn stop_owned_herdr_bridge(
-        &self,
-        host_id: HostId,
-        remote_port: u16,
-        pid: u32,
-    ) -> Result<(), String> {
-        let command = format!(
-            "args=$(ps -o args= -p {pid} 2>/dev/null || true); case \"$args\" in *socat*{remote_port}*) kill {pid} 2>/dev/null || true ;; esac"
-        );
-        self.run_remote(host_id, &command).await.map(|_| ())
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| "no session for host".to_string())?;
+        let owner = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .remove(&remote_port);
+        if let Some(owner) = owner {
+            owner.close().await.map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// Detects whether `yazi` is installed on the remote host.
@@ -981,8 +1017,22 @@ impl SessionManager {
                     .timeout_ms
                     .map(Duration::from_millis)
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+                // Quick runs use the same atomic remote lifecycle markers as
+                // background runs. The wrapper stays in the foreground so
+                // normal quick commands still return captured output, while
+                // a client timeout leaves enough evidence for reconciliation.
+                // Library callers may execute a non-persisted Quick action.
+                // Still give its remote lifecycle marker a unique identity so
+                // concurrent calls cannot overwrite the nil/default run
+                // directory used by older implementations.
+                let run_id = match run_id {
+                    Some(run_id) => run_id,
+                    None => kodework_domain::RunId::new(),
+                };
+                let run_key = run_id.as_uuid().simple().to_string();
+                let run_script = build_run_script(&command, &run_key)?;
                 let output = self
-                    .run_remote_with_timeout(host_id, &command, timeout)
+                    .run_remote_with_timeout(host_id, &run_script, timeout)
                     .await?;
                 let preview = |bytes: &[u8]| -> String {
                     let text = String::from_utf8_lossy(bytes);
@@ -995,17 +1045,20 @@ impl SessionManager {
                     stdout_preview: preview(&output.stdout),
                     stderr_preview: preview(&output.stderr),
                     output_bytes: (output.stdout.len() + output.stderr.len()) as u64,
-                    remote_session_ref: None,
+                    remote_session_ref: Some(format!("metadata:{run_key}")),
                 })
             }
             ActionMode::Background => {
                 // A background action must survive UI/SSH disconnects. Run it
                 // inside a detached tmux session and return the external
                 // session name in the bounded preview for observability.
-                let run_id = run_id.unwrap_or_default();
+                let run_id = match run_id {
+                    Some(run_id) => run_id,
+                    None => kodework_domain::RunId::new(),
+                };
                 let session_name = format!("kodework-run-{}", run_id.as_uuid().simple());
                 let run_key = run_id.as_uuid().simple().to_string();
-                let run_script = build_background_run_script(&command, &run_key)?;
+                let run_script = build_run_script(&command, &run_key)?;
                 let tmux_command = format!(
                     "tmux new-session -d -s {} -- sh -lc {}",
                     session_name,
@@ -1038,16 +1091,16 @@ impl SessionManager {
         }
     }
 
-    /// Reconciles one persisted background run using authoritative remote
-    /// metadata. Missing metadata is deliberately reported as Unknown.
-    pub async fn reconcile_background_run(
+    /// Reconciles one persisted Quick/Background run using authoritative
+    /// remote metadata. Missing metadata is deliberately reported as Unknown.
+    pub async fn reconcile_remote_run(
         &self,
         host_id: HostId,
         run_id: kodework_domain::RunId,
     ) -> Result<RemoteRunState, String> {
         let id = run_id.as_uuid().simple().to_string();
         let command = format!(
-            "base=\"$HOME/.cache/kodework/runs/{id}\"; if [ -f \"$base/exit_code\" ]; then printf 'completed\\t%s\\t%s\\t%s\\n' \"$(cat -- \"$base/exit_code\")\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif tmux has-session -t 'kodework-run-{id}' >/dev/null 2>&1; then printf 'running\\n'; else printf 'unknown\\n'; fi"
+            "base=\"$HOME/.cache/kodework/runs/{id}\"; if [ -f \"$base/exit_code\" ]; then printf 'completed\\t%s\\t%s\\t%s\\n' \"$(cat -- \"$base/exit_code\")\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif [ -f \"$base/started_at_s\" ] || tmux has-session -t 'kodework-run-{id}' >/dev/null 2>&1; then printf 'running\\n'; else printf 'unknown\\n'; fi"
         );
         let output = self.run_remote(host_id, &command).await?;
         let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1184,6 +1237,16 @@ impl SessionManager {
             .transfers
             .lock()
             .map_err(|_| "transfers lock poisoned".to_string())? = None;
+        let bridges = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .drain()
+            .map(|(_, owner)| owner)
+            .collect::<Vec<_>>();
+        for owner in bridges {
+            let _ = owner.close().await;
+        }
         session
             .subscribers
             .lock()
@@ -1199,9 +1262,8 @@ impl SessionManager {
         disconnect_result
     }
 
-    /// Automatic reconnection lives in the renderer (bounded, with
-    /// backoff); the core layer deliberately keeps no credential material
-    /// to drive background reconnects on its own.
+    /// Reconnect state is owned by the desktop supervisor. The core keeps no
+    /// credential material; the supervisor resolves secrets on each attempt.
     #[must_use]
     pub fn dropped_events(&self, host_id: HostId) -> u64 {
         self.sessions
@@ -1243,6 +1305,7 @@ impl SessionManager {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             pending_events: Arc::new(Mutex::new(HashMap::new())),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            herdr_bridges: Arc::new(Mutex::new(HashMap::new())),
         });
     }
 
@@ -1282,6 +1345,18 @@ impl SessionManager {
         // Tunnels from the old transport are useless; close them.
         let manager = self.tunnels.clone();
         tokio::spawn(async move { manager.close_all_for_host(host_id).await });
+        let bridges = session
+            .herdr_bridges
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .map(|(_, owner)| owner)
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for owner in bridges {
+                let _ = owner.close().await;
+            }
+        });
         *session
             .transfers
             .lock()
@@ -1306,7 +1381,7 @@ impl SessionManager {
     }
 }
 
-fn build_background_run_script(command: &str, run_key: &str) -> Result<String, String> {
+fn build_run_script(command: &str, run_key: &str) -> Result<String, String> {
     let quoted_command = shell_quote(command)?;
     Ok(format!(
         "umask 077 || exit 125; base=\"$HOME/.cache/kodework/runs/{run_key}\"; if ! mkdir -p -- \"$base\"; then exit 125; fi; started_tmp=\"$base/started_at_s.tmp.$$\"; if ! date +%s > \"$started_tmp\" || ! mv -f -- \"$started_tmp\" \"$base/started_at_s\"; then rm -f -- \"$started_tmp\"; exit 125; fi; sh -lc {quoted_command}; code=$?; finished_tmp=\"$base/finished_at_s.tmp.$$\"; exit_tmp=\"$base/exit_code.tmp.$$\"; if ! date +%s > \"$finished_tmp\" || ! mv -f -- \"$finished_tmp\" \"$base/finished_at_s\"; then rm -f -- \"$finished_tmp\" \"$exit_tmp\"; exit 125; fi; if ! printf '%s\\n' \"$code\" > \"$exit_tmp\" || ! mv -f -- \"$exit_tmp\" \"$base/exit_code\"; then rm -f -- \"$exit_tmp\"; exit 125; fi; exit \"$code\""
@@ -1721,7 +1796,7 @@ mod command_safety_tests {
 
     #[test]
     fn background_metadata_preflight_is_fail_closed() {
-        let script = build_background_run_script("printf user-command", "run-123")
+        let script = build_run_script("printf user-command", "run-123")
             .unwrap_or_else(|error| unreachable!("script should be quoted: {error}"));
         let mkdir = script.find("mkdir -p --").unwrap_or(usize::MAX);
         let command = script.find("sh -lc").unwrap_or(usize::MAX);
@@ -1749,6 +1824,7 @@ mod command_safety_tests {
             subscribers: Arc::new(Mutex::new(vec![(None, subscriber_tx)])),
             pending_events: Arc::new(Mutex::new(HashMap::new())),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            herdr_bridges: Arc::new(Mutex::new(HashMap::new())),
         });
 
         event_tx

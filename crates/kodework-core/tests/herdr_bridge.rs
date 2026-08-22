@@ -82,17 +82,9 @@ async fn bridge_probes_socket_and_starts_socat() {
                     },
                 ),
                 (
-                    "(nohup".into(),
+                    "exec socat".into(),
                     FakeExecResponse {
-                        stdout: b"4242\n".to_vec(),
-                        stderr: Vec::new(),
-                        exit_code: 0,
-                    },
-                ),
-                (
-                    "kill -0 4242".into(),
-                    FakeExecResponse {
-                        stdout: b"ready\n".to_vec(),
+                        stdout: Vec::new(),
                         stderr: Vec::new(),
                         exit_code: 0,
                     },
