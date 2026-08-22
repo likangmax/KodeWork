@@ -164,7 +164,7 @@ impl TransferManager {
     ) -> Result<(TransferId, Option<oneshot::Receiver<Result<(), SftpError>>>), SftpError> {
         crate::validate_request(&request)?;
         let id = TransferId::new();
-        let lease = lease_key(&self.lease_scope, &request);
+        let lease = self.lease_key(&request).await?;
         {
             let mut guard = self.leases.lock().map_err(lock_error)?;
             if guard.contains_key(&lease) {
@@ -254,7 +254,7 @@ impl TransferManager {
             .retries_left
             .store(controls.max_retries, Ordering::SeqCst);
         controls.transferred.store(0, Ordering::SeqCst);
-        let lease = lease_key(&self.lease_scope, &request);
+        let lease = self.lease_key(&request).await?;
         {
             let mut guard = self.leases.lock().map_err(lock_error)?;
             if guard.get(&lease).is_some_and(|owner| *owner != id) {
@@ -331,6 +331,25 @@ impl TransferManager {
     async fn emit_state(&self, id: TransferId, status: TransferStatus) {
         let _ = self.events.send(TransferEvent::State { id, status }).await;
     }
+
+    async fn lease_key(&self, request: &TransferRequest) -> Result<String, SftpError> {
+        match request.direction {
+            kodework_domain::TransferDirection::Upload => Ok(format!(
+                "remote:{}:{}",
+                self.lease_scope,
+                normalize_remote_path(
+                    &self
+                        .backend
+                        .destination_identity(&request.remote_path)
+                        .await?
+                )
+            )),
+            kodework_domain::TransferDirection::Download => Ok(format!(
+                "local:{}",
+                normalize_local_path(&request.local_path)
+            )),
+        }
+    }
 }
 
 fn lock_error<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> SftpError {
@@ -341,20 +360,6 @@ fn release_lease(leases: &TransferLeaseRegistry, lease: &str, id: TransferId) {
     if let Ok(mut guard) = leases.lock() {
         if guard.get(lease).copied() == Some(id) {
             guard.remove(lease);
-        }
-    }
-}
-
-fn lease_key(scope: &str, request: &TransferRequest) -> String {
-    match request.direction {
-        kodework_domain::TransferDirection::Upload => {
-            format!(
-                "remote:{scope}:{}",
-                normalize_remote_path(&request.remote_path)
-            )
-        }
-        kodework_domain::TransferDirection::Download => {
-            format!("local:{}", normalize_local_path(&request.local_path))
         }
     }
 }
@@ -397,10 +402,15 @@ fn normalize_local_path(path: &str) -> String {
             }
         }
     }
-    normalized
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
+    let normalized = normalized.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 async fn run_transfer(
@@ -992,7 +1002,7 @@ fn map_disk_error(error: SftpError) -> SftpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{lease_key, normalize_local_path};
+    use super::normalize_local_path;
     use crate::TransferRequest;
     use kodework_domain::TransferDirection;
 
@@ -1016,11 +1026,6 @@ mod tests {
             local_path: second_path.into(),
             ..first.clone()
         };
-        assert_eq!(
-            lease_key("host-a", &first),
-            lease_key("host-a", &second),
-            "equivalent Windows paths must share one destination lease"
-        );
         assert_eq!(
             normalize_local_path(&first.local_path),
             normalize_local_path(&second.local_path)

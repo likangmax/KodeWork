@@ -162,7 +162,7 @@ See the numbered decisions in [`adr/`](adr/) for the rationale behind these boun
 - At most 20 local/remote terminal sessions per workspace, with inactive renderers detached or paused.
 - Fixed-row virtual windows for large remote directories.
 - Single-flight reconnect, host-key, and keyboard-interactive polling.
-- Native reconnect retry/backoff is single-flight per logical `HostId`; the renderer only requests supervision and reflects state.
+- Reconnect retry/backoff is bounded and single-flight per logical `HostId`; the current renderer still triggers recovery polling, while a fully native supervisor remains a follow-up architecture task.
 - Generation guards on reconnect and explicit cleanup of dead subscribers.
 
 ## Verification

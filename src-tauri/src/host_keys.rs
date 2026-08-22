@@ -3,7 +3,7 @@
 //! Bridges the SQLite host-key repository into the SSH host-key broker.
 
 use kodework_domain::HostId;
-use kodework_ssh::host_key::{HostKeyInfo, KnownHosts};
+use kodework_ssh::host_key::{HostKeyInfo, KnownHostMatch, KnownHosts};
 use kodework_storage::host_keys::{HostKeyIdentityRecord, HostKeyRecord, HostKeyRepository};
 use std::sync::{Arc, Mutex};
 
@@ -88,6 +88,44 @@ impl KnownHosts for SqliteKnownHosts {
             fingerprint: legacy.fingerprint,
             key_blob_base64: legacy.key_blob_base64,
         }))
+    }
+
+    fn lookup_for_host_match(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        let guard = self
+            .database
+            .lock()
+            .map_err(|_| "host-key database lock poisoned".to_string())?;
+        let repo = HostKeyRepository::new(guard.connection());
+        if let Some(record) = repo
+            .get_for_host(host_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(KnownHostMatch::HostScoped(HostKeyInfo {
+                hostname: hostname.to_string(),
+                port,
+                algorithm: record.algorithm,
+                fingerprint: record.fingerprint,
+                key_blob_base64: record.key_blob_base64,
+            })));
+        }
+        let Some(legacy) = repo
+            .get(hostname, port)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(KnownHostMatch::LegacyEndpoint(HostKeyInfo {
+            hostname: legacy.hostname,
+            port: legacy.port,
+            algorithm: legacy.algorithm,
+            fingerprint: legacy.fingerprint,
+            key_blob_base64: legacy.key_blob_base64,
+        })))
     }
 
     fn save_for_host(

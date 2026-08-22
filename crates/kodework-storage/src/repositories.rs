@@ -302,6 +302,15 @@ impl<'a> RunRepository<'a> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn count_by_host(&self, host_id: HostId) -> Result<usize, StorageError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE host_id = ?1",
+            params![id_to_blob!(host_id)],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).map_err(|_| StorageError::InvalidRunCount(count))
+    }
+
     pub fn update_status(
         &self,
         id: RunId,

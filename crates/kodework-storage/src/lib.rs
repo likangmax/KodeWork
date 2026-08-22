@@ -94,6 +94,8 @@ pub enum StorageError {
     RunNotFound(kodework_domain::RunId),
     #[error("invalid run status transition: {0:?} -> {1:?}")]
     InvalidRunTransition(kodework_domain::RunStatus, kodework_domain::RunStatus),
+    #[error("invalid run count returned by SQLite: {0}")]
+    InvalidRunCount(i64),
 }
 
 pub fn validate_migrations() -> Result<(), StorageError> {

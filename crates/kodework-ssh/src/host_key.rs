@@ -34,6 +34,15 @@ pub struct HostKeyInfo {
     pub key_blob_base64: String,
 }
 
+/// Provenance of a trusted key returned for a logical host. Legacy endpoint
+/// records are safe to use for this exact endpoint, but should be promoted to
+/// the HostId scope after the presented key matches exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnownHostMatch {
+    HostScoped(HostKeyInfo),
+    LegacyEndpoint(HostKeyInfo),
+}
+
 /// User decision for an unknown host key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostKeyDecision {
@@ -57,6 +66,26 @@ pub trait KnownHosts: Send + Sync {
         port: u16,
     ) -> Result<Option<HostKeyInfo>, String> {
         self.lookup(hostname, port)
+    }
+
+    fn lookup_for_host_match(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        self.lookup_for_host(host_id, hostname, port)
+            .map(|key| key.map(KnownHostMatch::HostScoped))
+    }
+
+    fn promote_legacy_for_host(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+        key: &HostKeyInfo,
+    ) -> Result<(), String> {
+        self.save_for_host(host_id, hostname, port, key)
     }
 
     fn save_for_host(
@@ -119,6 +148,26 @@ impl KnownHosts for MemoryKnownHosts {
             Some(key) => Ok(Some(key)),
             None => self.lookup(hostname, port),
         }
+    }
+
+    fn lookup_for_host_match(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Option<KnownHostMatch>, String> {
+        let host_key = self
+            .host_keys
+            .lock()
+            .map_err(|_| "known-hosts lock poisoned".to_string())?
+            .get(&host_id)
+            .cloned();
+        if let Some(key) = host_key {
+            return Ok(Some(KnownHostMatch::HostScoped(key)));
+        }
+        Ok(self
+            .lookup(hostname, port)?
+            .map(KnownHostMatch::LegacyEndpoint))
     }
 
     fn save_for_host(
@@ -238,16 +287,27 @@ impl HostKeyBroker {
         let saved = match host_id {
             Some(id) => self
                 .known
-                .lookup_for_host(id, hostname, port)
+                .lookup_for_host_match(id, hostname, port)
                 .map_err(SshError::HostKeyStoreUnavailable)?,
             None => self
                 .known
                 .lookup(hostname, port)
-                .map_err(SshError::HostKeyStoreUnavailable)?,
+                .map_err(SshError::HostKeyStoreUnavailable)?
+                .map(KnownHostMatch::HostScoped),
         };
-        if let Some(saved) = saved {
+        if let Some(saved_match) = saved {
+            let saved = match &saved_match {
+                KnownHostMatch::HostScoped(saved) | KnownHostMatch::LegacyEndpoint(saved) => saved,
+            };
             if saved.fingerprint == fingerprint && !saved.key_blob_base64.is_empty() {
                 if saved.key_blob_base64 == info.key_blob_base64 {
+                    if let (Some(host_id), KnownHostMatch::LegacyEndpoint(_)) =
+                        (host_id, &saved_match)
+                    {
+                        self.known
+                            .promote_legacy_for_host(host_id, hostname, port, &info)
+                            .map_err(SshError::HostKeyStoreUnavailable)?;
+                    }
                     return Ok(true);
                 }
             } else if saved.fingerprint == fingerprint {
@@ -404,6 +464,37 @@ mod tests {
             broker.drain_requests().is_empty(),
             "no prompt for known key"
         );
+    }
+
+    #[tokio::test]
+    async fn matching_legacy_key_is_promoted_to_host_scope() {
+        let known = Arc::new(MemoryKnownHosts::new());
+        let key = test_key();
+        let info = HostKeyInfo {
+            hostname: "192.0.2.10".into(),
+            port: 22,
+            algorithm: key.algorithm().to_string(),
+            fingerprint: HostKeyBroker::fingerprint_for(&key),
+            key_blob_base64: key.public_key_base64(),
+        };
+        known
+            .save("192.0.2.10", 22, &info)
+            .unwrap_or_else(|error| unreachable!("legacy save failed: {error}"));
+        let host_id = HostId::new();
+        let broker = HostKeyBroker::new(known.clone(), Duration::from_secs(5));
+        assert_eq!(
+            broker
+                .verify_for_host(Some(host_id), "192.0.2.10", 22, &key)
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            broker
+                .verify_for_host(Some(host_id), "100.64.0.10", 22, &key)
+                .await,
+            Ok(true)
+        );
+        assert!(broker.drain_requests().is_empty());
     }
 
     #[tokio::test]

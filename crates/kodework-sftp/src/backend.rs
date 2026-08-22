@@ -39,6 +39,12 @@ pub trait SftpWriter: Send {
 /// Remote file system operations used by the transfer manager.
 #[async_trait::async_trait]
 pub trait SftpBackend: Send + Sync {
+    /// Returns the canonical identity used for destination leases. Backends
+    /// that support aliases (notably `~` on real SFTP servers) must resolve
+    /// them here so equivalent user inputs share one lease.
+    async fn destination_identity(&self, path: &str) -> Result<String, SftpError> {
+        Ok(path.to_string())
+    }
     async fn stat(&self, path: &str) -> Result<Option<RemoteFileMeta>, SftpError>;
     async fn list(&self, path: &str) -> Result<Vec<RemoteFileMeta>, SftpError>;
     async fn remove(&self, path: &str) -> Result<(), SftpError>;
@@ -216,6 +222,10 @@ impl SftpWriter for RusshWriter {
 
 #[async_trait::async_trait]
 impl SftpBackend for RusshSftpBackend {
+    async fn destination_identity(&self, path: &str) -> Result<String, SftpError> {
+        self.resolve_path(path).await
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<RemoteFileMeta>, SftpError> {
         let path = self.resolve_path(path).await?;
         let meta = match self.session.metadata(&path).await {

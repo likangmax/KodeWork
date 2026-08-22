@@ -853,14 +853,29 @@ impl SessionManager {
             )
             .await?;
         if !String::from_utf8_lossy(&ready.stdout).contains("ready") {
+            let _ = self
+                .stop_owned_herdr_bridge(host_id, remote_port, remote_pid)
+                .await;
             return Err(format!(
                 "socat 启动失败: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let tunnel = self
+        let tunnel = match self
             .open_tunnel(host_id, local_port, "127.0.0.1", remote_port)
-            .await?;
+            .await
+        {
+            Ok(tunnel) => tunnel,
+            Err(error) => {
+                // The remote bridge is owned by this attempt. If local
+                // listener creation or tunnel setup fails, do not leave a
+                // detached socat process behind on the workstation.
+                let _ = self
+                    .stop_owned_herdr_bridge(host_id, remote_port, remote_pid)
+                    .await;
+                return Err(error);
+            }
+        };
         Ok(HerdrBridgeInfo {
             tunnel,
             remote_socket: socket_path,
@@ -879,6 +894,16 @@ impl SessionManager {
     ) -> Result<(), String> {
         let pid = remote_pid
             .ok_or_else(|| "bridge owner pid is required; reconnect to refresh it".to_string())?;
+        self.stop_owned_herdr_bridge(host_id, remote_port, pid)
+            .await
+    }
+
+    async fn stop_owned_herdr_bridge(
+        &self,
+        host_id: HostId,
+        remote_port: u16,
+        pid: u32,
+    ) -> Result<(), String> {
         let command = format!(
             "args=$(ps -o args= -p {pid} 2>/dev/null || true); case \"$args\" in *socat*{remote_port}*) kill {pid} 2>/dev/null || true ;; esac"
         );
@@ -980,10 +1005,7 @@ impl SessionManager {
                 let run_id = run_id.unwrap_or_default();
                 let session_name = format!("kodework-run-{}", run_id.as_uuid().simple());
                 let run_key = run_id.as_uuid().simple().to_string();
-                let run_script = format!(
-                    "umask 077; base=\"$HOME/.cache/kodework/runs/{run_key}\"; mkdir -p -- \"$base\"; date +%s > \"$base/started_at_s.tmp\"; mv -f -- \"$base/started_at_s.tmp\" \"$base/started_at_s\"; sh -lc {} ; code=$?; date +%s > \"$base/finished_at_s.tmp\"; mv -f -- \"$base/finished_at_s.tmp\" \"$base/finished_at_s\"; printf '%s\\n' \"$code\" > \"$base/exit_code.tmp\"; mv -f -- \"$base/exit_code.tmp\" \"$base/exit_code\"; exit \"$code\"",
-                    shell_quote(&command)?,
-                );
+                let run_script = build_background_run_script(&command, &run_key)?;
                 let tmux_command = format!(
                     "tmux new-session -d -s {} -- sh -lc {}",
                     session_name,
@@ -1282,6 +1304,13 @@ impl SessionManager {
             }
         }
     }
+}
+
+fn build_background_run_script(command: &str, run_key: &str) -> Result<String, String> {
+    let quoted_command = shell_quote(command)?;
+    Ok(format!(
+        "umask 077 || exit 125; base=\"$HOME/.cache/kodework/runs/{run_key}\"; if ! mkdir -p -- \"$base\"; then exit 125; fi; started_tmp=\"$base/started_at_s.tmp.$$\"; if ! date +%s > \"$started_tmp\" || ! mv -f -- \"$started_tmp\" \"$base/started_at_s\"; then rm -f -- \"$started_tmp\"; exit 125; fi; sh -lc {quoted_command}; code=$?; finished_tmp=\"$base/finished_at_s.tmp.$$\"; exit_tmp=\"$base/exit_code.tmp.$$\"; if ! date +%s > \"$finished_tmp\" || ! mv -f -- \"$finished_tmp\" \"$base/finished_at_s\"; then rm -f -- \"$finished_tmp\" \"$exit_tmp\"; exit 125; fi; if ! printf '%s\\n' \"$code\" > \"$exit_tmp\" || ! mv -f -- \"$exit_tmp\" \"$base/exit_code\"; then rm -f -- \"$exit_tmp\"; exit 125; fi; exit \"$code\""
+    ))
 }
 
 /// Forwards connection events to subscribers; the primary subscriber gets
@@ -1688,6 +1717,20 @@ mod command_safety_tests {
         assert_eq!(parse_epoch_seconds(Some("invalid")), None);
         assert_eq!(parse_epoch_seconds(None), None);
         assert_eq!(parse_epoch_seconds(Some(&u64::MAX.to_string())), None);
+    }
+
+    #[test]
+    fn background_metadata_preflight_is_fail_closed() {
+        let script = build_background_run_script("printf user-command", "run-123")
+            .unwrap_or_else(|error| unreachable!("script should be quoted: {error}"));
+        let mkdir = script.find("mkdir -p --").unwrap_or(usize::MAX);
+        let command = script.find("sh -lc").unwrap_or(usize::MAX);
+        assert!(mkdir < command, "metadata setup must precede user command");
+        assert!(script.contains("if ! mkdir -p --"));
+        assert!(script.contains("exit 125"), "metadata failures must abort");
+        assert!(script.contains("started_at_s"));
+        assert!(script.contains("finished_at_s"));
+        assert!(script.contains("exit_code"));
     }
 
     #[tokio::test]

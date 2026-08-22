@@ -183,6 +183,14 @@ impl SftpWriter for FakeWriter {
 
 #[async_trait::async_trait]
 impl SftpBackend for FakeSftpBackend {
+    async fn destination_identity(&self, path: &str) -> Result<String, SftpError> {
+        Ok(match path {
+            "~" => "/home/tester".to_string(),
+            path if path.starts_with("~/") => format!("/home/tester/{}", &path[2..]),
+            path => path.to_string(),
+        })
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<RemoteFileMeta>, SftpError> {
         if self.faults.missing_sources {
             return Ok(None);

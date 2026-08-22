@@ -136,6 +136,41 @@ async fn same_destination_is_rejected_while_transfer_is_active() {
 }
 
 #[tokio::test]
+async fn equivalent_remote_home_aliases_share_destination_lease() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    let local = temp_file("lease-alias", 16 * DEFAULT_CHUNK_SIZE);
+    let first = format!("{REMOTE_DIR}/alias.bin");
+    let second = "/home/tester/uploads/alias.bin";
+
+    let id = manager
+        .enqueue(upload_request(&local, &first, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+
+    let duplicate = manager
+        .enqueue(upload_request(&local, second, false), 0)
+        .await;
+    assert!(
+        matches!(duplicate, Err(SftpError::DestinationBusy)),
+        "equivalent remote aliases must share one lease: {duplicate:?}"
+    );
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Completed)
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
 async fn upload_fails_when_source_changes_before_commit() {
     let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
         write_delay_ms: 3,

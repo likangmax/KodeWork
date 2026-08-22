@@ -539,7 +539,7 @@ export default function App() {
   const deleteSelected = async () => {
     if (!selected) return
     // Deleting cascades projects/actions/sessions/tunnels: confirm first.
-    if (!window.confirm('确定删除工作站 ' + selected.label + '？其项目、动作与传输记录将一并删除。')) return
+    if (!window.confirm('确定删除工作站 ' + selected.label + '？项目与动作会删除；已有运行历史会被保留，因此若存在运行历史，删除会被阻止。')) return
     if (isDesktop()) {
       try { await deleteHost(selected.id) } catch (error) { setMessage('删除失败：' + String(error)); return }
     }

@@ -192,25 +192,37 @@ pub(crate) async fn delete_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<bool, String> {
+    let (auth_ref, tailscale_auth_ref, run_count) = {
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        let refs = db
+            .get_host(host_id)
+            .map_err(|error| error.to_string())?
+            .map(|host| {
+                (
+                    host.auth_ref,
+                    host.tailscale.and_then(|config| config.auth_key_ref),
+                )
+            })
+            .unwrap_or((None, None));
+        let run_count = kodework_storage::repositories::RunRepository::new(db.connection())
+            .count_by_host(host_id)
+            .map_err(|error| error.to_string())?;
+        (refs.0, refs.1, run_count)
+    };
+    if run_count > 0 {
+        return Err(format!(
+            "无法删除工作站：该工作站仍有 {run_count} 条运行历史。请先保留或清理运行历史后再删除。"
+        ));
+    }
     // Deleting a host must not leave an SSH transport, tunnel or PTY alive
     // after its persistent record and credential references are gone.
     if let Ok(mut active) = state.reconnecting.lock() {
         active.remove(&host_id);
     }
     let _ = state.sessions.disconnect(host_id).await;
-    let (auth_ref, tailscale_auth_ref) = state
-        .database
-        .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
-        .get_host(host_id)
-        .map_err(|error| error.to_string())?
-        .map(|host| {
-            (
-                host.auth_ref,
-                host.tailscale.and_then(|config| config.auth_key_ref),
-            )
-        })
-        .unwrap_or((None, None));
     let deleted = state
         .database
         .lock()
@@ -1501,13 +1513,16 @@ pub(crate) async fn run_action(
             if action.mode == kodework_domain::ActionMode::Quick && is_run_timeout(error) =>
         {
             (
-                RunStatus::TimedOut,
+                // A command timeout only means this client stopped waiting;
+                // the remote process may still be running. Keep the row
+                // reconcilable instead of claiming the process ended.
+                RunStatus::Unknown,
                 None,
-                Some(finished_at_ms),
+                None,
                 None,
                 0,
                 "",
-                error.as_str(),
+                "等待远端结果超时；远端进程可能仍在运行。",
             )
         }
         Err(error) if action.mode == kodework_domain::ActionMode::Background => (
@@ -1613,6 +1628,22 @@ pub(crate) async fn run_reconcile(
     use kodework_storage::repositories::RunRepository;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    let acquired = state
+        .reconciling
+        .lock()
+        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .insert(host_id);
+    if !acquired {
+        // Renderer tab changes can request the same reconciliation several
+        // times in quick succession. The first pass owns the host; later
+        // calls are harmless no-ops rather than duplicate SSH probe batches.
+        return Ok(0);
+    }
+    let _guard = ReconcileGuard {
+        hosts: state.reconciling.clone(),
+        host_id,
+    };
+
     let runs = {
         let db = state
             .database
@@ -1683,6 +1714,19 @@ pub(crate) async fn run_reconcile(
         reconciled += 1;
     }
     Ok(reconciled)
+}
+
+struct ReconcileGuard {
+    hosts: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<HostId>>>,
+    host_id: HostId,
+}
+
+impl Drop for ReconcileGuard {
+    fn drop(&mut self) {
+        if let Ok(mut hosts) = self.hosts.lock() {
+            hosts.remove(&self.host_id);
+        }
+    }
 }
 
 fn reconciled_run_fields(
