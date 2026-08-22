@@ -4,6 +4,8 @@
 //! fakes implement the same trait for offline transfer tests.
 
 use crate::SftpError;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 /// Remote file metadata.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -54,13 +56,68 @@ pub trait SftpBackend: Send + Sync {
 
 /// russh-sftp backed implementation.
 pub struct RusshSftpBackend {
-    session: std::sync::Arc<russh_sftp::client::SftpSession>,
+    session: Arc<russh_sftp::client::SftpSession>,
+    /// SFTP itself does not require servers to interpret `~`. Resolve it
+    /// once through OpenSSH's explicit expand-path extension and use the
+    /// resulting absolute path for every operation.
+    home: OnceCell<String>,
 }
 
 impl RusshSftpBackend {
     #[must_use]
-    pub fn new(session: std::sync::Arc<russh_sftp::client::SftpSession>) -> Self {
-        Self { session }
+    pub fn new(session: Arc<russh_sftp::client::SftpSession>) -> Self {
+        Self {
+            session,
+            home: OnceCell::new(),
+        }
+    }
+
+    /// Builds a backend with a known remote home directory. This is useful
+    /// for deterministic protocol tests; production callers should use
+    /// [`Self::new`] so the home comes from the connected SFTP server.
+    #[must_use]
+    pub fn new_with_home(
+        session: Arc<russh_sftp::client::SftpSession>,
+        home: impl Into<String>,
+    ) -> Self {
+        let cell = OnceCell::new();
+        let _ = cell.set(home.into());
+        Self {
+            session,
+            home: cell,
+        }
+    }
+
+    async fn remote_home(&self) -> Result<&str, SftpError> {
+        self.home
+            .get_or_try_init(|| async {
+                let expanded = self.session.expand_path("~").await.map_err(|error| {
+                    SftpError::Backend(format!("resolve remote home directory: {error}"))
+                })?;
+                expanded.ok_or_else(|| {
+                    SftpError::Backend(
+                        "remote SFTP server does not support OpenSSH expand-path for '~'"
+                            .to_string(),
+                    )
+                })
+            })
+            .await
+            .map(String::as_str)
+    }
+
+    async fn resolve_path(&self, path: &str) -> Result<String, SftpError> {
+        if path == "~" {
+            return Ok(self.remote_home().await?.to_string());
+        }
+        if let Some(relative) = path.strip_prefix("~/") {
+            let home = self.remote_home().await?;
+            return Ok(if relative.is_empty() {
+                home.to_string()
+            } else {
+                format!("{}/{}", home.trim_end_matches('/'), relative)
+            });
+        }
+        Ok(path.to_string())
     }
 }
 
@@ -160,7 +217,8 @@ impl SftpWriter for RusshWriter {
 #[async_trait::async_trait]
 impl SftpBackend for RusshSftpBackend {
     async fn stat(&self, path: &str) -> Result<Option<RemoteFileMeta>, SftpError> {
-        let meta = match self.session.metadata(path).await {
+        let path = self.resolve_path(path).await?;
+        let meta = match self.session.metadata(&path).await {
             Ok(meta) => meta,
             Err(russh_sftp::client::error::Error::Status(status))
                 if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
@@ -170,7 +228,7 @@ impl SftpBackend for RusshSftpBackend {
             Err(error) => return Err(SftpError::Backend(error.to_string())),
         };
         Ok(Some(RemoteFileMeta {
-            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            name: path.rsplit('/').next().unwrap_or(&path).to_string(),
             size: meta.len(),
             is_dir: meta.is_dir(),
             modified_ms: meta
@@ -182,9 +240,10 @@ impl SftpBackend for RusshSftpBackend {
     }
 
     async fn list(&self, path: &str) -> Result<Vec<RemoteFileMeta>, SftpError> {
+        let path = self.resolve_path(path).await?;
         let entries = self
             .session
-            .read_dir(path)
+            .read_dir(&path)
             .await
             .map_err(|error| SftpError::Backend(error.to_string()))?;
         let mut out = Vec::new();
@@ -201,23 +260,27 @@ impl SftpBackend for RusshSftpBackend {
     }
 
     async fn remove(&self, path: &str) -> Result<(), SftpError> {
+        let path = self.resolve_path(path).await?;
         self.session
-            .remove_file(path)
+            .remove_file(&path)
             .await
             .map_err(|error| SftpError::Backend(error.to_string()))
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<(), SftpError> {
+        let from = self.resolve_path(from).await?;
+        let to = self.resolve_path(to).await?;
         self.session
-            .rename(from, to)
+            .rename(&from, &to)
             .await
             .map_err(|error| SftpError::Backend(error.to_string()))
     }
 
     async fn open_read(&self, path: &str) -> Result<Box<dyn SftpReader>, SftpError> {
+        let path = self.resolve_path(path).await?;
         let file = self
             .session
-            .open(path)
+            .open(&path)
             .await
             .map_err(|error| SftpError::Backend(error.to_string()))?;
         Ok(Box::new(RusshReader { file: Some(file) }))
@@ -228,6 +291,7 @@ impl SftpBackend for RusshSftpBackend {
         path: &str,
         truncate: bool,
     ) -> Result<Box<dyn SftpWriter>, SftpError> {
+        let path = self.resolve_path(path).await?;
         use russh_sftp::protocol::OpenFlags;
         let flags = if truncate {
             OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
@@ -236,7 +300,7 @@ impl SftpBackend for RusshSftpBackend {
         };
         let file = self
             .session
-            .open_with_flags(path, flags)
+            .open_with_flags(&path, flags)
             .await
             .map_err(|error| SftpError::Backend(error.to_string()))?;
         Ok(Box::new(RusshWriter {

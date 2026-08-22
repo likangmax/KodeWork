@@ -1471,19 +1471,22 @@ pub(crate) async fn run_action(
                 value.stdout_preview.as_str(),
                 value.stderr_preview.as_str(),
             ),
-            kodework_core::session::RunDisposition::Completed => (
-                if value.exit_code == Some(0) {
-                    RunStatus::Succeeded
-                } else {
-                    RunStatus::Failed
-                },
-                value.exit_code,
-                Some(finished_at_ms),
-                value.remote_session_ref.as_deref(),
-                value.output_bytes,
-                value.stdout_preview.as_str(),
-                value.stderr_preview.as_str(),
-            ),
+            kodework_core::session::RunDisposition::Completed => {
+                // A channel can close after the remote accepted the command
+                // but before SSH delivered an exit status. That is not proof
+                // of failure; keep the result explicitly unknowable so a
+                // later reconciliation can provide authoritative evidence.
+                let status = completed_run_status(value.exit_code);
+                (
+                    status,
+                    value.exit_code,
+                    (value.exit_code.is_some()).then_some(finished_at_ms),
+                    value.remote_session_ref.as_deref(),
+                    value.output_bytes,
+                    value.stdout_preview.as_str(),
+                    value.stderr_preview.as_str(),
+                )
+            }
             kodework_core::session::RunDisposition::InteractiveDispatched => (
                 RunStatus::Unknown,
                 None,
@@ -1552,6 +1555,14 @@ pub(crate) async fn run_action(
 fn is_run_timeout(error: &str) -> bool {
     let lowered = error.to_ascii_lowercase();
     lowered.contains("timed out") || lowered.contains("timeout")
+}
+
+fn completed_run_status(exit_code: Option<i32>) -> kodework_domain::RunStatus {
+    match exit_code {
+        Some(0) => kodework_domain::RunStatus::Succeeded,
+        Some(_) => kodework_domain::RunStatus::Failed,
+        None => kodework_domain::RunStatus::Unknown,
+    }
 }
 
 /// Lists persisted Action runs for the Activity surface with a bounded page.
@@ -1651,7 +1662,7 @@ pub(crate) async fn run_reconcile(
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_millis() as u64;
-        let (status, exit_code, finished) = reconciled_run_fields(remote, now);
+        let (status, exit_code, finished) = reconciled_run_fields(remote, run.started_at_ms, now);
         let db = state
             .database
             .lock()
@@ -1676,6 +1687,7 @@ pub(crate) async fn run_reconcile(
 
 fn reconciled_run_fields(
     remote: kodework_core::session::RemoteRunState,
+    local_started_at_ms: Option<u64>,
     observed_at_ms: u64,
 ) -> (kodework_domain::RunStatus, Option<i32>, Option<u64>) {
     use kodework_core::session::RemoteRunState;
@@ -1685,8 +1697,8 @@ fn reconciled_run_fields(
         RemoteRunState::Running => (RunStatus::Running, None, None),
         RemoteRunState::Completed {
             exit_code,
+            started_at_ms,
             finished_at_ms,
-            ..
         } => (
             if exit_code == 0 {
                 RunStatus::Succeeded
@@ -1694,7 +1706,16 @@ fn reconciled_run_fields(
                 RunStatus::Failed
             },
             Some(exit_code),
-            Some(finished_at_ms.unwrap_or(observed_at_ms)),
+            Some(match (local_started_at_ms, started_at_ms, finished_at_ms) {
+                (Some(local_start), Some(remote_start), Some(remote_finish))
+                    if remote_finish >= remote_start =>
+                {
+                    local_start.saturating_add(remote_finish.saturating_sub(remote_start))
+                }
+                // Without a local anchor, keep the UI timeline on the local
+                // observation clock rather than mixing in a remote epoch.
+                _ => observed_at_ms,
+            }),
         ),
         // Unknown means that the remote source of truth is temporarily
         // unavailable; it remains reconcilable and must not look finished.
@@ -1704,7 +1725,9 @@ fn reconciled_run_fields(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_run_timeout, reconciled_run_fields, reconnect_error_is_retryable};
+    use super::{
+        completed_run_status, is_run_timeout, reconciled_run_fields, reconnect_error_is_retryable,
+    };
     use kodework_core::session::RemoteRunState;
     use kodework_domain::RunStatus;
 
@@ -1724,7 +1747,7 @@ mod tests {
     #[test]
     fn unknown_reconciliation_keeps_run_open_for_later_evidence() {
         assert_eq!(
-            reconciled_run_fields(RemoteRunState::Unknown, 123),
+            reconciled_run_fields(RemoteRunState::Unknown, Some(1_000), 123),
             (RunStatus::Unknown, None, None)
         );
         assert_eq!(
@@ -1734,6 +1757,7 @@ mod tests {
                     started_at_ms: Some(1_000),
                     finished_at_ms: Some(2_000),
                 },
+                Some(1_000),
                 123,
             ),
             (RunStatus::Succeeded, Some(0), Some(2_000))
@@ -1745,9 +1769,26 @@ mod tests {
                     started_at_ms: None,
                     finished_at_ms: None,
                 },
+                Some(1_000),
                 123,
             ),
             (RunStatus::Failed, Some(17), Some(123))
+        );
+    }
+
+    #[test]
+    fn reconciliation_anchors_remote_duration_to_local_start() {
+        assert_eq!(
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 0,
+                    started_at_ms: Some(5_000_000),
+                    finished_at_ms: Some(5_010_000),
+                },
+                Some(1_000_000),
+                9_999_999,
+            ),
+            (RunStatus::Succeeded, Some(0), Some(1_010_000))
         );
     }
 
@@ -1756,5 +1797,12 @@ mod tests {
         assert!(is_run_timeout("connection timed out"));
         assert!(is_run_timeout("remote command timeout"));
         assert!(!is_run_timeout("authentication failed"));
+    }
+
+    #[test]
+    fn missing_exit_status_is_unknown_after_dispatch() {
+        assert_eq!(completed_run_status(None), RunStatus::Unknown);
+        assert_eq!(completed_run_status(Some(0)), RunStatus::Succeeded);
+        assert_eq!(completed_run_status(Some(23)), RunStatus::Failed);
     }
 }

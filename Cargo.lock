@@ -3021,6 +3021,7 @@ name = "kodework-testkit"
 version = "0.2.3"
 dependencies = [
  "async-trait",
+ "bytes",
  "kodework-domain",
  "kodework-herdr",
  "kodework-sftp",
