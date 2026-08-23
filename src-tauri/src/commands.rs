@@ -10,6 +10,8 @@ use kodework_ssh::connection::AuthMethod;
 use kodework_ssh::host_key::{HostKeyDecision, HostKeyRequest};
 use tauri::{Manager, State};
 
+use kodework_core::session::{ConnectError, ConnectErrorKind};
+
 #[tauri::command]
 pub(crate) fn local_terminal_capabilities() -> kodework_local_pty::LocalTerminalCapabilities {
     kodework_local_pty::LocalTerminalManager::capabilities()
@@ -395,16 +397,8 @@ pub(crate) async fn connect_host(
     state: State<'_, AppState>,
     host: Host,
     password: Option<String>,
-) -> Result<String, String> {
-    connect_host_inner(&state, host, password).await
-}
-
-async fn connect_host_inner(
-    state: &AppState,
-    host: Host,
-    password: Option<String>,
-) -> Result<String, String> {
-    connect_host_inner_with_profile(state, host, password, true).await
+) -> Result<String, ConnectError> {
+    connect_host_inner_with_profile(&state, host, password, true).await
 }
 
 async fn connect_host_inner_with_profile(
@@ -412,7 +406,7 @@ async fn connect_host_inner_with_profile(
     host: Host,
     password: Option<String>,
     register_reconnect_profile: bool,
-) -> Result<String, String> {
+) -> Result<String, ConnectError> {
     // The renderer may hold a stale or tampered copy of a Host.  Resolve the
     // authoritative record by id before selecting credentials or addresses;
     // otherwise an IPC caller could combine one host's credential reference
@@ -420,11 +414,23 @@ async fn connect_host_inner_with_profile(
     let host = state
         .database
         .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
         .get_host(host.id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "host does not exist".to_string())?;
-    validate_host(&host).map_err(|error| AppError::InvalidHost(error).to_string())?;
+        .map_err(|error| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| ConnectError {
+            kind: ConnectErrorKind::InvalidConfiguration,
+            detail: "host does not exist".to_string(),
+        })?;
+    validate_host(&host).map_err(|error| ConnectError {
+        kind: ConnectErrorKind::InvalidConfiguration,
+        detail: AppError::InvalidHost(error).to_string(),
+    })?;
     // Embedded userspace mode is the only mode Kodework starts itself. A
     // missing/invalid auth key is reported before SSH address resolution so
     // the user sees a Tailscale error rather than an opaque network timeout.
@@ -441,17 +447,26 @@ async fn connect_host_inner_with_profile(
                 state
                     .secrets
                     .lock()
-                    .map_err(|_| AppError::StatePoisoned.to_string())?
+                    .map_err(|_| ConnectError {
+                        kind: ConnectErrorKind::Internal,
+                        detail: AppError::StatePoisoned.to_string(),
+                    })?
                     .get(reference)
                     .map(|secret| zeroize::Zeroizing::new(secret.expose().to_vec()))
-                    .map_err(|error| format!("Tailscale auth key lookup failed: {error}"))
+                    .map_err(|error| ConnectError {
+                        kind: ConnectErrorKind::Tailscale,
+                        detail: format!("Tailscale auth key lookup failed: {error}"),
+                    })
             })
             .transpose()?;
         state
             .tailscale
             .ensure(config, key.as_ref().map(|value| value.as_slice()))
             .await
-            .map_err(|error| format!("Tailscale userspace startup failed: {error}"))?;
+            .map_err(|error| ConnectError {
+                kind: ConnectErrorKind::Tailscale,
+                detail: format!("Tailscale userspace startup failed: {error}"),
+            })?;
         key
     } else {
         None
@@ -481,25 +496,21 @@ async fn connect_host_inner_with_profile(
         .transpose()?;
     let outcome = state
         .sessions
-        .connect_with_jump_auth(&host, auth, jump_auth)
+        .connect_with_jump_auth_typed(&host, auth, jump_auth)
         .await?;
     match outcome {
         kodework_core::session::SessionOutcome::Connected { generation, .. } => {
-            let automatic = host.auth_ref.is_some()
-                || matches!(
-                    host.auth_mode,
-                    AuthenticationMode::PublicKey
-                        | AuthenticationMode::SshAgent
-                        | AuthenticationMode::KeyboardInteractive
-                );
-            if automatic && register_reconnect_profile {
+            if register_reconnect_profile {
                 if let Ok(mut profiles) = state.reconnect_profiles.lock() {
                     profiles.insert(host.id);
                 }
             }
             Ok(format!("connected; generation {generation}"))
         }
-        kodework_core::session::SessionOutcome::Failed { reason, .. } => Err(reason),
+        kodework_core::session::SessionOutcome::Failed { reason, .. } => Err(ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: reason,
+        }),
     }
 }
 
@@ -507,7 +518,26 @@ async fn connect_host_inner_with_profile(
 /// observe `session_state`, but it no longer owns retry timing or lifecycle.
 pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let retry_schedule =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                HostId,
+                (u32, std::time::Instant),
+            >::new()));
+        let mut observed_wake_epoch = app
+            .state::<AppState>()
+            .reconnect_wake_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         loop {
+            let wake_epoch = app
+                .state::<AppState>()
+                .reconnect_wake_epoch
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if wake_epoch != observed_wake_epoch {
+                observed_wake_epoch = wake_epoch;
+                if let Ok(mut schedule) = retry_schedule.lock() {
+                    schedule.clear();
+                }
+            }
             let host_ids = {
                 let state = app.state::<AppState>();
                 state
@@ -519,6 +549,20 @@ pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
             for host_id in host_ids {
                 let state = app.state::<AppState>();
                 if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+                    if let Ok(mut schedule) = retry_schedule.lock() {
+                        schedule.remove(&host_id);
+                    }
+                    continue;
+                }
+                let retry_is_due = retry_schedule
+                    .lock()
+                    .map(|schedule| {
+                        schedule
+                            .get(&host_id)
+                            .is_none_or(|(_, due)| std::time::Instant::now() >= *due)
+                    })
+                    .unwrap_or(false);
+                if !retry_is_due {
                     continue;
                 }
                 let acquired = state
@@ -530,6 +574,7 @@ pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
                     continue;
                 }
                 let app_for_attempt = app.clone();
+                let retry_schedule_for_attempt = retry_schedule.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = reconnect_host_inner(&app_for_attempt, host_id).await;
                     if let Some(state) = app_for_attempt.try_state::<AppState>() {
@@ -537,28 +582,63 @@ pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
                             active.remove(&host_id);
                         }
                         if let Err(error) = result {
-                            let lowered = error.to_ascii_lowercase();
                             let profile_active = state
                                 .reconnect_profiles
                                 .lock()
                                 .map(|profiles| profiles.contains(&host_id))
                                 .unwrap_or(false);
                             if profile_active {
-                                if lowered.contains("credential")
-                                    || lowered.contains("password is required")
-                                    || lowered.contains("passphrase")
-                                    || lowered.contains("private key")
-                                    || lowered.contains("authentication")
-                                {
-                                    state.sessions.mark_waiting_for_credential(host_id);
-                                } else if reconnect_error_is_retryable(&error) {
+                                if matches!(
+                                    error.kind,
+                                    ConnectErrorKind::CredentialRequired
+                                        | ConnectErrorKind::Authentication
+                                ) {
+                                    if let Err(state_error) =
+                                        state.sessions.mark_waiting_for_credential(host_id)
+                                    {
+                                        eprintln!(
+                                            "failed to mark host {host_id:?} waiting for credential: {state_error}"
+                                        );
+                                    }
+                                    if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                                        schedule.remove(&host_id);
+                                    }
+                                } else if error.kind.retryable() {
                                     // A bounded attempt batch must not turn a
                                     // transient outage into a terminal Failed
                                     // state. Keep ownership visible so the next
                                     // supervisor tick can retry after backoff.
-                                    state.sessions.mark_reconnecting(host_id);
+                                    if let Err(state_error) =
+                                        state.sessions.mark_reconnecting(host_id)
+                                    {
+                                        eprintln!(
+                                            "failed to retain reconnect ownership for host {host_id:?}: {state_error}"
+                                        );
+                                        if let Ok(mut schedule) = retry_schedule_for_attempt.lock()
+                                        {
+                                            schedule.remove(&host_id);
+                                        }
+                                    } else if let Ok(mut schedule) =
+                                        retry_schedule_for_attempt.lock()
+                                    {
+                                        let attempts = schedule
+                                            .get(&host_id)
+                                            .map_or(1, |(attempts, _)| attempts.saturating_add(1));
+                                        schedule.insert(
+                                            host_id,
+                                            (
+                                                attempts,
+                                                std::time::Instant::now()
+                                                    + reconnect_backoff(attempts),
+                                            ),
+                                        );
+                                    }
+                                } else if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                                    schedule.remove(&host_id);
                                 }
                             }
+                        } else if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                            schedule.remove(&host_id);
                         }
                     }
                 });
@@ -568,154 +648,86 @@ pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
     });
 }
 
-async fn reconnect_host_inner(app: &tauri::AppHandle, host_id: HostId) -> Result<String, String> {
-    let state = app.state::<AppState>();
-    let host = state
-        .database
-        .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
-        .get_host(host_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "host does not exist".to_string())?;
-    let mut last_error = String::from("reconnect failed");
-    for attempt in 0..5u32 {
-        if !reconnect_is_active(&state, host_id)? {
-            return Err("reconnect cancelled".to_string());
-        }
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                (500u64.saturating_mul(2u64.pow(attempt - 1))).min(8_000),
-            ))
-            .await;
-            if !reconnect_is_active(&state, host_id)? {
-                return Err("reconnect cancelled".to_string());
-            }
-        }
-        match connect_host_inner_with_profile(&state, host.clone(), None, false).await {
-            Ok(message) => {
-                if !reconnect_is_active(&state, host_id)? {
-                    let _ = state.sessions.disconnect(host_id).await;
-                    return Err("reconnect cancelled".to_string());
-                }
-                return Ok(message);
-            }
-            Err(error) => {
-                last_error = error.clone();
-                if !reconnect_error_is_retryable(&error) {
-                    break;
-                }
-            }
-        }
+pub(crate) fn wake_connection_supervisor(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state
+            .reconnect_wake_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    Err(last_error)
 }
 
-/// Runs the bounded reconnect policy in the native layer. The renderer only
-/// requests supervision; credential lookup, backoff and single-flight
-/// ownership stay inside the desktop process.
-#[tauri::command]
-pub(crate) async fn reconnect_host(
-    state: State<'_, AppState>,
+fn reconnect_backoff(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1).min(4);
+    std::time::Duration::from_millis(1_200 * (1_u64 << exponent))
+}
+
+async fn reconnect_host_inner(
+    app: &tauri::AppHandle,
     host_id: HostId,
-) -> Result<String, String> {
-    if state.sessions.state(host_id) != ConnectionState::Reconnecting {
-        return Err("session is not waiting for reconnect".to_string());
-    }
+) -> Result<String, ConnectError> {
+    let state = app.state::<AppState>();
+    reconnect_once(&state, host_id).await
+}
+
+async fn reconnect_once(state: &AppState, host_id: HostId) -> Result<String, ConnectError> {
     let host = state
         .database
         .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
         .get_host(host_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "host does not exist".to_string())?;
-    let automatic = host.auth_ref.is_some()
-        || matches!(
-            host.auth_mode,
-            AuthenticationMode::PublicKey
-                | AuthenticationMode::SshAgent
-                | AuthenticationMode::KeyboardInteractive
-        );
-    if !automatic {
-        return Err("interactive credentials are required".to_string());
+        .map_err(|error| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| ConnectError {
+            kind: ConnectErrorKind::InvalidConfiguration,
+            detail: "host does not exist".to_string(),
+        })?;
+    if !can_attempt_unattended(&host) {
+        return Err(ConnectError {
+            kind: ConnectErrorKind::CredentialRequired,
+            detail: "this authentication mode requires user interaction".to_string(),
+        });
     }
+    if !reconnect_is_active(state, host_id)? {
+        return Err(ConnectError {
+            kind: ConnectErrorKind::Cancelled,
+            detail: "reconnect cancelled".to_string(),
+        });
+    }
+    let message = connect_host_inner_with_profile(state, host, None, false).await?;
+    if !reconnect_is_active(state, host_id)?
+        || state.sessions.state(host_id) != ConnectionState::Ready
     {
-        let mut active = state
-            .reconnecting
-            .lock()
-            .map_err(|_| AppError::StatePoisoned.to_string())?;
-        if !active.insert(host_id) {
-            return Ok("reconnect already in progress".to_string());
-        }
+        let _ = state.sessions.disconnect(host_id).await;
+        return Err(ConnectError {
+            kind: ConnectErrorKind::Cancelled,
+            detail: "reconnect cancelled".to_string(),
+        });
     }
-    let result = async {
-        let mut last_error = String::from("reconnect failed");
-        for attempt in 0..3u32 {
-            // `connect_host_inner` legitimately moves the session through
-            // Resolving/Connecting and leaves it Failed after a transient
-            // attempt. The reconnect ownership set, not the transient
-            // connection state, is the retry gate; otherwise the first
-            // failure cancels attempts 2 and 3.
-            if !reconnect_is_active(&state, host_id)? {
-                return Err("reconnect cancelled".to_string());
-            }
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1200 * attempt as u64)).await;
-                if !reconnect_is_active(&state, host_id)? {
-                    return Err("reconnect cancelled".to_string());
-                }
-            }
-            match connect_host_inner_with_profile(&state, host.clone(), None, false).await {
-                Ok(message) => {
-                    if reconnect_is_active(&state, host_id)?
-                        && state.sessions.state(host_id) == ConnectionState::Ready
-                    {
-                        return Ok(message);
-                    }
-                    let _ = state.sessions.disconnect(host_id).await;
-                    return Err("reconnect cancelled".to_string());
-                }
-                Err(error) => {
-                    last_error = error.clone();
-                    if !reconnect_error_is_retryable(&error) {
-                        break;
-                    }
-                }
-            }
-        }
-        Err(last_error)
-    }
-    .await;
-    state
-        .reconnecting
-        .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
-        .remove(&host_id);
-    result
+    Ok(message)
 }
 
-fn reconnect_is_active(state: &AppState, host_id: HostId) -> Result<bool, String> {
+fn can_attempt_unattended(host: &Host) -> bool {
+    match host.auth_mode {
+        AuthenticationMode::Password => host.auth_ref.is_some(),
+        AuthenticationMode::PublicKey | AuthenticationMode::SshAgent => true,
+        AuthenticationMode::KeyboardInteractive => false,
+    }
+}
+
+fn reconnect_is_active(state: &AppState, host_id: HostId) -> Result<bool, ConnectError> {
     Ok(state
         .reconnecting
         .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
         .contains(&host_id))
-}
-
-fn reconnect_error_is_retryable(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    !lowered.starts_with("fatal connection error")
-        && !lowered.contains("reconnect cancelled")
-        && !lowered.contains("reconnect canceled")
-        && !lowered.contains("authentication failed")
-        && !lowered.contains("permission denied")
-        && !lowered.contains("private key")
-        && !lowered.contains("invalid configuration")
-        && !lowered.contains("key error")
-        && !lowered.contains("encrypted")
-        && !lowered.contains("decryption")
-        && !lowered.contains("credential")
-        && !lowered.contains("password is required")
-        && !lowered.contains("passphrase")
 }
 
 fn expand_user_path(value: &str) -> std::path::PathBuf {
@@ -740,28 +752,40 @@ fn resolve_auth_methods(
     private_key_path: Option<&str>,
     auth_ref: Option<&kodework_domain::CredentialRef>,
     supplied_secret: Option<kodework_ssh::connection::ZeroizingVec>,
-) -> Result<Vec<AuthMethod>, String> {
+) -> Result<Vec<AuthMethod>, ConnectError> {
     let stored_secret = if supplied_secret.is_none() {
         match auth_ref {
             Some(reference) if crate::secrets::is_managed_reference(reference) => {
                 let secret = state
                     .secrets
                     .lock()
-                    .map_err(|_| AppError::StatePoisoned.to_string())?
+                    .map_err(|_| ConnectError {
+                        kind: ConnectErrorKind::Internal,
+                        detail: AppError::StatePoisoned.to_string(),
+                    })?
                     .get(reference)
-                    .map_err(|error| format!("credential lookup failed: {error}"))?;
+                    .map_err(|error| ConnectError {
+                        kind: ConnectErrorKind::CredentialRequired,
+                        detail: format!("credential lookup failed: {error}"),
+                    })?;
                 if secret.expose().is_empty() {
-                    return Err("stored credential is empty".to_string());
+                    return Err(ConnectError {
+                        kind: ConnectErrorKind::CredentialRequired,
+                        detail: "stored credential is empty".to_string(),
+                    });
                 }
                 Some(kodework_ssh::connection::ZeroizingVec::new(
                     secret.expose().to_vec(),
                 ))
             }
             Some(reference) => {
-                return Err(format!(
-                    "credential provider {:?} is not supported for SSH authentication",
-                    reference.provider
-                ));
+                return Err(ConnectError {
+                    kind: ConnectErrorKind::InvalidConfiguration,
+                    detail: format!(
+                        "credential provider {:?} is not supported for SSH authentication",
+                        reference.provider
+                    ),
+                });
             }
             None => None,
         }
@@ -770,9 +794,14 @@ fn resolve_auth_methods(
     };
     let secret = supplied_secret.or(stored_secret);
     match mode {
-        AuthenticationMode::Password => Ok(vec![AuthMethod::Password(
-            secret.ok_or_else(|| "password is required".to_string())?,
-        )]),
+        AuthenticationMode::Password => {
+            Ok(vec![AuthMethod::Password(secret.ok_or_else(|| {
+                ConnectError {
+                    kind: ConnectErrorKind::CredentialRequired,
+                    detail: "password is required".to_string(),
+                }
+            })?)])
+        }
         AuthenticationMode::PublicKey => {
             let key_path = private_key_path
                 .filter(|path| !path.trim().is_empty())
@@ -783,10 +812,10 @@ fn resolve_auth_methods(
                         .unwrap_or_else(|| std::path::PathBuf::from(".ssh/id_ed25519"))
                 });
             if !key_path.is_file() {
-                return Err(format!(
-                    "private key does not exist: {}",
-                    key_path.display()
-                ));
+                return Err(ConnectError {
+                    kind: ConnectErrorKind::InvalidConfiguration,
+                    detail: format!("private key does not exist: {}", key_path.display()),
+                });
             }
             Ok(vec![AuthMethod::PublicKey {
                 key_path,
@@ -988,6 +1017,35 @@ pub(crate) async fn disconnect_host(
 #[tauri::command]
 pub(crate) fn session_state(state: State<'_, AppState>, host_id: HostId) -> ConnectionState {
     state.sessions.state(host_id)
+}
+
+/// Streams native connection snapshots. The renderer observes this channel;
+/// it does not schedule retries or maintain a lifecycle polling loop.
+#[tauri::command]
+pub(crate) async fn session_runtime_subscribe(
+    state: State<'_, AppState>,
+    host_id: HostId,
+    on_event: tauri::ipc::Channel<kodework_core::session::ConnectionRuntimeSnapshot>,
+) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut previous = None;
+        let mut last_delivery = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        loop {
+            let snapshot = sessions.runtime_snapshot(host_id);
+            if previous != Some(snapshot)
+                || last_delivery.elapsed() >= std::time::Duration::from_secs(5)
+            {
+                if on_event.send(snapshot).is_err() {
+                    break;
+                }
+                previous = Some(snapshot);
+                last_delivery = std::time::Instant::now();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1369,15 +1427,14 @@ pub(crate) async fn herdr_bridge(
 
 /// Stops the remote socat bridge.
 #[tauri::command]
-pub(crate) async fn herdr_bridge_stop(
+pub(crate) async fn herdr_bridge_stop_by_id(
     state: State<'_, AppState>,
     host_id: HostId,
-    remote_port: u16,
-    remote_pid: Option<u32>,
+    bridge_id: kodework_domain::BridgeId,
 ) -> Result<(), String> {
     state
         .sessions
-        .herdr_bridge_stop(host_id, remote_port, remote_pid)
+        .herdr_bridge_stop_by_id(host_id, bridge_id)
         .await
 }
 /// Lists all command snippets.
@@ -1627,7 +1684,8 @@ pub(crate) async fn run_action(
         return state
             .sessions
             .run_action_with_id(host_id, &action, confirmed, None)
-            .await;
+            .await
+            .map_err(|error| error.to_string());
     }
 
     let started_at_ms = SystemTime::now()
@@ -1643,7 +1701,9 @@ pub(crate) async fn run_action(
         command_snapshot: action.command.clone(),
         mode: action.mode,
         cwd_snapshot: action.cwd.clone(),
-        status: RunStatus::Running,
+        // Persistence precedes dispatch so a desktop crash cannot erase the
+        // user's intent. It is not Running until remote evidence exists.
+        status: RunStatus::Queued,
         started_at_ms: Some(started_at_ms),
         finished_at_ms: None,
         exit_code: None,
@@ -1716,9 +1776,14 @@ pub(crate) async fn run_action(
                 value.stderr_preview.as_str(),
             ),
         },
-        Err(error) if action.mode == kodework_domain::ActionMode::Quick => {
+        Err(error)
+            if matches!(
+                action.mode,
+                kodework_domain::ActionMode::Quick | kodework_domain::ActionMode::Background
+            ) && error.was_dispatched() =>
+        {
             (
-                // Any Quick transport error after dispatch is ambiguous: a
+                // Any transport error after dispatch is ambiguous: a
                 // remote process may still be running, and a lost channel is
                 // not evidence of a non-zero exit. Keep it reconcilable
                 // rather than manufacturing Failed/TimedOut.
@@ -1728,33 +1793,24 @@ pub(crate) async fn run_action(
                 None,
                 0,
                 "",
-                if is_run_timeout(error) {
+                if error.is_timeout() {
                     "等待远端结果超时；远端进程可能仍在运行。"
                 } else {
                     "远端结果未知；连接在完成状态返回前中断，稍后可重试对账。"
                 },
             )
         }
-        Err(error) if action.mode == kodework_domain::ActionMode::Background => (
-            // A transport/launcher error does not prove that the detached
-            // tmux session was never created. Keep the row reconcilable so a
-            // later connection can inspect the atomic remote marker.
-            RunStatus::Unknown,
-            None,
-            None,
-            None,
-            0,
-            "",
-            error.as_str(),
-        ),
         Err(error) => (
+            // The exec request was never handed to the transport, or the
+            // server explicitly rejected it. This is a genuine start failure,
+            // not Unknown.
             RunStatus::Failed,
             None,
             Some(finished_at_ms),
             None,
             0,
             "",
-            error.as_str(),
+            error.message(),
         ),
     };
     let db = state
@@ -1774,12 +1830,7 @@ pub(crate) async fn run_action(
             None,
         )
         .map_err(|error| error.to_string())?;
-    outcome
-}
-
-fn is_run_timeout(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("timed out") || lowered.contains("timeout")
+    outcome.map_err(|error| error.to_string())
 }
 
 fn completed_run_status(exit_code: Option<i32>) -> kodework_domain::RunStatus {
@@ -1863,63 +1914,78 @@ pub(crate) async fn run_reconcile(
             .list_reconcilable_by_host(host_id, 100)
             .map_err(|error| error.to_string())?
     };
-    // Probe several detached runs concurrently, but keep a small bound so a
-    // reconnect cannot turn a large history page into an SSH channel storm.
-    let probe_limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-    let mut probes = Vec::with_capacity(runs.len());
-    for run in runs {
-        let permit = std::sync::Arc::clone(&probe_limit)
-            .acquire_owned()
+    // Probe bounded batches rather than opening one SSH exec channel per run.
+    // A network/probe failure leaves that batch untouched; it is not business
+    // evidence that any remote command stopped.
+    let mut completed_probes = Vec::with_capacity(runs.len());
+    for batch in runs.chunks(32) {
+        let requests = batch
+            .iter()
+            .map(|run| kodework_core::session::RemoteRunProbeRequest {
+                run_id: run.id,
+                mode: run.mode,
+            })
+            .collect::<Vec<_>>();
+        let probes = match state
+            .sessions
+            .reconcile_remote_runs(host_id, &requests)
             .await
-            .map_err(|_| "reconcile probe limit closed".to_string())?;
-        let sessions = state.sessions.clone();
-        probes.push(tauri::async_runtime::spawn(async move {
-            let _permit = permit;
-            let result = sessions.reconcile_remote_run(host_id, run.id).await;
-            (run, result)
-        }));
-    }
-    let mut completed_probes = Vec::with_capacity(probes.len());
-    for probe in probes {
-        match probe.await {
-            Ok((run, Ok(remote))) => completed_probes.push((run, remote)),
-            // A transport/probe failure is not evidence that the remote
-            // command stopped. Leave the row untouched and let a later pass
-            // retry it; never turn a network outage into business-level
-            // Unknown evidence.
-            Ok((_run, Err(_))) => {}
-            // A panicked/cancelled task cannot safely identify its run here.
-            // Other completed probes are still authoritative and must be
-            // committed; this row remains reconcilable on the next pass.
-            Err(_) => {}
+        {
+            Ok(probes) => probes,
+            Err(_) => continue,
+        };
+        for probe in probes {
+            if let Some(run) = batch.iter().find(|run| run.id == probe.run_id) {
+                completed_probes.push((run.clone(), probe.state));
+            }
         }
     }
 
-    let mut reconciled = 0usize;
-    for (run, remote) in completed_probes {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_millis() as u64;
-        let (status, exit_code, finished) = reconciled_run_fields(remote, run.started_at_ms, now);
+    let (reconciled, cleanup) = {
+        let mut reconciled = 0usize;
+        let mut cleanup = Vec::new();
         let db = state
             .database
             .lock()
             .map_err(|_| AppError::StatePoisoned.to_string())?;
-        RunRepository::new(db.connection())
-            .finish(
-                run.id,
+        let repository = RunRepository::new(db.connection());
+        let mut updates = Vec::with_capacity(completed_probes.len());
+        for (run, remote) in completed_probes {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_millis() as u64;
+            let (status, exit_code, finished) =
+                reconciled_run_fields(remote, run.started_at_ms, now);
+            updates.push(kodework_storage::repositories::RunReconciliationUpdate {
+                id: run.id,
                 status,
                 exit_code,
-                finished,
-                run.remote_session_ref.as_deref(),
-                run.output_bytes,
-                &run.stdout_preview,
-                &run.stderr_preview,
-                Some(now),
-            )
+                finished_at_ms: finished,
+                remote_session_ref: run.remote_session_ref.clone(),
+                output_bytes: run.output_bytes,
+                reconciled_at_ms: now,
+            });
+            if matches!(
+                remote,
+                kodework_core::session::RemoteRunState::Completed { .. }
+            ) {
+                cleanup.push(run.id);
+            }
+            reconciled += 1;
+        }
+        repository
+            .finish_batch(&updates)
             .map_err(|error| error.to_string())?;
-        reconciled += 1;
+        (reconciled, cleanup)
+    };
+    // Local storage is durable now; remote cleanup is strictly best effort and
+    // cannot invalidate or roll back a terminal local result.
+    for run_id in cleanup {
+        let _ = state
+            .sessions
+            .cleanup_remote_run_metadata(host_id, run_id)
+            .await;
     }
     Ok(reconciled)
 }
@@ -1977,24 +2043,39 @@ fn reconciled_run_fields(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        completed_run_status, is_run_timeout, reconciled_run_fields, reconnect_error_is_retryable,
-    };
-    use kodework_core::session::RemoteRunState;
+    use super::{completed_run_status, reconciled_run_fields, reconnect_backoff};
+    use kodework_core::session::{ConnectErrorKind, RemoteRunState};
     use kodework_domain::RunStatus;
 
     #[test]
     fn reconnect_does_not_retry_fatal_or_credential_errors() {
-        assert!(!reconnect_error_is_retryable(
-            "fatal connection error for host: host key changed"
-        ));
-        assert!(!reconnect_error_is_retryable("authentication failed"));
-        assert!(!reconnect_error_is_retryable(
-            "invalid configuration: key error: encrypted key"
-        ));
-        assert!(!reconnect_error_is_retryable("reconnect cancelled"));
-        assert!(reconnect_error_is_retryable("connection timed out"));
-        assert!(reconnect_error_is_retryable("remote host is unreachable"));
+        assert!(!ConnectErrorKind::HostKey.retryable());
+        assert!(!ConnectErrorKind::Authentication.retryable());
+        assert!(!ConnectErrorKind::InvalidConfiguration.retryable());
+        assert!(!ConnectErrorKind::Cancelled.retryable());
+        assert!(ConnectErrorKind::Timeout.retryable());
+        assert!(ConnectErrorKind::Network.retryable());
+        assert!(ConnectErrorKind::Tailscale.retryable());
+    }
+
+    #[test]
+    fn reconnect_backoff_is_bounded_and_monotonic() {
+        assert_eq!(
+            reconnect_backoff(1),
+            std::time::Duration::from_millis(1_200)
+        );
+        assert_eq!(
+            reconnect_backoff(2),
+            std::time::Duration::from_millis(2_400)
+        );
+        assert_eq!(
+            reconnect_backoff(5),
+            std::time::Duration::from_millis(19_200)
+        );
+        assert_eq!(
+            reconnect_backoff(100),
+            std::time::Duration::from_millis(19_200)
+        );
     }
 
     #[test]
@@ -2043,13 +2124,6 @@ mod tests {
             ),
             (RunStatus::Succeeded, Some(0), Some(1_010_000))
         );
-    }
-
-    #[test]
-    fn timeout_errors_are_classified_as_run_timeouts() {
-        assert!(is_run_timeout("connection timed out"));
-        assert!(is_run_timeout("remote command timeout"));
-        assert!(!is_run_timeout("authentication failed"));
     }
 
     #[test]

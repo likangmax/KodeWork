@@ -794,3 +794,114 @@ async fn finished_transfers_are_reaped_from_the_registry() {
     );
     cleanup(&local);
 }
+
+/// Polls until the destination lease is free again: a fresh enqueue to the
+/// same remote path must be accepted, not rejected as `DestinationBusy`.
+/// This is the observable proof that an in-flight worker has stopped.
+async fn wait_for_destination_free(
+    manager: &TransferManager,
+    local: &std::path::Path,
+    remote: &str,
+    timeout: Duration,
+) -> kodework_domain::TransferId {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match manager
+            .enqueue(upload_request(local, remote, false), 0)
+            .await
+        {
+            Ok(id) => return id,
+            Err(SftpError::DestinationBusy) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "destination stayed busy after the event pump died"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => unreachable!("unexpected enqueue error: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn dead_event_pump_aborts_worker_and_releases_destination() {
+    // Dropping the receiver models the renderer subscription going away
+    // (reconnect, panel teardown). The pump stops draining the bounded
+    // event channel; an in-flight worker must not block on it. It aborts at
+    // the next chunk boundary and releases the destination lease, so the
+    // same destination can be used again instead of staying busy for the
+    // process lifetime.
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 5,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, rx) = TransferManager::new(backend.clone(), 2, 8);
+    let local = temp_file("deadpump", 32 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/deadpump.bin");
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    // Provably mid-flight before the consumer disappears.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "slow backend must be transferring"
+    );
+    drop(rx);
+    // Old behavior: the worker blocked forever on `send`, held the lease and
+    // never exited, so this poll timed out. New behavior: the worker aborts
+    // and the lease is released promptly.
+    let second = wait_for_destination_free(&manager, &local, &remote, Duration::from_secs(5)).await;
+    let _ = manager.cancel(second);
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn abandoned_transfer_can_be_retried_after_pump_death() {
+    // After the consumer disappears and the worker aborts, `retry()` must
+    // find the worker stopped and the transfer still registered (inside the
+    // grace window). The old blocking send would leave the worker stranded
+    // in `running` forever and `retry()` would fail with "worker did not
+    // stop".
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 5,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, rx) = TransferManager::new(backend.clone(), 2, 8);
+    let local = temp_file("retrypump", 8 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/retrypump.bin");
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(rx);
+    // Wait until the worker has provably stopped before retrying. A second
+    // transfer uses a different remote path so it never disturbs the
+    // original destination lease.
+    let second = wait_for_destination_free(
+        &manager,
+        &local,
+        &format!("{REMOTE_DIR}/retrypump-second.bin"),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = manager.cancel(second);
+
+    manager
+        .retry(id)
+        .await
+        .unwrap_or_else(|error| unreachable!("retry after pump death: {error}"));
+    // The retried worker has no consumer and cancels again; what matters is
+    // that the retry path did not see a permanently "running" worker.
+    cleanup(&local);
+}

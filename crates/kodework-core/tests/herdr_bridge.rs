@@ -63,7 +63,7 @@ fn ok() -> FakeExecResponse {
 #[tokio::test]
 async fn bridge_probes_socket_and_starts_socat() {
     let server = FakeSshServer::start(FakeSshOptions {
-        exec: FakeExecBehavior::Scripted {
+        exec: FakeExecBehavior::ScriptedWithPersistent {
             script: vec![
                 (
                     "printf".into(),
@@ -81,16 +81,9 @@ async fn bridge_probes_socket_and_starts_socat() {
                         exit_code: 0,
                     },
                 ),
-                (
-                    "exec socat".into(),
-                    FakeExecResponse {
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        exit_code: 0,
-                    },
-                ),
             ],
             fallback: ok(),
+            persistent_prefixes: vec!["exec socat".into()],
         },
         ..FakeSshOptions::default()
     })
@@ -130,9 +123,78 @@ async fn bridge_probes_socket_and_starts_socat() {
     assert!(info.tunnel.local_addr.starts_with("127.0.0.1:"));
 
     manager
-        .herdr_bridge_stop(host.id, info.remote_port, Some(info.remote_pid))
+        .herdr_bridge_stop_by_id(host.id, info.bridge_id)
         .await
         .unwrap_or_else(|error| unreachable!("bridge stop: {error}"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn bridge_rejects_socat_that_exits_during_startup() {
+    let server = FakeSshServer::start(FakeSshOptions {
+        exec: FakeExecBehavior::Scripted {
+            script: vec![
+                (
+                    "printf".into(),
+                    FakeExecResponse {
+                        stdout: b"/home/tester/.herdr/run/herdr.sock\n".to_vec(),
+                        stderr: Vec::new(),
+                        exit_code: 0,
+                    },
+                ),
+                (
+                    "command -v socat".into(),
+                    FakeExecResponse {
+                        stdout: b"yes\n".to_vec(),
+                        stderr: Vec::new(),
+                        exit_code: 0,
+                    },
+                ),
+                (
+                    "exec socat".into(),
+                    FakeExecResponse {
+                        stdout: Vec::new(),
+                        stderr: b"bind: address already in use\n".to_vec(),
+                        exit_code: 1,
+                    },
+                ),
+            ],
+            fallback: ok(),
+        },
+        ..FakeSshOptions::default()
+    })
+    .await
+    .unwrap_or_else(|error| unreachable!("server: {error}"));
+    let host = host_with(server.addr().port());
+    let host_key = broker();
+    let resolver = CandidateResolver::new(Vec::new(), ResolverPolicy::default());
+    let manager = SessionManager::new(Arc::clone(&host_key), resolver, 512);
+    let outcome_task = tokio::spawn({
+        let manager = manager.clone();
+        let host = host.clone();
+        let auth = auth();
+        async move { manager.connect(&host, auth).await }
+    });
+    let mut requests = Vec::new();
+    for _ in 0..200 {
+        requests = host_key.drain_requests();
+        if !requests.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(requests.len(), 1);
+    assert!(host_key.answer(requests[0].request_id, HostKeyDecision::TrustOnce));
+    outcome_task
+        .await
+        .unwrap_or_else(|error| unreachable!("join: {error}"))
+        .unwrap_or_else(|error| unreachable!("connect: {error}"));
+
+    let error = match manager.herdr_bridge(host.id, 0).await {
+        Err(error) => error,
+        Ok(_) => unreachable!("an immediately exiting socat must not be reported ready"),
+    };
+    assert!(error.contains("exited during startup"), "got: {error}");
     server.shutdown().await;
 }
 

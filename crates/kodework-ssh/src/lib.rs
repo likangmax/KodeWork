@@ -10,7 +10,8 @@ pub mod host_key;
 pub mod keyboard_interactive;
 
 pub use connection::{
-    AuthMethod, CommandOutput, ConnectionOptions, ProxyCommand, SshConnection, SshExec, SshPty,
+    AuthMethod, CommandExecutionError, CommandOutput, ConnectionOptions, ProxyCommand,
+    SshConnection, SshExec, SshPty,
 };
 
 use std::io;
@@ -38,6 +39,10 @@ pub enum SshError {
     /// Authentication failed after all configured methods were tried.
     #[error("authentication failed")]
     AuthenticationFailed,
+    /// Authentication cannot proceed without fresh user-provided credential
+    /// material (for example an encrypted private-key passphrase).
+    #[error("authentication credential is required: {0}")]
+    CredentialRequired(String),
     /// A configured authentication method cannot be used in this build.
     #[error("authentication method is unavailable: {0}")]
     AuthMethodUnavailable(&'static str),
@@ -50,6 +55,11 @@ pub enum SshError {
     /// The remote host could not be reached (DNS/network failure).
     #[error("remote host is unreachable")]
     Unreachable,
+    /// The candidate hostname could not be resolved. This is safe to classify
+    /// separately so address fallback can try a later LAN/Tailscale/manual
+    /// candidate without parsing platform-specific resolver text.
+    #[error("host name resolution failed: {0}")]
+    NameResolution(String),
     /// The operation was cancelled by the caller.
     #[error("connection was cancelled")]
     Cancelled,
@@ -114,7 +124,10 @@ impl From<io::Error> for SshError {
 pub fn address_fallback_is_retryable(error: &SshError) -> bool {
     matches!(
         error,
-        SshError::Timeout | SshError::ConnectionRefused | SshError::Unreachable
+        SshError::Timeout
+            | SshError::ConnectionRefused
+            | SshError::Unreachable
+            | SshError::NameResolution(_)
     )
 }
 
@@ -135,6 +148,9 @@ mod tests {
         assert!(address_fallback_is_retryable(&SshError::Timeout));
         assert!(address_fallback_is_retryable(&SshError::ConnectionRefused));
         assert!(address_fallback_is_retryable(&SshError::Unreachable));
+        assert!(address_fallback_is_retryable(&SshError::NameResolution(
+            "not found".into()
+        )));
     }
 
     #[test]

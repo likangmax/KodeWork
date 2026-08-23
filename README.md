@@ -92,10 +92,12 @@ See the full boundary and data-flow description in [`docs/ARCHITECTURE.md`](docs
 ## Documentation
 
 - [User guide](docs/USER-GUIDE.md) · [中文用户指南](docs/USER-GUIDE.zh-CN.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Agent/maintainer guide](docs/AGENT-GUIDE.md)
 - [Documentation map](docs/README.md)
 - [Project status](docs/STATUS.md) · [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md)
 - [Architecture](docs/ARCHITECTURE.md) · [Release matrix](docs/RELEASE-MATRIX.md) · [Changelog](docs/CHANGELOG.md)
+- [Cross-platform roadmap](docs/CROSS-PLATFORM-ROADMAP.md)
 
 ## Security principles
 

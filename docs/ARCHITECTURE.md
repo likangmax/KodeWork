@@ -62,7 +62,7 @@ SSH / SFTP / Herdr / tmux]
 | Boundary | Owns | Must not own |
 | --- | --- | --- |
 | `src/` | view state, layout, keyboard routing, renderer lifecycle | credentials, SSH sockets, filesystem secrets, connection truth |
-| `src-tauri/` | thin command/DTO translation, desktop plugins, tray and window lifecycle | business rules, retry policy, SFTP implementation |
+| `src-tauri/` | command/DTO translation, native reconnect supervision, desktop plugins, tray and window lifecycle | SSH/SFTP implementation, renderer-owned lifecycle policy |
 | `kodework-core` | connection generations, session lifecycle, actions/runs, tunnels, transfer orchestration | Tauri types or React state |
 | `kodework-domain` | stable models, validation, explicit state machines, danger classification | I/O, platform APIs, persistence |
 | adapter crates | one integration boundary each (SSH, SFTP, Tailscale, Herdr, local PTY, storage, secrets) | cross-cutting UI policy |
@@ -84,7 +84,7 @@ Low-frequency typed commands create and control resources: connect, disconnect, 
 
 ### Data plane
 
-High-frequency streams never use one IPC call per byte. Rust aggregates terminal output into bounded frames and sends ordered `TerminalFrame` values through a Tauri Channel. Transfer and Run output use the same pattern, with cancellation and backpressure. A connection generation is attached to every frame so output from an obsolete connection cannot overwrite a newer one.
+High-frequency streams never use one IPC call per byte. Rust aggregates terminal output into bounded frames and sends ordered `TerminalFrame` values through a Tauri Channel. Transfer and Run output use the same pattern, with cancellation and backpressure. The native event pump checks the connection generation before subscriber delivery or replay, so output from an obsolete connection cannot overwrite a newer one.
 
 ```text
 keyboard input -> bounded input queue -> SSH/local PTY
@@ -101,18 +101,22 @@ definition. Each Run stores the host, project, command, mode, and working-folder
 snapshot captured at launch. A detached Background Run starts as `Running`; the
 tmux launcher returning zero is not treated as command success. The remote
 wrapper atomically writes an exit-code marker under
-`~/.cache/kodework/runs/<run-id>/`, and `run_reconcile` compares that marker and
-the tmux session after reconnect. If neither source is authoritative, the UI
-shows `Unknown` instead of guessing failure or success. Deleting an Action or
-Project does not erase its historical Run; deleting the Host intentionally
-removes all host-owned records.
+`~/.cache/kodework/runs/<run-id>/`, and batched `run_reconcile` compares that
+marker and the owned tmux session after reconnect. For Quick, a started marker
+without an exit marker is `Unknown`; for Background, only a currently owned
+tmux session proves `Running`. If neither source is authoritative, the UI shows
+`Unknown` instead of guessing failure or success. Historical Run rows retain
+their snapshots when mutable Actions or Projects are deleted.
 
-Quick Actions apply their configured timeout to the observed SSH command and
-record `TimedOut` when that deadline expires. Interactive and Background
+Quick Actions apply their configured timeout to the observed SSH command. A
+local observer timeout records an unresolved/`Unknown` result unless remote
+termination is proven; it does not claim that the remote process was killed.
+Interactive and Background
 Actions have no local command deadline: Interactive is dispatched to the PTY,
 while Background execution is owned by the remote tmux wrapper. During startup,
 queued or running Quick Runs left by a terminated desktop process are marked
-`Interrupted`; detached Background Runs are left available for reconciliation.
+`Unknown` and remain reconcilable; detached Background Runs are also left
+available for reconciliation.
 
 Run history stores lifecycle metadata, command snapshots, and byte counts only.
 Stdout/stderr previews are kept in memory for the active result view and are
@@ -126,9 +130,10 @@ versions.
 3. Verify the SSH host-key fingerprint before accepting the session. Trust is bound to the logical `HostId`, so LAN, Tailscale, and public fallback paths for one workstation must present the same identity; legacy address-scoped records remain a compatibility fallback. A changed key is a hard failure.
 4. Authenticate with password, private key, Windows SSH Agent/Pageant, or keyboard-interactive prompts.
 5. Create independent PTY, exec, SFTP, and tunnel channels under one connection generation.
-6. Event pumps reject stale transport generations before forwarding data or
-   adding it to the bounded pane replay buffer, so reconnects cannot mix old
-   output into the new session.
+6. The `ConnectionStateController` is the only production state writer. Event
+   pumps reject stale transport generations before forwarding data or adding it
+   to the bounded pane replay buffer, so reconnects cannot mix old output into
+   the new session.
 
 Tailscale supplies a network path or address discovery. It does not replace SSH authentication or host-key verification.
 
@@ -144,11 +149,14 @@ Tailscale supplies a network path or address discovery. It does not replace SSH 
 - Dangerous Actions are reclassified in Rust. Clearly observational commands
   are Safe, known destructive commands are Dangerous, and unknown shell
   constructs are Review; a UI flag cannot downgrade the server decision.
-- Herdr socket bridges record the exact remote `socat` PID, verify readiness,
-  and stop only that owned process. They never use broad `pkill -f` matching.
-- Host-key identities were introduced per logical Host in schema v10, preventing
-  an address fallback from silently becoming a different trusted workstation;
-  the current storage schema is v11, which also removes persisted run output.
+- Herdr socket bridges are owned by an SSH exec channel and identified locally
+  by a `BridgeId`; stopping one closes only its tunnel and channel. They never
+  use detached processes or broad `pkill -f` matching.
+- Host-key identities were introduced per logical Host in schema v10 and are
+  stored per algorithm since schema v12, preventing an address fallback from
+  silently becoming a different trusted workstation. Schema v11 removes
+  persisted run output and schema v13 stores jump-host authentication
+  independently.
 - Production CSP is restrictive; loopback frames are allowed only for an explicit SSH Web Preview tunnel.
 
 See the numbered decisions in [`adr/`](adr/) for the rationale behind these boundaries.
@@ -158,11 +166,17 @@ See the numbered decisions in [`adr/`](adr/) for the rationale behind these boun
 - Bounded queues and bounded terminal replay buffers.
 - No `read_to_end` for large transfers; a 512 MiB fixture is covered by the test suite.
 - Resume never trusts `.part` length alone: the existing prefix is compared
-  byte-for-byte with the current source, and a mismatch restarts safely.
+  byte-for-byte with the current source, and a mismatch restarts safely. The
+  real SFTP backend canonicalizes `~` through the server's expand-path API;
+  hash-only resume is deferred until the SSH/SFTP boundary can provide a
+  trusted remote digest capability.
 - At most 20 local/remote terminal sessions per workspace, with inactive renderers detached or paused.
 - Fixed-row virtual windows for large remote directories.
 - Single-flight reconnect, host-key, and keyboard-interactive polling.
-- Reconnect retry/backoff is bounded and single-flight per logical `HostId`; the current renderer still triggers recovery polling, while a fully native supervisor remains a follow-up architecture task.
+- Reconnect attempts are single-flight per logical `HostId`, use typed failure
+  kinds, and are launched by the native process supervisor. The renderer
+  subscribes to native runtime snapshots and does not own retry counters or
+  backoff decisions.
 - Generation guards on reconnect and explicit cleanup of dead subscribers.
 
 ## Verification

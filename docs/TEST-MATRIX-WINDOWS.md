@@ -20,7 +20,7 @@ Run a four-hour preflight:
 .\scripts\run-soak-matrix.ps1 -Hours 4 -IncludeLargeTransfer
 ```
 
-`-AllowSleepCycle` is deliberately opt-in because it suspends Windows. The application additionally probes session state immediately on WebView focus, visibility restoration, or network-online notification; its normal three-second transport poll remains the fallback.
+`-AllowSleepCycle` is deliberately opt-in because it suspends Windows. The renderer no longer polls connection state: the native supervisor scans per-host reconnect schedules and pushes `ConnectionRuntimeSnapshot` values over a Tauri Channel, with a low-frequency heartbeat that also detects dead subscribers. OS resume, window focus, tray open, and second-instance focus bump the `reconnect_wake_epoch` so pending backoff is cancelled and the next attempt starts immediately.
 
 ## Physical Windows acceptance
 

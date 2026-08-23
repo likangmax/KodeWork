@@ -1,6 +1,7 @@
 import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RemoteFileMeta } from '../api'
 import { Icon } from '../icons'
+import type { Translator } from '../i18n'
 import { calculateVirtualWindow } from './virtualization'
 
 const ROW_HEIGHT = 34
@@ -12,6 +13,7 @@ type Props = {
   selectedRemote: string | null
   formatSize: (bytes: number) => string
   onOpen: (entry: RemoteFileMeta) => void
+  t: Translator
 }
 
 const remotePathFor = (currentPath: string, name: string) =>
@@ -23,6 +25,7 @@ export const VirtualFileList = memo(function VirtualFileList({
   selectedRemote,
   formatSize,
   onOpen,
+  t,
 }: Props) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
@@ -64,7 +67,7 @@ export const VirtualFileList = memo(function VirtualFileList({
       className="files-body virtual-file-viewport"
       onScroll={measure}
       role="listbox"
-      aria-label={`远程目录 ${currentPath}，${entries.length} 项`}
+      aria-label={t('remoteDirectoryItems', currentPath, String(entries.length))}
     >
       <div className="virtual-file-space" style={{ height: windowRange.totalHeight }}>
         <div className="virtual-file-window" style={{ transform: `translateY(${windowRange.offsetTop}px)` }}>

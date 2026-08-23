@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -234,9 +235,41 @@ impl SshConnection {
             .await
             .map_err(|_| SshError::Timeout)??
         } else {
+            let addresses = tokio::time::timeout(
+                options.connect_timeout,
+                tokio::net::lookup_host((&options.hostname[..], options.port)),
+            )
+            .await
+            .map_err(|_| SshError::Timeout)?
+            .map_err(|error| SshError::NameResolution(error.to_string()))?
+            .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(SshError::NameResolution(
+                    "resolver returned no addresses".to_string(),
+                ));
+            }
+            let deadline = tokio::time::Instant::now() + options.connect_timeout;
+            let mut stream = None;
+            let mut last_error = SshError::Unreachable;
+            for address in addresses {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(SshError::Timeout);
+                }
+                match tokio::time::timeout(remaining, tokio::net::TcpStream::connect(address)).await
+                {
+                    Ok(Ok(connected)) => {
+                        stream = Some(connected);
+                        break;
+                    }
+                    Ok(Err(error)) => last_error = error.into(),
+                    Err(_) => return Err(SshError::Timeout),
+                }
+            }
+            let stream = stream.ok_or(last_error)?;
             tokio::time::timeout(
                 options.connect_timeout,
-                client::connect(config, (&options.hostname[..], options.port), handler),
+                client::connect_stream(config, stream, handler),
             )
             .await
             .map_err(|_| SshError::Timeout)??
@@ -377,7 +410,30 @@ impl SshConnection {
         channel.exec(true, command.as_bytes().to_vec()).await?;
         let (read, write) = channel.split();
         drop(read);
-        Ok(SshExec { channel: write })
+        Ok(SshExec {
+            channel: write,
+            reader: None,
+            filtered_channel: None,
+        })
+    }
+
+    /// Runs a long-lived command whose lifecycle is owned by the returned
+    /// channel. Unlike `exec`, output is kept off the terminal event stream
+    /// and can be inspected during startup with `SshExec::ensure_running`.
+    pub async fn exec_owned(&self, command: &str) -> Result<SshExec, SshError> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.exec(true, command.as_bytes().to_vec()).await?;
+        let channel_id = channel.id().number();
+        self.filtered_channels
+            .lock()
+            .map_err(|_| SshError::Cancelled)?
+            .insert(channel_id);
+        let (read, write) = channel.split();
+        Ok(SshExec {
+            channel: write,
+            reader: Some(tokio::sync::Mutex::new(read)),
+            filtered_channel: Some((Arc::clone(&self.filtered_channels), channel_id)),
+        })
     }
 
     /// Opens a direct-tcpip channel to `remote_host:remote_port` and
@@ -451,9 +507,25 @@ impl SshConnection {
         timeout: Duration,
         max_capture: usize,
     ) -> Result<CommandOutput, SshError> {
+        self.run_command_tracked(command, timeout, max_capture)
+            .await
+            .map_err(|error| error.source)
+    }
+
+    /// Runs one command while preserving whether it may have been dispatched.
+    /// Once the exec request is handed to the transport, a lost reply is
+    /// ambiguous; only a pre-send failure or an explicit server rejection
+    /// proves that this channel did not start the command.
+    pub async fn run_command_tracked(
+        &self,
+        command: &str,
+        timeout: Duration,
+        max_capture: usize,
+    ) -> Result<CommandOutput, CommandExecutionError> {
         // Bound channel creation and exec acknowledgement too. Previously the
         // deadline started only after both awaited successfully, so a busy
         // transport could leave runtime detection stuck forever.
+        let dispatched = AtomicBool::new(false);
         let outcome = tokio::time::timeout(timeout, async {
             let mut channel = self.handle.channel_open_session().await?;
             let channel_id = channel.id().number();
@@ -475,6 +547,7 @@ impl SshConnection {
                 channel_id,
             };
             channel.exec(true, command.as_bytes().to_vec()).await?;
+            dispatched.store(true, Ordering::SeqCst);
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let mut stdout_truncated = false;
@@ -483,7 +556,17 @@ impl SshConnection {
             let mut saw_eof = false;
             while let Some(message) = channel.wait().await {
                 match message {
+                    russh::ChannelMsg::Success => {
+                        dispatched.store(true, Ordering::SeqCst);
+                    }
+                    russh::ChannelMsg::Failure => {
+                        dispatched.store(false, Ordering::SeqCst);
+                        return Err(SshError::Protocol(
+                            "remote rejected exec request".to_string(),
+                        ));
+                    }
                     russh::ChannelMsg::Data { data } => {
+                        dispatched.store(true, Ordering::SeqCst);
                         if stdout.len() < max_capture {
                             stdout.extend_from_slice(&data);
                         } else {
@@ -491,6 +574,7 @@ impl SshConnection {
                         }
                     }
                     russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                        dispatched.store(true, Ordering::SeqCst);
                         if stderr.len() < max_capture {
                             stderr.extend_from_slice(&data);
                         } else {
@@ -498,6 +582,7 @@ impl SshConnection {
                         }
                     }
                     russh::ChannelMsg::ExitStatus { exit_status } => {
+                        dispatched.store(true, Ordering::SeqCst);
                         exit_code = Some(exit_status);
                         if saw_eof {
                             break;
@@ -507,12 +592,18 @@ impl SshConnection {
                     // EOF loses a valid status and turns successful remote
                     // probes into the synthetic code -1.
                     russh::ChannelMsg::Eof => {
+                        dispatched.store(true, Ordering::SeqCst);
                         saw_eof = true;
                         if exit_code.is_some() {
                             break;
                         }
                     }
-                    russh::ChannelMsg::Close => break,
+                    russh::ChannelMsg::Close => {
+                        if !dispatched.load(Ordering::SeqCst) {
+                            return Err(SshError::ChannelClosed);
+                        }
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -525,7 +616,17 @@ impl SshConnection {
             })
         })
         .await;
-        outcome.map_err(|_| SshError::Timeout)?
+        match outcome {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(source)) => Err(CommandExecutionError {
+                source,
+                dispatched: dispatched.load(Ordering::SeqCst),
+            }),
+            Err(_) => Err(CommandExecutionError {
+                source: SshError::Timeout,
+                dispatched: dispatched.load(Ordering::SeqCst),
+            }),
+        }
     }
 
     /// Gracefully closes the transport. Remote sessions survive.
@@ -649,11 +750,65 @@ impl SshPty {
 /// An open exec channel.
 pub struct SshExec {
     channel: russh::ChannelWriteHalf<russh::client::Msg>,
+    reader: Option<tokio::sync::Mutex<russh::ChannelReadHalf>>,
+    filtered_channel: Option<(Arc<Mutex<HashSet<u32>>>, u32)>,
 }
 
 impl SshExec {
+    /// Verifies that a long-lived exec has not exited during its startup
+    /// grace period. Timeout means the channel is still alive; an exit/close
+    /// is surfaced with a bounded stderr diagnostic.
+    pub async fn ensure_running(&self, grace: Duration) -> Result<(), SshError> {
+        let deadline = tokio::time::Instant::now() + grace;
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            SshError::InvalidConfiguration("exec channel is not owned/readable".to_string())
+        })?;
+        let mut reader = reader.lock().await;
+        let mut diagnostic = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let message = match tokio::time::timeout(remaining, reader.wait()).await {
+                Err(_) => return Ok(()),
+                Ok(Some(message)) => message,
+                Ok(None) => return Err(SshError::ChannelClosed),
+            };
+            match message {
+                russh::ChannelMsg::ExtendedData { data, .. } | russh::ChannelMsg::Data { data } => {
+                    let available = 4096usize.saturating_sub(diagnostic.len());
+                    diagnostic.extend_from_slice(&data[..data.len().min(available)]);
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    let detail = String::from_utf8_lossy(&diagnostic);
+                    return Err(SshError::Protocol(format!(
+                        "owned exec exited during startup with status {exit_status}: {detail}"
+                    )));
+                }
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => {
+                    let detail = String::from_utf8_lossy(&diagnostic);
+                    return Err(SshError::Protocol(format!(
+                        "owned exec closed during startup: {detail}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub async fn close(&self) -> Result<(), SshError> {
         self.channel.close().await.map_err(SshError::from)
+    }
+}
+
+impl Drop for SshExec {
+    fn drop(&mut self) {
+        if let Some((channels, channel_id)) = &self.filtered_channel {
+            if let Ok(mut channels) = channels.lock() {
+                channels.remove(channel_id);
+            }
+        }
     }
 }
 
@@ -682,7 +837,15 @@ async fn authenticate(
                 let mut passphrase_str = passphrase
                     .as_ref()
                     .map(|value| String::from_utf8_lossy(value.as_slice()).into_owned());
-                let key = load_secret_key(key_path, passphrase_str.as_deref())?;
+                let key = match load_secret_key(key_path, passphrase_str.as_deref()) {
+                    Ok(key) => key,
+                    Err(russh::keys::Error::KeyIsEncrypted) if passphrase_str.is_none() => {
+                        return Err(SshError::CredentialRequired(
+                            "private-key passphrase".to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 if let Some(value) = passphrase_str.as_mut() {
                     value.zeroize();
                 }
@@ -820,4 +983,24 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+}
+
+/// Failure from a bounded exec command together with the last protocol fact
+/// needed by higher layers to avoid manufacturing a false terminal result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandExecutionError {
+    pub source: SshError,
+    pub dispatched: bool,
+}
+
+impl std::fmt::Display for CommandExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for CommandExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }

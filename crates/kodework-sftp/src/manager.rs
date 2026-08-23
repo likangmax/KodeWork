@@ -2,6 +2,11 @@
 
 //! Streaming transfer manager with bounded concurrency, idempotent
 //! pause/resume/cancel/retry and `.part` + atomic-rename semantics.
+//!
+//! Events flow through a bounded channel drained by an external pump. A
+//! worker never blocks on event delivery: if the pump stops, the worker
+//! aborts at the next chunk boundary and releases its destination lease,
+//! so a vanished subscriber cannot strand transfers forever.
 
 use crate::backend::SftpBackend;
 use crate::{part_path, SftpError, TransferProgress, TransferRequest, DEFAULT_CHUNK_SIZE};
@@ -77,6 +82,9 @@ pub struct TransferManager {
     leases: TransferLeaseRegistry,
     lease_scope: String,
     events: mpsc::Sender<TransferEvent>,
+    /// Cleared by [`TransferManager::event_pump_stopped`] once the owner of
+    /// the event receiver stops draining it.
+    pump_alive: Arc<AtomicBool>,
     chunk_size: usize,
 }
 
@@ -120,9 +128,18 @@ impl TransferManager {
             leases,
             lease_scope: lease_scope.into(),
             events,
+            pump_alive: Arc::new(AtomicBool::new(true)),
             chunk_size: DEFAULT_CHUNK_SIZE,
         };
         (manager, receiver)
+    }
+
+    /// Signals that nothing is draining the event receiver any more. In-flight
+    /// workers stop at their next chunk boundary instead of blocking on a full
+    /// event channel, which would otherwise hold the destination lease and the
+    /// concurrency permit for the lifetime of the process.
+    pub fn event_pump_stopped(&self) {
+        self.pump_alive.store(false, Ordering::SeqCst);
     }
 
     #[must_use]
@@ -286,6 +303,7 @@ impl TransferManager {
         let backend = Arc::clone(&self.backend);
         let semaphore = Arc::clone(&self.semaphore);
         let events = self.events.clone();
+        let pump_alive = Arc::clone(&self.pump_alive);
         let chunk_size = self.chunk_size;
         let controls_map = Arc::clone(&self.controls);
         let requests_map = Arc::clone(&self.requests);
@@ -294,7 +312,10 @@ impl TransferManager {
         let reaper_controls = Arc::clone(&controls);
         tokio::spawn(async move {
             let permit = semaphore.acquire().await;
-            let outcome = run_transfer(backend, id, request, controls, events, chunk_size).await;
+            let outcome = run_transfer(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await;
             // The worker has stopped touching the destination, so a new
             // enqueue may proceed immediately. Reaper cleanup remains a
             // second defensive release for abnormal timing.
@@ -329,7 +350,12 @@ impl TransferManager {
     }
 
     async fn emit_state(&self, id: TransferId, status: TransferStatus) {
-        let _ = self.events.send(TransferEvent::State { id, status }).await;
+        emit(
+            &self.events,
+            &self.pump_alive,
+            TransferEvent::State { id, status },
+        )
+        .await;
     }
 
     async fn lease_key(&self, request: &TransferRequest) -> Result<String, SftpError> {
@@ -413,26 +439,34 @@ fn normalize_local_path(path: &str) -> String {
     }
 }
 
+/// Emits one event without ever blocking a worker indefinitely. The event
+/// pump applies backpressure by draining the bounded channel; if it has
+/// stopped, in-flight workers must abort instead of holding leases and
+/// concurrency permits while nobody consumes their progress.
+async fn emit(events: &mpsc::Sender<TransferEvent>, pump_alive: &AtomicBool, event: TransferEvent) {
+    if !pump_alive.load(Ordering::SeqCst) {
+        return;
+    }
+    // Prefer non-blocking delivery: the pump drains the bounded channel, so
+    // `Full` means it is overwhelmed or wedged. A blocking `send` here is
+    // exactly how a dead pump strands a worker (and its destination lease)
+    // forever. If the channel is full, skip this event and let the next
+    // pump-alive check abort the transfer instead.
+    let _ = events.try_send(event);
+}
+
 async fn run_transfer(
     backend: Arc<dyn SftpBackend>,
     id: TransferId,
     request: TransferRequest,
     controls: Arc<TransferControls>,
     events: mpsc::Sender<TransferEvent>,
+    pump_alive: Arc<AtomicBool>,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
-    controls.running.store(true, Ordering::SeqCst);
-    let outcome = attempt_transfer(
-        backend.as_ref(),
-        id,
-        &request,
-        &controls,
-        &events,
-        chunk_size,
-    )
-    .await;
-
-    // Ensure the running flag is cleared on every exit path.
+    // Ensure the running flag is cleared on every exit path, including a
+    // dropped worker during the first attempt. Without this, `retry()` can
+    // never re-run a transfer whose worker was abandoned mid-flight.
     struct RunningGuard {
         controls: Arc<TransferControls>,
     }
@@ -444,74 +478,107 @@ async fn run_transfer(
     let _running = RunningGuard {
         controls: Arc::clone(&controls),
     };
+    controls.running.store(true, Ordering::SeqCst);
+    let outcome = attempt_transfer(
+        backend.as_ref(),
+        id,
+        &request,
+        &controls,
+        &events,
+        &pump_alive,
+        chunk_size,
+    )
+    .await;
 
     let mut current = outcome;
     while let Err(error) = current {
         if matches!(error, SftpError::Cancelled) || controls.cancelled.load(Ordering::SeqCst) {
-            let _ = events
-                .send(TransferEvent::State {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
                     id,
                     status: TransferStatus::Cancelled,
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(SftpError::Cancelled);
         }
         if !error.is_retryable() {
-            let _ = events
-                .send(TransferEvent::Failed {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::Failed {
                     id,
                     message: error.to_string(),
-                })
-                .await;
-            let _ = events
-                .send(TransferEvent::State {
+                },
+            )
+            .await;
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
                     id,
                     status: TransferStatus::Failed,
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(error);
         }
         let retries_left = controls.retries_left.load(Ordering::SeqCst);
         if retries_left == 0 {
-            let _ = events
-                .send(TransferEvent::Failed {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::Failed {
                     id,
                     message: error.to_string(),
-                })
-                .await;
-            let _ = events
-                .send(TransferEvent::State {
+                },
+            )
+            .await;
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
                     id,
                     status: TransferStatus::Failed,
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(error);
         }
         controls
             .retries_left
             .store(retries_left - 1, Ordering::SeqCst);
-        let _ = events
-            .send(TransferEvent::State {
+        emit(
+            &events,
+            &pump_alive,
+            TransferEvent::State {
                 id,
                 status: TransferStatus::Retrying,
-            })
-            .await;
+            },
+        )
+        .await;
         current = attempt_transfer(
             backend.as_ref(),
             id,
             &request,
             &controls,
             &events,
+            &pump_alive,
             chunk_size,
         )
         .await;
     }
-    let _ = events
-        .send(TransferEvent::State {
+    emit(
+        &events,
+        &pump_alive,
+        TransferEvent::State {
             id,
             status: TransferStatus::Completed,
-        })
-        .await;
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -521,24 +588,37 @@ async fn attempt_transfer(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     wait_while_paused(controls).await;
     if controls.cancelled.load(Ordering::SeqCst) {
         return Err(SftpError::Cancelled);
     }
-    let _ = events
-        .send(TransferEvent::State {
+    emit(
+        events,
+        pump_alive,
+        TransferEvent::State {
             id,
             status: TransferStatus::Transferring,
-        })
-        .await;
+        },
+    )
+    .await;
+    if !pump_alive.load(Ordering::SeqCst) {
+        return Err(SftpError::Cancelled);
+    }
     match request.direction {
         TransferDirection::Upload => {
-            upload(backend, id, request, controls, events, chunk_size).await
+            upload(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await
         }
         TransferDirection::Download => {
-            download(backend, id, request, controls, events, chunk_size).await
+            download(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await
         }
     }
 }
@@ -549,6 +629,7 @@ async fn upload(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -616,6 +697,9 @@ async fn upload(
         if controls.cancelled.load(Ordering::SeqCst) {
             return Err(SftpError::Cancelled);
         }
+        if !pump_alive.load(Ordering::SeqCst) {
+            return Err(SftpError::Cancelled);
+        }
         let n = local
             .read(&mut buf)
             .await
@@ -633,7 +717,7 @@ async fn upload(
             speed_bps,
         };
         if progress_throttle.should_emit(progress) {
-            let _ = events.send(TransferEvent::Progress { id, progress }).await;
+            emit(events, pump_alive, TransferEvent::Progress { id, progress }).await;
         }
     }
 
@@ -674,6 +758,7 @@ async fn download(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -733,6 +818,9 @@ async fn download(
         if controls.cancelled.load(Ordering::SeqCst) {
             return Err(SftpError::Cancelled);
         }
+        if !pump_alive.load(Ordering::SeqCst) {
+            return Err(SftpError::Cancelled);
+        }
         let n = reader.read(&mut buf).await?;
         if n == 0 {
             break;
@@ -755,7 +843,7 @@ async fn download(
             speed_bps,
         };
         if progress_throttle.should_emit(progress) {
-            let _ = events.send(TransferEvent::Progress { id, progress }).await;
+            emit(events, pump_alive, TransferEvent::Progress { id, progress }).await;
         }
     }
 

@@ -231,6 +231,17 @@ pub struct RunRepository<'a> {
     connection: &'a Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunReconciliationUpdate {
+    pub id: RunId,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    pub finished_at_ms: Option<u64>,
+    pub remote_session_ref: Option<String>,
+    pub output_bytes: u64,
+    pub reconciled_at_ms: u64,
+}
+
 impl<'a> RunRepository<'a> {
     #[must_use]
     pub fn new(connection: &'a Connection) -> Self {
@@ -369,18 +380,57 @@ impl<'a> RunRepository<'a> {
         Ok(())
     }
 
-    /// Marks Quick runs left active by a previous process as interrupted.
-    /// Background runs are intentionally excluded because their lifecycle is
-    /// owned by the remote tmux wrapper and remains reconcilable after a
-    /// desktop restart.
-    pub fn interrupt_orphaned_quick_runs(&self) -> Result<usize, StorageError> {
+    /// Applies a bounded reconciliation batch atomically. A malformed or
+    /// invalid transition rolls back the entire batch, so a partial probe
+    /// cannot leave history internally inconsistent.
+    pub fn finish_batch(&self, updates: &[RunReconciliationUpdate]) -> Result<(), StorageError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for update in updates {
+            let raw = transaction
+                .query_row(
+                    "SELECT status FROM runs WHERE id = ?1",
+                    params![id_to_blob!(update.id)],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(StorageError::RunNotFound(update.id))?;
+            let current: RunStatus = serde_json::from_str(&raw)?;
+            if !kodework_domain::run_transition(current, update.status) {
+                return Err(StorageError::InvalidRunTransition(current, update.status));
+            }
+            transaction.execute(
+                "UPDATE runs SET status = ?1, exit_code = ?2, finished_at_ms = ?3, remote_session_ref = ?4, output_bytes = ?5, stdout_preview = ?6, stderr_preview = ?7, last_reconciled_at_ms = ?8 WHERE id = ?9",
+                params![
+                    json_from(&update.status)?,
+                    update.exit_code,
+                    update.finished_at_ms,
+                    update.remote_session_ref,
+                    update.output_bytes,
+                    "",
+                    "",
+                    update.reconciled_at_ms,
+                    id_to_blob!(update.id)
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Marks Quick runs left active by a previous desktop process as Unknown.
+    /// A client crash cannot prove whether dispatch reached the server, and
+    /// Quick runs now leave remote lifecycle markers for later reconciliation.
+    pub fn recover_orphaned_quick_runs(&self) -> Result<usize, StorageError> {
         let quick = json_from(&kodework_domain::ActionMode::Quick)?;
         let queued = json_from(&RunStatus::Queued)?;
         let running = json_from(&RunStatus::Running)?;
-        let interrupted = json_from(&RunStatus::Interrupted)?;
+        let unknown = json_from(&RunStatus::Unknown)?;
         let changed = self.connection.execute(
-            "UPDATE runs SET status = ?1, finished_at_ms = ?2 WHERE mode = ?3 AND status IN (?4, ?5)",
-            params![interrupted, crate::now_millis() as u64, quick, queued, running],
+            "UPDATE runs SET status = ?1, finished_at_ms = NULL WHERE mode = ?2 AND status IN (?3, ?4)",
+            params![unknown, quick, queued, running],
         )?;
         Ok(changed)
     }
@@ -928,7 +978,7 @@ mod tests {
                 Some(now_millis() as u64),
             )
             .is_ok());
-        assert_eq!(runs.interrupt_orphaned_quick_runs().ok(), Some(1));
+        assert_eq!(runs.recover_orphaned_quick_runs().ok(), Some(1));
         assert_eq!(
             runs.get(run.id).ok().flatten().map(|value| value.status),
             Some(RunStatus::Succeeded)
@@ -938,7 +988,7 @@ mod tests {
                 .ok()
                 .flatten()
                 .map(|value| value.status),
-            Some(RunStatus::Interrupted)
+            Some(RunStatus::Unknown)
         );
         assert_eq!(
             runs.get(background_run.id)

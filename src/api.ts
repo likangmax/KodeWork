@@ -11,6 +11,27 @@ export type ConnectionState =
   | 'Disconnected' | 'ResolvingAddress' | 'Connecting' | 'VerifyingHostKey'
   | 'Authenticating' | 'WaitingForCredential' | 'Ready' | 'Reconnecting' | 'Failed'
 
+export type ConnectionRuntimeSnapshot = {
+  state: ConnectionState
+  generation: number
+}
+
+export type ConnectError = {
+  kind: 'Network' | 'Timeout' | 'Tailscale' | 'Authentication' | 'CredentialRequired' | 'HostKey' | 'InvalidConfiguration' | 'Cancelled' | 'Protocol' | 'Internal'
+  detail: string
+}
+
+export function asConnectError(error: unknown): ConnectError | null {
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as Partial<ConnectError>
+    if (typeof candidate.kind === 'string' && typeof candidate.detail === 'string') return candidate as ConnectError
+  }
+  if (typeof error === 'string' && error.startsWith('{')) {
+    try { return asConnectError(JSON.parse(error)) } catch { /* preserve raw diagnostic */ }
+  }
+  return null
+}
+
 export type HostAddress = {
   id: string
   kind: AddressKind
@@ -119,8 +140,6 @@ export const saveHostPassword = (host: Host, password: string) =>
 export const deleteHost = (hostId: string) => invoke<boolean>('delete_host', { hostId })
 export const connectHost = (host: Host, password?: string) =>
   invoke<string>('connect_host', { host, password: password ?? null })
-export const reconnectHost = (hostId: string) =>
-  invoke<string>('reconnect_host', { hostId })
 export const prepareHostNetwork = (hostId: string) =>
   invoke<void>('prepare_host_network', { hostId })
 export const tailscaleStatus = (hostId?: string) =>
@@ -144,6 +163,16 @@ export const sendInput = (hostId: string, paneId: number, data: Uint8Array) =>
 export const resizePty = (hostId: string, paneId: number, cols: number, rows: number) =>
   invoke<void>('resize_pty', { hostId, paneId, cols, rows })
 export const sessionState = (hostId: string) => invoke<ConnectionState>('session_state', { hostId })
+export const subscribeSessionRuntime = (hostId: string, onEvent: (snapshot: ConnectionRuntimeSnapshot) => void): (() => void) => {
+  if (!isDesktop()) return () => {}
+  const channel = new Channel<ConnectionRuntimeSnapshot>()
+  channel.onmessage = onEvent
+  void invoke<void>('session_runtime_subscribe', { hostId, onEvent: channel }).catch(() => {})
+  return () => {
+    const raw = channel as unknown as { cleanupCallback?: () => void }
+    raw.cleanupCallback?.()
+  }
+}
 export const pendingHostKeyRequests = () => invoke<HostKeyRequest[]>('pending_host_key_requests')
 export const answerHostKey = (requestId: number, decision: 'trust_once' | 'trust_and_save' | 'reject') =>
   invoke<boolean>('answer_host_key', { requestId, decision })
@@ -264,16 +293,16 @@ export const tunnelOpen = (hostId: string, localPort: number, remoteHost: string
 export const tunnelClose = (tunnelId: string) => invoke<void>("tunnel_close", { tunnelId })
 export const tunnelList = () => invoke<TunnelInfo[]>("tunnel_list")
 export type HerdrBridgeInfo = {
+  bridge_id: string
   tunnel: TunnelInfo
   remote_socket: string
   remote_port: number
-  remote_pid: number
 }
 
 export const herdrBridge = (hostId: string, localPort: number) =>
   invoke<HerdrBridgeInfo>("herdr_bridge", { hostId, localPort })
-export const herdrBridgeStop = (hostId: string, remotePort: number, remotePid?: number) =>
-  invoke<void>("herdr_bridge_stop", { hostId, remotePort, remotePid: remotePid ?? null })
+export const herdrBridgeStopById = (hostId: string, bridgeId: string) =>
+  invoke<void>("herdr_bridge_stop_by_id", { hostId, bridgeId })
 export type Snippet = {
   id: string
   name: string

@@ -43,6 +43,7 @@ id_type!(RunId);
 id_type!(SessionId);
 id_type!(TransferId);
 id_type!(TunnelId);
+id_type!(BridgeId);
 id_type!(SnippetId);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -572,10 +573,10 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::ResolvingAddress
         ) | (
             ConnectionState::ResolvingAddress | ConnectionState::Reconnecting,
-            ConnectionState::Connecting
+            ConnectionState::Connecting | ConnectionState::ResolvingAddress
         ) | (
             ConnectionState::Connecting,
-            ConnectionState::VerifyingHostKey
+            ConnectionState::VerifyingHostKey | ConnectionState::Ready
         ) | (
             ConnectionState::VerifyingHostKey,
             ConnectionState::Authenticating
@@ -592,8 +593,18 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::Disconnected | ConnectionState::Failed
         ) | (
             ConnectionState::Reconnecting,
-            ConnectionState::WaitingForCredential | ConnectionState::Failed
-        ) | (ConnectionState::Failed, ConnectionState::Disconnected)
+            ConnectionState::WaitingForCredential
+                | ConnectionState::Failed
+                | ConnectionState::Disconnected
+        ) | (
+            ConnectionState::ResolvingAddress
+                | ConnectionState::Connecting
+                | ConnectionState::VerifyingHostKey,
+            ConnectionState::Disconnected | ConnectionState::Failed
+        ) | (
+            ConnectionState::Failed,
+            ConnectionState::Reconnecting | ConnectionState::Disconnected
+        )
     )
 }
 
@@ -615,6 +626,7 @@ pub fn run_transition(from: RunStatus, to: RunStatus) -> bool {
         ) | (
             RunStatus::Queued,
             RunStatus::Running
+                | RunStatus::Succeeded
                 | RunStatus::Failed
                 | RunStatus::Cancelled
                 | RunStatus::Interrupted
@@ -754,6 +766,7 @@ mod tests {
         assert!(run_transition(RunStatus::Running, RunStatus::Unknown));
         assert!(run_transition(RunStatus::Running, RunStatus::Interrupted));
         assert!(run_transition(RunStatus::Queued, RunStatus::Interrupted));
+        assert!(run_transition(RunStatus::Queued, RunStatus::Succeeded));
         assert!(run_transition(RunStatus::Unknown, RunStatus::Failed));
         assert!(!run_transition(RunStatus::Succeeded, RunStatus::Running));
         assert!(!run_transition(RunStatus::Failed, RunStatus::Succeeded));

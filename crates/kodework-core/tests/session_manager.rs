@@ -322,6 +322,45 @@ async fn candidate_fallback_tries_next_address() {
 }
 
 #[tokio::test]
+async fn candidate_dns_failure_tries_next_address() {
+    let server = FakeSshServer::start(FakeSshOptions::default())
+        .await
+        .unwrap_or_else(|error| unreachable!("fake server: {error}"));
+    let host = host_with(
+        server.addr().port(),
+        vec![
+            address(AddressKind::Lan, "invalid host name", server.addr().port()),
+            address(AddressKind::Tailscale, "127.0.0.1", server.addr().port()),
+        ],
+    );
+    let host_key = broker();
+    let resolver = CandidateResolver::new(Vec::new(), ResolverPolicy::default());
+    let manager = SessionManager::new(Arc::clone(&host_key), resolver, 512);
+
+    let outcome_task = tokio::spawn({
+        let manager = manager.clone();
+        let host = host.clone();
+        let auth = auth();
+        async move { manager.connect(&host, auth).await }
+    });
+    trust_pending(&host_key, HostKeyDecision::TrustOnce).await;
+    let outcome = outcome_task
+        .await
+        .unwrap_or_else(|error| unreachable!("join: {error}"))
+        .unwrap_or_else(|error| unreachable!("connect: {error}"));
+    assert!(matches!(outcome, SessionOutcome::Connected { .. }));
+    assert_eq!(
+        manager.state(host.id),
+        kodework_domain::ConnectionState::Ready
+    );
+    manager
+        .disconnect(host.id)
+        .await
+        .unwrap_or_else(|error| unreachable!("disconnect: {error}"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn wrong_password_fails_without_fallback() {
     let server = FakeSshServer::start(FakeSshOptions::default())
         .await

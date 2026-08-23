@@ -472,18 +472,25 @@ mod tests {
     use super::decode_wsl_distributions;
 
     #[cfg(windows)]
-    async fn wait_for_terminal_ready(
+    async fn wait_for_terminal_sentinel(
         manager: &super::LocalTerminalManager,
         id: u32,
         events: &mut tokio::sync::mpsc::Receiver<super::LocalTerminalEvent>,
-        kind: &super::LocalTerminalKind,
+        readiness_command: &[u8],
+        readiness_sentinel: &str,
     ) -> Result<Vec<u8>, String> {
         use std::time::{Duration, Instant};
 
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut output = Vec::new();
-        let mut saw_device_query = false;
         let mut answered_device_query = false;
+        // Queue the probe immediately.  A shell may emit a prompt only after
+        // startup scripts and PSReadLine have initialized, so prompt shape is
+        // not a reliable readiness protocol.  The command sits in the PTY
+        // input buffer until the shell can consume it.
+        manager
+            .write(id, readiness_command)
+            .map_err(|error| error.to_string())?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -502,28 +509,14 @@ mod tests {
                     if output
                         .windows(b"\x1b[6n".len())
                         .any(|window| window == b"\x1b[6n")
+                        && !answered_device_query
                     {
-                        saw_device_query = true;
-                        if !answered_device_query {
-                            manager
-                                .write(id, b"\x1b[1;1R")
-                                .map_err(|error| error.to_string())?;
-                            answered_device_query = true;
-                        }
+                        manager
+                            .write(id, b"\x1b[1;1R")
+                            .map_err(|error| error.to_string())?;
+                        answered_device_query = true;
                     }
-                    let text = String::from_utf8_lossy(&output);
-                    let prompt_ready = text
-                        .rsplit(['\r', '\n'])
-                        .next()
-                        .is_some_and(|line| line.contains('>'));
-                    let ready = match kind {
-                        super::LocalTerminalKind::PowerShell => {
-                            prompt_ready && (!saw_device_query || answered_device_query)
-                        }
-                        super::LocalTerminalKind::CommandPrompt => prompt_ready,
-                        super::LocalTerminalKind::Wsl => false,
-                    };
-                    if ready {
+                    if String::from_utf8_lossy(&output).contains(readiness_sentinel) {
                         return Ok(output);
                     }
                 }
@@ -543,6 +536,8 @@ mod tests {
     #[cfg(windows)]
     async fn assert_real_terminal_round_trip(
         kind: super::LocalTerminalKind,
+        readiness_command: &[u8],
+        readiness_sentinel: &str,
         command: &[u8],
         sentinel: &str,
     ) -> Result<(), String> {
@@ -553,8 +548,14 @@ mod tests {
         let mut events = manager
             .subscribe(descriptor.id)
             .map_err(|error| error.to_string())?;
-        let mut output =
-            wait_for_terminal_ready(&manager, descriptor.id, &mut events, &kind).await?;
+        let mut output = wait_for_terminal_sentinel(
+            &manager,
+            descriptor.id,
+            &mut events,
+            readiness_command,
+            readiness_sentinel,
+        )
+        .await?;
         manager
             .write(descriptor.id, command)
             .map_err(|error| error.to_string())?;
@@ -615,8 +616,12 @@ mod tests {
         }
         assert_real_terminal_round_trip(
             super::LocalTerminalKind::PowerShell,
-            b"Write-Output KODEWORK_LOCAL_PTY_SENTINEL\rexit\r",
-            "KODEWORK_LOCAL_PTY_SENTINEL",
+            // Build the marker from separate PowerShell string literals so
+            // command echo cannot satisfy the readiness check accidentally.
+            b"Write-Output ('KODEWORK_' + 'READY_PS_7A31')\r",
+            "KODEWORK_READY_PS_7A31",
+            b"Write-Output ('KODEWORK_' + 'ROUNDTRIP_PS_7A31')\r",
+            "KODEWORK_ROUNDTRIP_PS_7A31",
         )
         .await
     }
@@ -629,6 +634,8 @@ mod tests {
         }
         assert_real_terminal_round_trip(
             super::LocalTerminalKind::CommandPrompt,
+            b"echo KODEWORK_READY_CMD_7A31\r",
+            "KODEWORK_READY_CMD_7A31",
             b"echo KODEWORK_CMD_PTY_SENTINEL\rexit\r",
             "KODEWORK_CMD_PTY_SENTINEL",
         )
