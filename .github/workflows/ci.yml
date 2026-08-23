@@ -56,7 +56,7 @@ jobs:
       - name: Audit Rust dependencies with RustSec
         shell: bash
         run: |
-          cargo install cargo-audit --version 0.21.2 --locked
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo audit
       - name: Reject obvious generated secrets
         shell: bash
