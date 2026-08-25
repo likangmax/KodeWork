@@ -12,7 +12,7 @@ kodework-domain = { path = "../kodework-domain" }
 kodework-herdr = { path = "../kodework-herdr" }
 kodework-sftp = { path = "../kodework-sftp" }
 kodework-tailscale = { path = "../kodework-tailscale" }
-russh = { version = "0.62", default-features = false, features = ["ring", "flate2"] }
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
 russh-sftp = { version = "2.4", default-features = false }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 

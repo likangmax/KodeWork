@@ -10,7 +10,7 @@ kodework-domain = { path = "../kodework-domain" }
 # RUSTSEC-2023-0071 with no patched release.  Kodework intentionally supports
 # Ed25519/ECDSA keys and password authentication, but does not compile RSA key
 # support until an upstream constant-time implementation is available.
-russh = { version = "0.62", default-features = false, features = ["ring", "flate2"] }
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
 russh-sftp = { version = "2.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
