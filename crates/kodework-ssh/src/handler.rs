@@ -9,7 +9,7 @@ use crate::host_key::HostKeyBroker;
 use crate::SshError;
 use kodework_domain::HostId;
 use russh::client::{self, DisconnectReason, Session};
-use russh::keys::ssh_key::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
 use russh::ChannelId;
 use russh::Sig;
 use std::collections::HashSet;
@@ -100,17 +100,28 @@ impl SshHandler {
 impl client::Handler for SshHandler {
     type Error = SshError;
 
+    /// KodeWork pins bare host keys (trust on first use) and never advertises
+    /// the OpenSSH certificate host-key algorithms, so `Preferred`
+    /// `host_key_certificates` stays empty and a server cannot negotiate a
+    /// certificate here. The certificate arm is therefore unreachable in
+    /// practice, and it fails closed rather than guessing at an authority:
+    /// honoring a certificate needs a CA trust store, and silently pinning the
+    /// key inside one would let a re-issued certificate rotate host identity
+    /// without the change ever reaching the user.
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        let key = match server_public_key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            PublicKeyOrCertificate::Certificate(_) => {
+                let message =
+                    "server offered a host certificate; only pinned host keys are trusted";
+                return Err(SshError::Protocol(message.to_string()));
+            }
+        };
         self.host_key
-            .verify_for_host(
-                self.logical_host_id,
-                &self.hostname,
-                self.port,
-                server_public_key,
-            )
+            .verify_for_host(self.logical_host_id, &self.hostname, self.port, key)
             .await
     }
 

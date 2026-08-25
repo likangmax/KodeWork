@@ -35,6 +35,41 @@ fn json_from<T: serde::Serialize>(value: &T) -> Result<String, StorageError> {
     Ok(serde_json::to_string(value)?)
 }
 
+/// SQLite stores signed 64-bit integers, so rusqlite deliberately refuses to
+/// map `u64` directly: a value above `i64::MAX` cannot round-trip. Domain
+/// timestamps and byte counters are `u64`, and this wrapper is the single
+/// conversion point for them. It fails the query instead of wrapping or
+/// saturating, so a corrupt row can never masquerade as a plausible count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SqlU64(u64);
+
+impl rusqlite::ToSql for SqlU64 {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        let value = i64::try_from(self.0)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        Ok(rusqlite::types::ToSqlOutput::from(value))
+    }
+}
+
+impl rusqlite::types::FromSql for SqlU64 {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let signed = i64::column_result(value)?;
+        u64::try_from(signed)
+            .map(SqlU64)
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
+/// Read a `u64` column that was written through [`SqlU64`].
+fn u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    row.get::<_, SqlU64>(index).map(|value| value.0)
+}
+
+/// Read a nullable `u64` column that was written through [`SqlU64`].
+fn optional_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+    Ok(row.get::<_, Option<SqlU64>>(index)?.map(|value| value.0))
+}
+
 /// Projects: one per host.
 pub struct ProjectRepository<'a> {
     connection: &'a Connection,
@@ -165,7 +200,7 @@ impl<'a> ActionRepository<'a> {
                 action.command,
                 json_from(&action.mode)?,
                 action.cwd,
-                action.timeout_ms,
+                action.timeout_ms.map(SqlU64),
                 json_from(&action.danger_level)?,
                 json_from(&action.confirmation)?,
                 json_from(&action.env)?,
@@ -198,7 +233,7 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<Action> {
             )
         })?,
         cwd: row.get(5)?,
-        timeout_ms: row.get(6)?,
+        timeout_ms: optional_u64_column(row, 6)?,
         danger_level: serde_json::from_str(&row.get::<_, String>(7)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 7,
@@ -262,14 +297,14 @@ impl<'a> RunRepository<'a> {
                 json_from(&run.mode)?,
                 run.cwd_snapshot,
                 json_from(&run.status)?,
-                run.started_at_ms,
-                run.finished_at_ms,
+                run.started_at_ms.map(SqlU64),
+                run.finished_at_ms.map(SqlU64),
                 run.exit_code,
                 run.remote_session_ref,
                 "",
                 "",
-                run.output_bytes,
-                run.last_reconciled_at_ms,
+                SqlU64(run.output_bytes),
+                run.last_reconciled_at_ms.map(SqlU64),
             ],
         )?;
         Ok(())
@@ -339,7 +374,7 @@ impl<'a> RunRepository<'a> {
             params![
                 json_from(&status)?,
                 exit_code,
-                finished_at_ms,
+                finished_at_ms.map(SqlU64),
                 id_to_blob!(id)
             ],
         )?;
@@ -368,12 +403,12 @@ impl<'a> RunRepository<'a> {
             params![
                 json_from(&status)?,
                 exit_code,
-                finished_at_ms,
+                finished_at_ms.map(SqlU64),
                 remote_session_ref,
-                output_bytes,
+                SqlU64(output_bytes),
                 "",
                 "",
-                reconciled_at_ms,
+                reconciled_at_ms.map(SqlU64),
                 id_to_blob!(id)
             ],
         )?;
@@ -406,12 +441,12 @@ impl<'a> RunRepository<'a> {
                 params![
                     json_from(&update.status)?,
                     update.exit_code,
-                    update.finished_at_ms,
+                    update.finished_at_ms.map(SqlU64),
                     update.remote_session_ref,
-                    update.output_bytes,
+                    SqlU64(update.output_bytes),
                     "",
                     "",
-                    update.reconciled_at_ms,
+                    SqlU64(update.reconciled_at_ms),
                     id_to_blob!(update.id)
                 ],
             )?;
@@ -526,14 +561,14 @@ fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
                 Box::new(error),
             )
         })?,
-        started_at_ms: row.get(9)?,
-        finished_at_ms: row.get(10)?,
+        started_at_ms: optional_u64_column(row, 9)?,
+        finished_at_ms: optional_u64_column(row, 10)?,
         exit_code: row.get(11)?,
         remote_session_ref: row.get(12)?,
         stdout_preview: row.get(13)?,
         stderr_preview: row.get(14)?,
-        output_bytes: row.get(15)?,
-        last_reconciled_at_ms: row.get(16)?,
+        output_bytes: u64_column(row, 15)?,
+        last_reconciled_at_ms: optional_u64_column(row, 16)?,
     })
 }
 
@@ -658,8 +693,8 @@ impl<'a> TransferRepository<'a> {
                 transfer.local_path,
                 transfer.remote_path,
                 json_from(&transfer.direction)?,
-                transfer.total_bytes,
-                transfer.transferred_bytes,
+                transfer.total_bytes.map(SqlU64),
+                SqlU64(transfer.transferred_bytes),
                 json_from(&transfer.status)?,
             ],
         )?;
@@ -674,7 +709,11 @@ impl<'a> TransferRepository<'a> {
     ) -> Result<(), StorageError> {
         self.connection.execute(
             "UPDATE transfers SET transferred_bytes = ?1, status = ?2 WHERE id = ?3",
-            params![transferred_bytes, json_from(&status)?, id_to_blob!(id)],
+            params![
+                SqlU64(transferred_bytes),
+                json_from(&status)?,
+                id_to_blob!(id)
+            ],
         )?;
         Ok(())
     }
@@ -702,8 +741,8 @@ fn read_transfer(row: &rusqlite::Row<'_>) -> rusqlite::Result<Transfer> {
                 Box::new(error),
             )
         })?,
-        total_bytes: row.get(5)?,
-        transferred_bytes: row.get(6)?,
+        total_bytes: optional_u64_column(row, 5)?,
+        transferred_bytes: u64_column(row, 6)?,
         status: serde_json::from_str(&row.get::<_, String>(7)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 7,
@@ -1040,6 +1079,67 @@ mod tests {
                 RunStatus::Running
             ))
         ));
+    }
+
+    /// SQLite integers are signed, so a `u64` above `i64::MAX` has no faithful
+    /// representation. The write must fail loudly: silently wrapping would turn
+    /// an implausible byte count into a plausible one and corrupt history.
+    #[test]
+    fn byte_counters_above_i64_max_are_rejected_instead_of_wrapping() {
+        let db = database();
+        let host_id = seed_host(&db);
+        let transfers = TransferRepository::new(db.connection());
+        let transfer = Transfer {
+            id: TransferId::new(),
+            host_id,
+            local_path: "C:/tmp/overflow.bin".into(),
+            remote_path: "~/overflow.bin".into(),
+            direction: TransferDirection::Upload,
+            total_bytes: Some(u64::MAX),
+            transferred_bytes: 0,
+            status: TransferStatus::Queued,
+        };
+        assert!(
+            transfers.create(&transfer).is_err(),
+            "a byte count that cannot round-trip must not be stored"
+        );
+        assert_eq!(
+            transfers
+                .list_by_host(host_id)
+                .map(|rows| rows.len())
+                .unwrap_or_else(|error| unreachable!("list transfers: {error}")),
+            0,
+            "the rejected insert must not leave a partial row behind"
+        );
+    }
+
+    /// Values that fit in `i64` must survive the signed round-trip exactly,
+    /// including the boundary value itself.
+    #[test]
+    fn byte_counters_at_i64_max_round_trip_exactly() {
+        let db = database();
+        let host_id = seed_host(&db);
+        let transfers = TransferRepository::new(db.connection());
+        let boundary = i64::MAX as u64;
+        let transfer = Transfer {
+            id: TransferId::new(),
+            host_id,
+            local_path: "C:/tmp/boundary.bin".into(),
+            remote_path: "~/boundary.bin".into(),
+            direction: TransferDirection::Download,
+            total_bytes: Some(boundary),
+            transferred_bytes: boundary,
+            status: TransferStatus::Transferring,
+        };
+        transfers
+            .create(&transfer)
+            .unwrap_or_else(|error| unreachable!("boundary create failed: {error:?}"));
+        let rows = transfers
+            .list_by_host(host_id)
+            .unwrap_or_else(|error| unreachable!("list transfers: {error}"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].total_bytes, Some(boundary));
+        assert_eq!(rows[0].transferred_bytes, boundary);
     }
 
     #[test]
