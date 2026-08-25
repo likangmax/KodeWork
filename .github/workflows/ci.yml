@@ -12,8 +12,8 @@ jobs:
   frontend:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -25,17 +25,46 @@ jobs:
   rust:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: 1.98.0-x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - name: Prepare bundled Tailscale sidecars
         shell: pwsh
         run: ./scripts/prepare-tailscale.ps1
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
+
+  dependency-security:
+    name: Dependency and secret policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts
+      - name: Audit production frontend dependencies
+        run: npm audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high
+      - name: Audit Rust dependencies with RustSec
+        shell: bash
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
+      - name: Reject obvious generated secrets
+        shell: bash
+        run: |
+          if git grep -nI -E '(^|[^A-Za-z])(tskey-[A-Za-z0-9]|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----|AKIA[0-9A-Z]{16})([^A-Za-z]|$)' -- ':!tests/fixtures/**' ':!docs/TROUBLESHOOTING.md'; then
+            echo 'Potential credential material found in tracked files.' >&2
+            exit 1
+          fi
 
   # This job intentionally checks the portable Rust graph without claiming
   # that a Windows shell build proves a macOS/Linux desktop release.  Native
@@ -53,14 +82,15 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Linux keyring build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
+          toolchain: 1.98.0
           targets: ${{ matrix.target }}
       - name: Check portable crates
         shell: bash

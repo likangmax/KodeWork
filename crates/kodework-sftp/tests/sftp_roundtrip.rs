@@ -82,6 +82,27 @@ async fn list_returns_files_and_directories() {
 }
 
 #[tokio::test]
+async fn real_backend_expands_tilde_paths_before_sftp_requests() {
+    let client = in_memory_client(sample_content()).await;
+    let backend = RusshSftpBackend::new(client);
+
+    let stat = backend
+        .stat("~/notes.txt")
+        .await
+        .unwrap_or_else(|error| unreachable!("tilde stat: {error}"))
+        .unwrap_or_else(|| unreachable!("~/notes.txt must resolve"));
+    assert_eq!(stat.name, "notes.txt");
+    assert_eq!(stat.size, 11);
+
+    let entries = backend
+        .list("~")
+        .await
+        .unwrap_or_else(|error| unreachable!("tilde list: {error}"));
+    assert!(entries.iter().any(|entry| entry.name == "notes.txt"));
+    assert!(entries.iter().any(|entry| entry.name == "code"));
+}
+
+#[tokio::test]
 async fn list_missing_directory_is_typed_error() {
     let client = in_memory_client(sample_content()).await;
     let backend = RusshSftpBackend::new(client);

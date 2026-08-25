@@ -1,5 +1,6 @@
 import type { RemoteFileMeta } from '../api'
 import { Icon } from '../icons'
+import type { Translator } from '../i18n'
 import { VirtualFileList } from './VirtualFileList'
 
 export type TransferView = {
@@ -31,12 +32,13 @@ type Props = {
   onResumeTransfer: (id: string) => void
   onCancelTransfer: (id: string) => void
   onDismissTransfer: (id: string) => void
+  t: Translator
 }
 
 export function FilesPanel({
   currentPath, entries, loading, selectedRemote, transfers, formatSize,
   onPathChange, onOpen, onRefresh, onUpload, onDownload, onYazi, pinnedPath, pinned, onPinCurrentPath, onGoPinnedPath,
-  onPauseTransfer, onResumeTransfer, onCancelTransfer, onDismissTransfer,
+  onPauseTransfer, onResumeTransfer, onCancelTransfer, onDismissTransfer, t,
 }: Props) {
   const parts = currentPath.split('/').filter(Boolean)
   const crumbs = ['/', ...parts]
@@ -51,11 +53,11 @@ export function FilesPanel({
     <section className="terminal-card files-card">
       <div className="terminal-head">
         <span>▱ {currentPath}</span>
-        <span className="terminal-tools">SFTP · 流式传输 · 断点续传</span>
+        <span className="terminal-tools">{t('sftpStreamingResume')}</span>
       </div>
       <div className="files-toolbar">
         <div className="crumbs">
-          <button className="crumb" onClick={goUp} disabled={currentPath === '/'} title="上级目录" aria-label="上级目录" style={{ opacity: currentPath === '/' ? 0.4 : 1 }}>..</button>
+          <button className="crumb" onClick={goUp} disabled={currentPath === '/'} title={t('parentDirectory')} aria-label={t('parentDirectory')} style={{ opacity: currentPath === '/' ? 0.4 : 1 }}>..</button>
           {crumbs.map((part, index) => (
             <span key={`${part}-${index}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
               <button className="crumb" onClick={() => onPathChange(index === 0 ? '/' : `/${parts.slice(0, index).join('/')}`)}>{part}</button>
@@ -64,19 +66,19 @@ export function FilesPanel({
           ))}
         </div>
         <div className="files-actions">
-          <button className="mini" onClick={onRefresh}><Icon name="refresh" size={11} />刷新</button>
-          <button className="mini" onClick={onUpload}><Icon name="upload" size={11} />上传</button>
-          <button className="mini" disabled={!selectedRemote} onClick={onDownload}><Icon name="download" size={11} />下载</button>
-          {pinned ? <button className="mini active" onClick={onPinCurrentPath} title="更新此工作站打开文件页时的默认目录"><Icon name="link" size={11} />已固定</button> : <><button className="mini" onClick={onGoPinnedPath} title={`回到固定目录：${pinnedPath}`}><Icon name="folder" size={11} />回到固定目录</button><button className="mini" onClick={onPinCurrentPath} title="以后打开这台工作站的文件页时自动进入当前目录"><Icon name="link" size={11} />固定当前</button></>}
-          <button className="mini" onClick={onYazi} title="在终端中打开 yazi"><Icon name="folder" size={11} />Yazi</button>
+          <button className="mini" onClick={onRefresh}><Icon name="refresh" size={11} />{t('refresh')}</button>
+          <button className="mini" onClick={onUpload}><Icon name="upload" size={11} />{t('upload')}</button>
+          <button className="mini" disabled={!selectedRemote} onClick={onDownload}><Icon name="download" size={11} />{t('download')}</button>
+          {pinned ? <button className="mini active" onClick={onPinCurrentPath} title={t('updatePinnedDirectory')}><Icon name="link" size={11} />{t('pinned')}</button> : <><button className="mini" onClick={onGoPinnedPath} title={t('returnToPinnedDirectory', pinnedPath)}><Icon name="folder" size={11} />{t('returnToPinned')}</button><button className="mini" onClick={onPinCurrentPath} title={t('pinCurrentDirectoryHint')}><Icon name="link" size={11} />{t('pinCurrent')}</button></>}
+          <button className="mini" onClick={onYazi} title={t('openYazi')}><Icon name="folder" size={11} />Yazi</button>
         </div>
       </div>
       {loading ? (
-        <div className="files-body"><div className="runtime-empty">读取中…</div></div>
+        <div className="files-body"><div className="runtime-empty">{t('loading')}</div></div>
       ) : entries.length === 0 ? (
-        <div className="files-body"><div className="runtime-empty">空目录</div></div>
+        <div className="files-body"><div className="runtime-empty">{t('emptyDirectory')}</div></div>
       ) : (
-        <VirtualFileList entries={entries} currentPath={currentPath} selectedRemote={selectedRemote} formatSize={formatSize} onOpen={onOpen} />
+        <VirtualFileList entries={entries} currentPath={currentPath} selectedRemote={selectedRemote} formatSize={formatSize} onOpen={onOpen} t={t} />
       )}
       {Object.keys(transfers).length > 0 && (
         <div className="transfers">
@@ -86,11 +88,11 @@ export function FilesPanel({
               {info.total ? <div className="transfer-bar"><div className="transfer-fill" style={{ width: `${Math.min(100, (info.transferred / info.total) * 100)}%` }} /></div> : <span className="transfer-meta">{formatSize(info.transferred)}</span>}
               {info.message && <span className="transfer-meta">{info.message}</span>}
               {['Completed', 'Failed', 'Cancelled'].includes(info.status) ? (
-                <button className="mini" onClick={() => onDismissTransfer(id)}><Icon name="close" size={10} />清除</button>
+                <button className="mini" onClick={() => onDismissTransfer(id)}><Icon name="close" size={10} />{t('clear')}</button>
               ) : <>
-                <button className="mini" onClick={() => onPauseTransfer(id)}><Icon name="pause" size={10} />暂停</button>
-                <button className="mini" onClick={() => onResumeTransfer(id)}><Icon name="play" size={10} />继续</button>
-                <button className="mini danger" onClick={() => onCancelTransfer(id)}><Icon name="stop" size={10} />取消</button>
+                <button className="mini" onClick={() => onPauseTransfer(id)}><Icon name="pause" size={10} />{t('pause')}</button>
+                <button className="mini" onClick={() => onResumeTransfer(id)}><Icon name="play" size={10} />{t('resume')}</button>
+                <button className="mini danger" onClick={() => onCancelTransfer(id)}><Icon name="stop" size={10} />{t('cancel')}</button>
               </>}
             </div>
           ))}

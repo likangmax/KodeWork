@@ -5,6 +5,7 @@ use kodework_network::{CandidateResolver, ResolverPolicy};
 use kodework_ssh::host_key::HostKeyBroker;
 use kodework_ssh::keyboard_interactive::KeyboardInteractiveBroker;
 use kodework_storage::Database;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +32,17 @@ pub struct AppState {
     /// Local ConPTY sessions (PowerShell, CMD and WSL), deliberately separate
     /// from remote SSH lifecycle and reconnect state.
     pub(crate) local_terminals: kodework_local_pty::LocalTerminalManager,
+    /// Host ids currently owned by the native reconnect supervisor.
+    pub(crate) reconnecting: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
+    /// Host ids with a native reconnect profile. Credential bytes are never
+    /// cached here; the supervisor resolves managed secrets on each attempt.
+    pub(crate) reconnect_profiles: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
+    /// Host ids currently undergoing run reconciliation. UI refreshes are
+    /// single-flight per host so tab changes cannot duplicate SSH probes.
+    pub(crate) reconciling: Arc<Mutex<HashSet<kodework_domain::HostId>>>,
+    /// Monotonic wake signal used to interrupt reconnect backoff after OS
+    /// resume or explicit user focus without retaining credential bytes.
+    pub(crate) reconnect_wake_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Error)]
@@ -56,6 +68,11 @@ impl AppState {
         let database = Arc::new(Mutex::new(Database::open(
             directory.join("kodework.sqlite3"),
         )?));
+        {
+            let db = database.lock().map_err(|_| AppError::StatePoisoned)?;
+            kodework_storage::repositories::RunRepository::new(db.connection())
+                .recover_orphaned_quick_runs()?;
+        }
 
         // Host-key persistence is a metadata table; the broker owns the
         // user decision flow (trust once / trust and save / reject).
@@ -92,6 +109,10 @@ impl AppState {
             secrets,
             tailscale,
             local_terminals,
+            reconnecting: Arc::new(Mutex::new(HashSet::new())),
+            reconnect_profiles: Arc::new(Mutex::new(HashSet::new())),
+            reconciling: Arc::new(Mutex::new(HashSet::new())),
+            reconnect_wake_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 }
@@ -181,6 +202,7 @@ pub fn run() -> Result<(), AppError> {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            commands::wake_connection_supervisor(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -190,6 +212,7 @@ pub fn run() -> Result<(), AppError> {
         ))
         .setup(|app| {
             setup_tray(app)?;
+            commands::start_connection_supervisor(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -197,6 +220,8 @@ pub fn run() -> Result<(), AppError> {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+            } else if matches!(event, tauri::WindowEvent::Focused(true)) {
+                commands::wake_connection_supervisor(window.app_handle());
             }
         })
         .manage(state)
@@ -209,6 +234,7 @@ pub fn run() -> Result<(), AppError> {
             commands::prepare_host_network,
             commands::disconnect_host,
             commands::session_state,
+            commands::session_runtime_subscribe,
             commands::open_pane,
             commands::close_pane,
             commands::send_input,
@@ -240,7 +266,7 @@ pub fn run() -> Result<(), AppError> {
             commands::tunnel_close,
             commands::tunnel_list,
             commands::herdr_bridge,
-            commands::herdr_bridge_stop,
+            commands::herdr_bridge_stop_by_id,
             commands::snippet_list,
             commands::snippet_save,
             commands::snippet_delete,
@@ -254,6 +280,7 @@ pub fn run() -> Result<(), AppError> {
             commands::action_delete,
             commands::run_action,
             commands::run_list,
+            commands::run_reconcile,
             commands::tailscale_status,
             commands::tailscale_runtime_info,
             commands::save_tailscale_auth_key,
@@ -266,6 +293,9 @@ pub fn run() -> Result<(), AppError> {
         ])
         .build(tauri::generate_context!())?
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Resumed) {
+                commands::wake_connection_supervisor(app);
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.local_terminals.shutdown();
@@ -297,6 +327,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
+                crate::commands::wake_connection_supervisor(app);
             }
             "quit" => {
                 // Explicit quit: stop locally owned userspace Tailscale before

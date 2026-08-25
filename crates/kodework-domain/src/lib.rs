@@ -43,6 +43,7 @@ id_type!(RunId);
 id_type!(SessionId);
 id_type!(TransferId);
 id_type!(TunnelId);
+id_type!(BridgeId);
 id_type!(SnippetId);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,6 +115,15 @@ pub struct JumpHost {
     pub hostname: String,
     pub port: u16,
     pub username: String,
+    /// Jump-host authentication is independent from the target host. The
+    /// secret itself remains in the OS credential store and is referenced by
+    /// this opaque id only.
+    #[serde(default)]
+    pub auth_ref: Option<CredentialRef>,
+    #[serde(default)]
+    pub auth_mode: AuthenticationMode,
+    #[serde(default)]
+    pub private_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,18 +220,35 @@ pub enum RunStatus {
     Failed,
     Cancelled,
     TimedOut,
+    /// The local application stopped before it could observe a terminal
+    /// result (for example, a crash or forced process termination).
+    Interrupted,
+    /// The run was previously active, but neither a live remote session nor
+    /// authoritative completion metadata can currently be found.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Run {
     pub id: RunId,
-    pub action_id: ActionId,
+    /// The mutable source Action may be deleted after this historical record
+    /// is created, so it is intentionally optional.
+    pub action_id: Option<ActionId>,
+    pub host_id: HostId,
+    pub project_id: Option<ProjectId>,
+    pub action_name: String,
+    pub command_snapshot: String,
+    pub mode: ActionMode,
+    pub cwd_snapshot: Option<String>,
     pub status: RunStatus,
     pub started_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     pub exit_code: Option<i32>,
     pub remote_session_ref: Option<String>,
+    pub stdout_preview: String,
+    pub stderr_preview: String,
     pub output_bytes: u64,
+    pub last_reconciled_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -231,6 +258,10 @@ pub enum ConnectionState {
     Connecting,
     VerifyingHostKey,
     Authenticating,
+    /// The native supervisor is waiting for a user credential or an
+    /// interactive authentication response. This is distinct from Failed:
+    /// retrying without new user input would be pointless and unsafe.
+    WaitingForCredential,
     Ready,
     Reconnecting,
     Failed,
@@ -401,6 +432,9 @@ pub fn validate_action(action: &Action) -> Result<(), DomainError> {
 pub fn validate_remote_path(path: &str) -> Result<(), DomainError> {
     if !(path == "~" || path.starts_with("~/") || path.starts_with('/'))
         || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component == "." || component == "..")
     {
         return Err(DomainError::InvalidRemotePath);
     }
@@ -454,6 +488,14 @@ pub fn classify_danger(command: &str) -> DangerLevel {
     if dangerous {
         return DangerLevel::Dangerous;
     }
+    // Safe actions are only a UX guardrail, never a shell sandbox. Any shell
+    // composition must therefore require an explicit review: command
+    // substitution, pipelines, redirections, grouping, escaping and control
+    // operators can execute side effects before the apparently harmless outer
+    // command is evaluated.
+    if contains_shell_composition(command) {
+        return DangerLevel::Review;
+    }
     if normalized.contains("sudo ")
         || normalized.contains("chmod ")
         || normalized.contains("chown ")
@@ -462,7 +504,47 @@ pub fn classify_danger(command: &str) -> DangerLevel {
     {
         return DangerLevel::Review;
     }
-    DangerLevel::Safe
+    // Only a small observational set is confidently safe. Shell commands
+    // are open-ended; treating every unknown construct as Safe creates a
+    // false sense of protection around scripts, aliases and interpreters.
+    let clearly_observational = [
+        "pwd",
+        "whoami",
+        "id",
+        "date",
+        "uname",
+        "hostname",
+        "git status",
+        "git diff",
+        "git log",
+        "ls",
+        "ll",
+        "cat",
+        "head",
+        "tail",
+        "echo",
+        "printf",
+        "which",
+        "command -v",
+        "tmux ls",
+    ];
+    if clearly_observational
+        .iter()
+        .any(|prefix| normalized == *prefix || normalized.starts_with(&format!("{prefix} ")))
+    {
+        DangerLevel::Safe
+    } else {
+        DangerLevel::Review
+    }
+}
+
+fn contains_shell_composition(command: &str) -> bool {
+    command.chars().any(|character| {
+        matches!(
+            character,
+            '\r' | '\n' | ';' | '|' | '&' | '>' | '<' | '`' | '$' | '\\' | '(' | ')' | '{' | '}'
+        )
+    })
 }
 
 fn pipe_to_shell(command: &str) -> bool {
@@ -491,20 +573,76 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::ResolvingAddress
         ) | (
             ConnectionState::ResolvingAddress | ConnectionState::Reconnecting,
-            ConnectionState::Connecting
+            ConnectionState::Connecting | ConnectionState::ResolvingAddress
         ) | (
             ConnectionState::Connecting,
-            ConnectionState::VerifyingHostKey
+            ConnectionState::VerifyingHostKey | ConnectionState::Ready
         ) | (
             ConnectionState::VerifyingHostKey,
             ConnectionState::Authenticating
         ) | (
-            ConnectionState::Authenticating | ConnectionState::Reconnecting,
+            ConnectionState::Authenticating
+                | ConnectionState::Reconnecting
+                | ConnectionState::WaitingForCredential,
             ConnectionState::Ready
         ) | (
             ConnectionState::Ready,
             ConnectionState::Reconnecting | ConnectionState::Disconnected
-        ) | (ConnectionState::Failed, ConnectionState::Disconnected)
+        ) | (
+            ConnectionState::Authenticating | ConnectionState::WaitingForCredential,
+            ConnectionState::Disconnected | ConnectionState::Failed
+        ) | (
+            ConnectionState::Reconnecting,
+            ConnectionState::WaitingForCredential
+                | ConnectionState::Failed
+                | ConnectionState::Disconnected
+        ) | (
+            ConnectionState::ResolvingAddress
+                | ConnectionState::Connecting
+                | ConnectionState::VerifyingHostKey,
+            ConnectionState::Disconnected | ConnectionState::Failed
+        ) | (
+            ConnectionState::Failed,
+            ConnectionState::Reconnecting | ConnectionState::Disconnected
+        )
+    )
+}
+
+/// Validates persisted Run lifecycle transitions. Terminal states are final;
+/// `Unknown` remains reconcilable because late remote metadata may appear.
+#[must_use]
+pub fn run_transition(from: RunStatus, to: RunStatus) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (
+            RunStatus::Created,
+            RunStatus::Confirming | RunStatus::Queued | RunStatus::Running | RunStatus::Failed
+        ) | (
+            RunStatus::Confirming,
+            RunStatus::Queued | RunStatus::Failed | RunStatus::Cancelled
+        ) | (
+            RunStatus::Queued,
+            RunStatus::Running
+                | RunStatus::Succeeded
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::Interrupted
+                | RunStatus::Unknown
+        ) | (
+            RunStatus::Running,
+            RunStatus::Succeeded
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::TimedOut
+                | RunStatus::Interrupted
+                | RunStatus::Unknown
+        ) | (
+            RunStatus::Unknown,
+            RunStatus::Running | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        )
     )
 }
 
@@ -542,6 +680,8 @@ mod tests {
         assert!(validate_remote_path("~/code/project").is_ok());
         assert!(validate_remote_path("~").is_ok());
         assert!(validate_remote_path("relative/path").is_err());
+        assert!(validate_remote_path("~/code/../secret").is_err());
+        assert!(validate_remote_path("/tmp/./file").is_err());
 
         let mut invalid_default = host();
         invalid_default.default_remote_path = "~/code/project".into();
@@ -561,6 +701,11 @@ mod tests {
     #[test]
     fn classifies_dangerous_commands() {
         assert_eq!(classify_danger("git status"), DangerLevel::Safe);
+        assert_eq!(classify_danger("python -c 'print(1)'"), DangerLevel::Review);
+        assert_eq!(
+            classify_danger("rsync --delete ./ /srv/app"),
+            DangerLevel::Review
+        );
         assert_eq!(
             classify_danger("sudo systemctl restart app"),
             DangerLevel::Review
@@ -585,6 +730,17 @@ mod tests {
             classify_danger("wget https://example.invalid/x|bash"),
             DangerLevel::Dangerous
         );
+        assert_eq!(
+            classify_danger("echo \"$(rm -rf /tmp/work)\""),
+            DangerLevel::Review
+        );
+        assert_eq!(
+            classify_danger("git status | tee status.txt"),
+            DangerLevel::Review
+        );
+        assert_eq!(classify_danger("ls > files.txt"), DangerLevel::Review);
+        assert_eq!(classify_danger("env"), DangerLevel::Review);
+        assert_eq!(classify_danger("printenv"), DangerLevel::Review);
     }
 
     #[test]
@@ -600,6 +756,24 @@ mod tests {
         assert!(connection_transition(
             ConnectionState::Ready,
             ConnectionState::Reconnecting
+        ));
+    }
+
+    #[test]
+    fn run_state_machine_keeps_final_states_final() {
+        assert!(run_transition(RunStatus::Running, RunStatus::Running));
+        assert!(run_transition(RunStatus::Running, RunStatus::Succeeded));
+        assert!(run_transition(RunStatus::Running, RunStatus::Unknown));
+        assert!(run_transition(RunStatus::Running, RunStatus::Interrupted));
+        assert!(run_transition(RunStatus::Queued, RunStatus::Interrupted));
+        assert!(run_transition(RunStatus::Queued, RunStatus::Succeeded));
+        assert!(run_transition(RunStatus::Unknown, RunStatus::Failed));
+        assert!(!run_transition(RunStatus::Succeeded, RunStatus::Running));
+        assert!(!run_transition(RunStatus::Failed, RunStatus::Succeeded));
+        assert!(!run_transition(RunStatus::Interrupted, RunStatus::Running));
+        assert!(!run_transition(
+            RunStatus::Interrupted,
+            RunStatus::Succeeded
         ));
     }
 

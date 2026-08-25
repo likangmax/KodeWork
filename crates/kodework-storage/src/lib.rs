@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub mod host_keys;
 pub mod repositories;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -49,7 +49,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         name: "global_snippets",
-        sql: "DROP TABLE IF EXISTS snippets;\nCREATE TABLE IF NOT EXISTS snippets (id BLOB PRIMARY KEY, name TEXT NOT NULL, text TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);",
+        sql: "ALTER TABLE snippets RENAME TO snippets_v5;\nCREATE TABLE snippets (id BLOB PRIMARY KEY, name TEXT NOT NULL, text TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);\nINSERT INTO snippets (id, name, text, sort_order) SELECT id, name, text, sort_order FROM snippets_v5;\nDROP TABLE snippets_v5;",
     },
     Migration {
         version: 7,
@@ -60,6 +60,34 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "host_default_remote_path",
         sql: "ALTER TABLE hosts ADD COLUMN default_remote_path TEXT NOT NULL DEFAULT '/';",
+    },
+    Migration {
+        version: 9,
+        name: "durable_run_history",
+        sql: "CREATE TABLE runs_v9 (id BLOB PRIMARY KEY, action_id BLOB REFERENCES actions(id) ON DELETE SET NULL, host_id BLOB NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, project_id BLOB REFERENCES projects(id) ON DELETE SET NULL, action_name TEXT NOT NULL, command_snapshot TEXT NOT NULL, mode TEXT NOT NULL, cwd_snapshot TEXT, status TEXT NOT NULL, started_at_ms INTEGER, finished_at_ms INTEGER, exit_code INTEGER, remote_session_ref TEXT, stdout_preview TEXT NOT NULL DEFAULT '', stderr_preview TEXT NOT NULL DEFAULT '', output_bytes INTEGER NOT NULL DEFAULT 0, last_reconciled_at_ms INTEGER);\nINSERT INTO runs_v9 (id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms) SELECT runs.id, runs.action_id, projects.host_id, actions.project_id, actions.name, actions.command, actions.mode, actions.cwd, runs.status, runs.started_at_ms, runs.finished_at_ms, runs.exit_code, runs.remote_session_ref, '', '', runs.output_bytes, NULL FROM runs INNER JOIN actions ON actions.id = runs.action_id INNER JOIN projects ON projects.id = actions.project_id;\nDROP TABLE runs;\nALTER TABLE runs_v9 RENAME TO runs;\nCREATE INDEX idx_runs_host_started ON runs(host_id, started_at_ms DESC);\nCREATE INDEX idx_runs_action_started ON runs(action_id, started_at_ms DESC);\nCREATE INDEX idx_runs_status ON runs(status);",
+    },
+    Migration {
+        version: 10,
+        name: "host_scoped_host_key_identities",
+        sql: "CREATE TABLE host_key_identities (host_id BLOB PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL, fingerprint TEXT NOT NULL, key_blob_base64 TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);",
+    },
+    Migration {
+        version: 11,
+        name: "remove_persisted_run_output_previews",
+        sql: "UPDATE runs SET stdout_preview = '', stderr_preview = '';",
+    },
+    Migration {
+        version: 12,
+        name: "host_key_identities_per_algorithm",
+        sql: "CREATE TABLE host_key_identities_v12 (host_id BLOB NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL, fingerprint TEXT NOT NULL, key_blob_base64 TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, PRIMARY KEY (host_id, algorithm));
+INSERT INTO host_key_identities_v12 (host_id, algorithm, fingerprint, key_blob_base64, created_at_ms, updated_at_ms) SELECT host_id, algorithm, fingerprint, key_blob_base64, created_at_ms, updated_at_ms FROM host_key_identities;
+DROP TABLE host_key_identities;
+ALTER TABLE host_key_identities_v12 RENAME TO host_key_identities;",
+    },
+    Migration {
+        version: 13,
+        name: "jump_host_independent_authentication",
+        sql: "ALTER TABLE hosts ADD COLUMN jump_auth_json TEXT;",
     },
 ];
 
@@ -75,6 +103,12 @@ pub enum StorageError {
     Serialization(#[from] serde_json::Error),
     #[error("invalid UUID bytes in storage")]
     InvalidId,
+    #[error("run not found: {0:?}")]
+    RunNotFound(kodework_domain::RunId),
+    #[error("invalid run status transition: {0:?} -> {1:?}")]
+    InvalidRunTransition(kodework_domain::RunStatus, kodework_domain::RunStatus),
+    #[error("invalid run count returned by SQLite: {0}")]
+    InvalidRunCount(i64),
 }
 
 pub fn validate_migrations() -> Result<(), StorageError> {
@@ -166,7 +200,7 @@ impl Database {
     pub fn upsert_host(&self, host: &Host) -> Result<(), StorageError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET label = excluded.label, username = excluded.username, port = excluded.port, auth_ref = excluded.auth_ref, tailscale_json = excluded.tailscale_json, default_runtime = excluded.default_runtime, jump_hostname = excluded.jump_hostname, jump_port = excluded.jump_port, jump_username = excluded.jump_username, auth_mode = excluded.auth_mode, private_key_path = excluded.private_key_path, default_remote_path = excluded.default_remote_path",
+            "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(id) DO UPDATE SET label = excluded.label, username = excluded.username, port = excluded.port, auth_ref = excluded.auth_ref, tailscale_json = excluded.tailscale_json, default_runtime = excluded.default_runtime, jump_hostname = excluded.jump_hostname, jump_port = excluded.jump_port, jump_username = excluded.jump_username, jump_auth_json = excluded.jump_auth_json, auth_mode = excluded.auth_mode, private_key_path = excluded.private_key_path, default_remote_path = excluded.default_remote_path",
             params![
                 host.id.as_uuid().as_bytes().to_vec(),
                 host.label,
@@ -178,6 +212,7 @@ impl Database {
                 host.jump.as_ref().map(|jump| jump.hostname.as_str()),
                 host.jump.as_ref().map(|jump| jump.port),
                 host.jump.as_ref().map(|jump| jump.username.as_str()),
+                optional_json(&host.jump)?,
                 serde_json::to_string(&host.auth_mode)?,
                 host.private_key_path.as_deref(),
                 host.default_remote_path,
@@ -207,7 +242,7 @@ impl Database {
 
     pub fn get_host(&self, id: HostId) -> Result<Option<Host>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path FROM hosts WHERE id = ?1",
+            "SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path FROM hosts WHERE id = ?1",
         )?;
         let row = statement
             .query_row(params![id.as_uuid().as_bytes().to_vec()], read_host_row)
@@ -216,7 +251,7 @@ impl Database {
     }
 
     pub fn list_hosts(&self) -> Result<Vec<Host>, StorageError> {
-        let mut statement = self.connection.prepare("SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path FROM hosts ORDER BY label COLLATE NOCASE")?;
+        let mut statement = self.connection.prepare("SELECT id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, jump_auth_json, auth_mode, private_key_path, default_remote_path FROM hosts ORDER BY label COLLATE NOCASE")?;
         let rows = statement.query_map([], read_host_row)?;
         let base_hosts = rows.collect::<Result<Vec<_>, _>>()?;
         base_hosts
@@ -277,17 +312,54 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
     let jump_hostname = row.get::<_, Option<String>>(7)?;
     let jump_port = row.get::<_, Option<u16>>(8)?;
     let jump_username = row.get::<_, Option<String>>(9)?;
-    let jump = match (jump_hostname, jump_port, jump_username) {
+    let legacy_jump = match (jump_hostname, jump_port, jump_username) {
         (Some(hostname), Some(port), Some(username)) => Some(kodework_domain::JumpHost {
             hostname,
             port,
             username,
+            auth_ref: None,
+            // Legacy jump rows had no independent credential reference. Do
+            // not reuse the target credential; default them to the OS SSH
+            // agent until the user configures a dedicated jump credential.
+            auth_mode: AuthenticationMode::SshAgent,
+            private_key_path: None,
         }),
         _ => None,
     };
-    let auth_mode_json = row.get::<_, String>(10)?;
-    let auth_mode = serde_json::from_str::<AuthenticationMode>(&auth_mode_json)
-        .unwrap_or(AuthenticationMode::Password);
+    let jump_auth = row
+        .get::<_, Option<String>>(10)?
+        .map(|raw| serde_json::from_str::<kodework_domain::JumpHost>(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let jump = jump_auth.or(legacy_jump);
+    let auth_mode_json = row.get::<_, String>(11)?;
+    // Credential semantics must fail closed. Treating corrupted or unknown
+    // data as Password can send the wrong secret through the wrong SSH method.
+    let auth_mode = match serde_json::from_str::<AuthenticationMode>(&auth_mode_json) {
+        Ok(mode) => mode,
+        Err(error) => match auth_mode_json.as_str() {
+            // v7 seeded this field with a bare enum name. Accept only the
+            // finite legacy spellings; every other malformed value fails
+            // closed instead of silently changing credential semantics.
+            "Password" => AuthenticationMode::Password,
+            "PublicKey" => AuthenticationMode::PublicKey,
+            "SshAgent" => AuthenticationMode::SshAgent,
+            "KeyboardInteractive" => AuthenticationMode::KeyboardInteractive,
+            _ => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                ));
+            }
+        },
+    };
     Ok(Host {
         id: HostId::from_uuid(id),
         label: row.get(1)?,
@@ -295,8 +367,8 @@ fn read_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
         port: row.get(3)?,
         auth_ref,
         auth_mode,
-        private_key_path: row.get(11)?,
-        default_remote_path: row.get(12)?,
+        private_key_path: row.get(12)?,
+        default_remote_path: row.get(13)?,
         addresses: Vec::new(),
         tailscale,
         default_runtime,
@@ -355,7 +427,8 @@ pub(crate) fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use kodework_domain::{
-        AddressKind, CredentialProvider, CredentialRef, RuntimeKind, TailscaleConfig, TailscaleMode,
+        AddressKind, CredentialProvider, CredentialRef, RunId, RuntimeKind, TailscaleConfig,
+        TailscaleMode,
     };
 
     fn fixture_host() -> Host {
@@ -421,8 +494,78 @@ mod tests {
     }
 
     #[test]
+    fn jump_host_round_trip_preserves_independent_auth_metadata() {
+        let database =
+            Database::open_in_memory().unwrap_or_else(|_| unreachable!("in-memory database"));
+        let mut host = fixture_host();
+        host.jump = Some(kodework_domain::JumpHost {
+            hostname: "bastion.example".into(),
+            port: 2222,
+            username: "bastion-user".into(),
+            auth_ref: Some(CredentialRef {
+                provider: CredentialProvider::Test,
+                opaque_id: "jump-password".into(),
+            }),
+            auth_mode: AuthenticationMode::Password,
+            private_key_path: None,
+        });
+        assert!(database.upsert_host(&host).is_ok());
+        let loaded = database
+            .get_host(host.id)
+            .unwrap_or_else(|_| unreachable!("host query"))
+            .unwrap_or_else(|| unreachable!("host was inserted"));
+        assert_eq!(loaded.jump, host.jump);
+    }
+
+    #[test]
     fn migration_plan_is_strictly_ordered() {
         assert!(validate_migrations().is_ok());
+    }
+
+    #[test]
+    fn migration_11_clears_legacy_run_output_previews() {
+        let connection = rusqlite::Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("open migration fixture: {error}"));
+        for migration in &MIGRATIONS[..10] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| {
+                    unreachable!("apply migration {}: {error}", migration.version)
+                });
+        }
+        let host_id = HostId::new();
+        connection
+            .execute(
+                "INSERT INTO hosts (id, label, username, port, auth_ref, tailscale_json, default_runtime, jump_hostname, jump_port, jump_username, auth_mode, private_key_path, default_remote_path)
+                 VALUES (?1, 'legacy host', 'tester', 22, NULL, NULL, 'Tmux', NULL, NULL, NULL, 'Password', NULL, '/')",
+                rusqlite::params![host_id.as_uuid().as_bytes()],
+            )
+            .unwrap_or_else(|error| unreachable!("insert legacy host: {error}"));
+        let run_id = RunId::new();
+        connection
+            .execute(
+                "INSERT INTO runs (id, action_id, host_id, project_id, action_name, command_snapshot, mode, cwd_snapshot, status, started_at_ms, finished_at_ms, exit_code, remote_session_ref, stdout_preview, stderr_preview, output_bytes, last_reconciled_at_ms)
+                 VALUES (?1, NULL, ?2, NULL, 'legacy', 'echo legacy', 'Background', NULL, 'Running', NULL, NULL, NULL, NULL, ?3, ?4, 7, NULL)",
+                rusqlite::params![
+                    run_id.as_uuid().as_bytes(),
+                    host_id.as_uuid().as_bytes(),
+                    "legacy stdout secret",
+                    "legacy stderr secret",
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("insert legacy run: {error}"));
+
+        connection
+            .execute_batch(MIGRATIONS[10].sql)
+            .unwrap_or_else(|error| unreachable!("apply migration 11: {error}"));
+        let previews: (String, String) = connection
+            .query_row(
+                "SELECT stdout_preview, stderr_preview FROM runs WHERE id = ?1",
+                rusqlite::params![run_id.as_uuid().as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|error| unreachable!("read migrated run: {error}"));
+        assert_eq!(previews, (String::new(), String::new()));
     }
 
     #[test]

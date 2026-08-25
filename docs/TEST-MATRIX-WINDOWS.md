@@ -7,6 +7,10 @@
 | 20 concurrent PTYs | `run-soak-matrix.ps1` + fake SSH | all 20 panes open, accept input, 21st is rejected by the explicit bound |
 | network interruption | core generation/reconnect tests | stale generation cannot overwrite the new session; panes are recreated |
 | transfer fault handling | SFTP pause/resume/retry tests | byte-exact result, `.part` retained only when resumable, no destination exposure before rename |
+| stale partial with same size | SFTP prefix-integrity regression tests | mismatched upload/download prefix restarts from zero and finishes byte-exact |
+| detached Run reconciliation | core/storage tests plus remote probe | tmux launch remains Running; exit marker maps to Succeeded/Failed; missing evidence maps to Unknown |
+| logical HostId host-key identity | SSH broker/storage tests | the same key passes across fallback addresses; a changed key is a hard failure |
+| Herdr bridge ownership | core fake SSH bridge tests | exact PID is captured, readiness is checked, stop cannot pattern-kill unrelated socat |
 | large streaming transfer | optional 512 MiB release test | upload/download complete byte-exact without file-size-proportional memory growth |
 | multi-hour stability | repeated SSH/SFTP integration loop | every iteration passes and process memory/handle counts do not trend upward |
 
@@ -16,7 +20,7 @@ Run a four-hour preflight:
 .\scripts\run-soak-matrix.ps1 -Hours 4 -IncludeLargeTransfer
 ```
 
-`-AllowSleepCycle` is deliberately opt-in because it suspends Windows. The application additionally probes session state immediately on WebView focus, visibility restoration, or network-online notification; its normal three-second transport poll remains the fallback.
+`-AllowSleepCycle` is deliberately opt-in because it suspends Windows. The renderer no longer polls connection state: the native supervisor scans per-host reconnect schedules and pushes `ConnectionRuntimeSnapshot` values over a Tauri Channel, with a low-frequency heartbeat that also detects dead subscribers. OS resume, window focus, tray open, and second-instance focus bump the `reconnect_wake_epoch` so pending backoff is cancelled and the next attempt starts immediately.
 
 ## Physical Windows acceptance
 

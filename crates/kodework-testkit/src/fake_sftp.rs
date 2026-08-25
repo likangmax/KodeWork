@@ -26,6 +26,8 @@ pub struct FakeSftpFaults {
     pub missing_sources: bool,
     /// Artificial per-write delay in milliseconds (slow-transfer tests).
     pub write_delay_ms: u64,
+    /// Artificial per-read delay in milliseconds (source mutation tests).
+    pub read_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,11 +87,15 @@ impl FakeSftpBackend {
 struct FakeReader {
     data: Vec<u8>,
     pos: usize,
+    delay_ms: u64,
 }
 
 #[async_trait::async_trait]
 impl SftpReader for FakeReader {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, SftpError> {
+        if self.delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+        }
         if self.pos >= self.data.len() {
             return Ok(0);
         }
@@ -177,6 +183,14 @@ impl SftpWriter for FakeWriter {
 
 #[async_trait::async_trait]
 impl SftpBackend for FakeSftpBackend {
+    async fn destination_identity(&self, path: &str) -> Result<String, SftpError> {
+        Ok(match path {
+            "~" => "/home/tester".to_string(),
+            path if path.starts_with("~/") => format!("/home/tester/{}", &path[2..]),
+            path => path.to_string(),
+        })
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<RemoteFileMeta>, SftpError> {
         if self.faults.missing_sources {
             return Ok(None);
@@ -238,7 +252,11 @@ impl SftpBackend for FakeSftpBackend {
             .lock()
             .map_err(|_| SftpError::Backend("fake store lock poisoned".into()))?;
         let data = guard.get(path).cloned().ok_or(SftpError::SourceNotFound)?;
-        Ok(Box::new(FakeReader { data, pos: 0 }))
+        Ok(Box::new(FakeReader {
+            data,
+            pos: 0,
+            delay_ms: self.faults.read_delay_ms,
+        }))
     }
 
     async fn open_write(

@@ -4,7 +4,8 @@ pub mod session;
 pub mod tunnel;
 
 use kodework_domain::{
-    Action, ActionMode, ConfirmationPolicy, ConnectionState, DangerLevel, RunStatus,
+    classify_danger, Action, ActionMode, ConfirmationPolicy, ConnectionState, DangerLevel,
+    RunStatus,
 };
 use thiserror::Error;
 
@@ -67,12 +68,20 @@ pub struct ActionPlan {
     pub initial_status: RunStatus,
 }
 
-pub fn plan_action(action: &Action, confirmed: bool) -> Result<ActionPlan, CoreError> {
-    let requires_confirmation = match action.confirmation {
+/// Returns the server-authoritative confirmation decision for an action.
+/// Danger is always recomputed from the command so stale renderer/database
+/// metadata cannot downgrade a Review or Dangerous command to Safe.
+#[must_use]
+pub fn action_requires_confirmation(action: &Action) -> bool {
+    let danger = classify_danger(&action.command);
+    match action.confirmation {
         ConfirmationPolicy::Always => true,
-        ConfirmationPolicy::OnDangerous => action.danger_level >= DangerLevel::Dangerous,
-        ConfirmationPolicy::Never => action.danger_level >= DangerLevel::Dangerous,
-    };
+        ConfirmationPolicy::OnDangerous | ConfirmationPolicy::Never => danger != DangerLevel::Safe,
+    }
+}
+
+pub fn plan_action(action: &Action, confirmed: bool) -> Result<ActionPlan, CoreError> {
+    let requires_confirmation = action_requires_confirmation(action);
     if requires_confirmation && !confirmed {
         return Err(CoreError::ConfirmationRequired);
     }
@@ -96,7 +105,12 @@ mod tests {
             id: ActionId::new(),
             project_id: ProjectId::new(),
             name: "test".into(),
-            command: "echo ok".into(),
+            command: match danger {
+                DangerLevel::Safe => "echo ok",
+                DangerLevel::Review => "python -c 'print(1)'",
+                DangerLevel::Dangerous => "rm -rf /tmp/work",
+            }
+            .into(),
             mode,
             cwd: None,
             timeout_ms: None,
@@ -130,6 +144,17 @@ mod tests {
             Err(CoreError::ConfirmationRequired)
         );
         assert!(plan_action(&action(ActionMode::Quick, DangerLevel::Dangerous), true).is_ok());
+    }
+
+    #[test]
+    fn review_action_requires_confirmation_even_with_never_policy() {
+        let mut value = action(ActionMode::Quick, DangerLevel::Review);
+        value.confirmation = ConfirmationPolicy::Never;
+        assert_eq!(
+            plan_action(&value, false),
+            Err(CoreError::ConfirmationRequired)
+        );
+        assert!(plan_action(&value, true).is_ok());
     }
 
     #[test]

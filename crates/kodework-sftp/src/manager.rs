@@ -2,11 +2,17 @@
 
 //! Streaming transfer manager with bounded concurrency, idempotent
 //! pause/resume/cancel/retry and `.part` + atomic-rename semantics.
+//!
+//! Events flow through a bounded channel drained by an external pump. A
+//! worker never blocks on event delivery: if the pump stops, the worker
+//! aborts at the next chunk boundary and releases its destination lease,
+//! so a vanished subscriber cannot strand transfers forever.
 
 use crate::backend::SftpBackend;
 use crate::{part_path, SftpError, TransferProgress, TransferRequest, DEFAULT_CHUNK_SIZE};
 use kodework_domain::{TransferDirection, TransferId, TransferStatus};
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,6 +50,11 @@ struct TransferControls {
     transferred: AtomicU64,
 }
 
+/// Shared destination lease registry. A registry can be shared by multiple
+/// per-host managers so two workflows cannot write the same local destination
+/// (or the same scoped remote destination) concurrently.
+pub type TransferLeaseRegistry = Arc<Mutex<HashMap<String, TransferId>>>;
+
 impl TransferControls {
     fn new(retries: u32) -> Self {
         Self {
@@ -68,7 +79,12 @@ pub struct TransferManager {
     semaphore: Arc<Semaphore>,
     controls: Arc<Mutex<HashMap<TransferId, Arc<TransferControls>>>>,
     requests: Arc<Mutex<HashMap<TransferId, TransferRequest>>>,
+    leases: TransferLeaseRegistry,
+    lease_scope: String,
     events: mpsc::Sender<TransferEvent>,
+    /// Cleared by [`TransferManager::event_pump_stopped`] once the owner of
+    /// the event receiver stops draining it.
+    pump_alive: Arc<AtomicBool>,
     chunk_size: usize,
 }
 
@@ -81,6 +97,26 @@ impl TransferManager {
         max_concurrency: usize,
         event_buffer: usize,
     ) -> (Self, mpsc::Receiver<TransferEvent>) {
+        Self::new_with_leases(
+            backend,
+            max_concurrency,
+            event_buffer,
+            Arc::new(Mutex::new(HashMap::new())),
+            "default",
+        )
+    }
+
+    /// Creates a manager using a caller-owned lease registry and namespace.
+    /// The namespace should identify the remote host when several managers
+    /// share one registry; local destinations remain globally protected while
+    /// remote paths are isolated per namespace.
+    pub fn new_with_leases(
+        backend: Arc<dyn SftpBackend>,
+        max_concurrency: usize,
+        event_buffer: usize,
+        leases: TransferLeaseRegistry,
+        lease_scope: impl Into<String>,
+    ) -> (Self, mpsc::Receiver<TransferEvent>) {
         let max_concurrency = max_concurrency.clamp(1, crate::MAX_CONCURRENCY_CEILING);
         let (events, receiver) = mpsc::channel(event_buffer.max(8));
         let manager = Self {
@@ -89,10 +125,21 @@ impl TransferManager {
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             controls: Arc::new(Mutex::new(HashMap::new())),
             requests: Arc::new(Mutex::new(HashMap::new())),
+            leases,
+            lease_scope: lease_scope.into(),
             events,
+            pump_alive: Arc::new(AtomicBool::new(true)),
             chunk_size: DEFAULT_CHUNK_SIZE,
         };
         (manager, receiver)
+    }
+
+    /// Signals that nothing is draining the event receiver any more. In-flight
+    /// workers stop at their next chunk boundary instead of blocking on a full
+    /// event channel, which would otherwise hold the destination lease and the
+    /// concurrency permit for the lifetime of the process.
+    pub fn event_pump_stopped(&self) {
+        self.pump_alive.store(false, Ordering::SeqCst);
     }
 
     #[must_use]
@@ -134,13 +181,36 @@ impl TransferManager {
     ) -> Result<(TransferId, Option<oneshot::Receiver<Result<(), SftpError>>>), SftpError> {
         crate::validate_request(&request)?;
         let id = TransferId::new();
+        let lease = self.lease_key(&request).await?;
+        {
+            let mut guard = self.leases.lock().map_err(lock_error)?;
+            if guard.contains_key(&lease) {
+                return Err(SftpError::DestinationBusy);
+            }
+            guard.insert(lease.clone(), id);
+        }
         let controls = Arc::new(TransferControls::new(retries));
         {
-            let mut guard = self.controls.lock().map_err(lock_error)?;
+            let mut guard = match self.controls.lock() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    release_lease(&self.leases, &lease, id);
+                    return Err(lock_error(error));
+                }
+            };
             guard.insert(id, Arc::clone(&controls));
         }
         {
-            let mut guard = self.requests.lock().map_err(lock_error)?;
+            let mut guard = match self.requests.lock() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    if let Ok(mut controls) = self.controls.lock() {
+                        controls.remove(&id);
+                    }
+                    release_lease(&self.leases, &lease, id);
+                    return Err(lock_error(error));
+                }
+            };
             guard.insert(id, request.clone());
         }
         self.emit_state(id, TransferStatus::Queued).await;
@@ -150,7 +220,7 @@ impl TransferManager {
         } else {
             (None, None)
         };
-        self.spawn_worker(id, request, controls, completion_tx);
+        self.spawn_worker(id, request, controls, completion_tx, lease);
         Ok((id, completion_rx))
     }
 
@@ -201,8 +271,16 @@ impl TransferManager {
             .retries_left
             .store(controls.max_retries, Ordering::SeqCst);
         controls.transferred.store(0, Ordering::SeqCst);
+        let lease = self.lease_key(&request).await?;
+        {
+            let mut guard = self.leases.lock().map_err(lock_error)?;
+            if guard.get(&lease).is_some_and(|owner| *owner != id) {
+                return Err(SftpError::DestinationBusy);
+            }
+            guard.insert(lease.clone(), id);
+        }
         self.emit_state(id, TransferStatus::Queued).await;
-        self.spawn_worker(id, request, controls, None);
+        self.spawn_worker(id, request, controls, None, lease);
         Ok(())
     }
 
@@ -220,18 +298,28 @@ impl TransferManager {
         request: TransferRequest,
         controls: Arc<TransferControls>,
         completion: Option<oneshot::Sender<Result<(), SftpError>>>,
+        lease: String,
     ) {
         let backend = Arc::clone(&self.backend);
         let semaphore = Arc::clone(&self.semaphore);
         let events = self.events.clone();
+        let pump_alive = Arc::clone(&self.pump_alive);
         let chunk_size = self.chunk_size;
         let controls_map = Arc::clone(&self.controls);
         let requests_map = Arc::clone(&self.requests);
+        let leases = Arc::clone(&self.leases);
         let generation = controls.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let reaper_controls = Arc::clone(&controls);
         tokio::spawn(async move {
             let permit = semaphore.acquire().await;
-            let outcome = run_transfer(backend, id, request, controls, events, chunk_size).await;
+            let outcome = run_transfer(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await;
+            // The worker has stopped touching the destination, so a new
+            // enqueue may proceed immediately. Reaper cleanup remains a
+            // second defensive release for abnormal timing.
+            release_lease(&leases, &lease, id);
             if let Some(completion) = completion {
                 let _ = completion.send(outcome);
             }
@@ -251,6 +339,7 @@ impl TransferManager {
                 if let Ok(mut guard) = requests_map.lock() {
                     guard.remove(&id);
                 }
+                release_lease(&leases, &lease, id);
             }
         });
     }
@@ -261,12 +350,109 @@ impl TransferManager {
     }
 
     async fn emit_state(&self, id: TransferId, status: TransferStatus) {
-        let _ = self.events.send(TransferEvent::State { id, status }).await;
+        emit(
+            &self.events,
+            &self.pump_alive,
+            TransferEvent::State { id, status },
+        )
+        .await;
+    }
+
+    async fn lease_key(&self, request: &TransferRequest) -> Result<String, SftpError> {
+        match request.direction {
+            kodework_domain::TransferDirection::Upload => Ok(format!(
+                "remote:{}:{}",
+                self.lease_scope,
+                normalize_remote_path(
+                    &self
+                        .backend
+                        .destination_identity(&request.remote_path)
+                        .await?
+                )
+            )),
+            kodework_domain::TransferDirection::Download => Ok(format!(
+                "local:{}",
+                normalize_local_path(&request.local_path)
+            )),
+        }
     }
 }
 
 fn lock_error<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> SftpError {
     SftpError::Backend("transfer manager lock poisoned".into())
+}
+
+fn release_lease(leases: &TransferLeaseRegistry, lease: &str, id: TransferId) {
+    if let Ok(mut guard) = leases.lock() {
+        if guard.get(lease).copied() == Some(id) {
+            guard.remove(lease);
+        }
+    }
+}
+
+fn normalize_remote_path(path: &str) -> String {
+    let mut normalized = path.to_string();
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn normalize_local_path(path: &str) -> String {
+    let path = Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| PathBuf::from(path))
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_)))
+                {
+                    let _ = normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    let normalized = normalized.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+/// Emits one event without ever blocking a worker indefinitely. The event
+/// pump applies backpressure by draining the bounded channel; if it has
+/// stopped, in-flight workers must abort instead of holding leases and
+/// concurrency permits while nobody consumes their progress.
+async fn emit(events: &mpsc::Sender<TransferEvent>, pump_alive: &AtomicBool, event: TransferEvent) {
+    if !pump_alive.load(Ordering::SeqCst) {
+        return;
+    }
+    // Prefer non-blocking delivery: the pump drains the bounded channel, so
+    // `Full` means it is overwhelmed or wedged. A blocking `send` here is
+    // exactly how a dead pump strands a worker (and its destination lease)
+    // forever. If the channel is full, skip this event and let the next
+    // pump-alive check abort the transfer instead.
+    let _ = events.try_send(event);
 }
 
 async fn run_transfer(
@@ -275,20 +461,12 @@ async fn run_transfer(
     request: TransferRequest,
     controls: Arc<TransferControls>,
     events: mpsc::Sender<TransferEvent>,
+    pump_alive: Arc<AtomicBool>,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
-    controls.running.store(true, Ordering::SeqCst);
-    let outcome = attempt_transfer(
-        backend.as_ref(),
-        id,
-        &request,
-        &controls,
-        &events,
-        chunk_size,
-    )
-    .await;
-
-    // Ensure the running flag is cleared on every exit path.
+    // Ensure the running flag is cleared on every exit path, including a
+    // dropped worker during the first attempt. Without this, `retry()` can
+    // never re-run a transfer whose worker was abandoned mid-flight.
     struct RunningGuard {
         controls: Arc<TransferControls>,
     }
@@ -300,59 +478,107 @@ async fn run_transfer(
     let _running = RunningGuard {
         controls: Arc::clone(&controls),
     };
+    controls.running.store(true, Ordering::SeqCst);
+    let outcome = attempt_transfer(
+        backend.as_ref(),
+        id,
+        &request,
+        &controls,
+        &events,
+        &pump_alive,
+        chunk_size,
+    )
+    .await;
 
     let mut current = outcome;
     while let Err(error) = current {
         if matches!(error, SftpError::Cancelled) || controls.cancelled.load(Ordering::SeqCst) {
-            let _ = events
-                .send(TransferEvent::State {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
                     id,
                     status: TransferStatus::Cancelled,
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(SftpError::Cancelled);
+        }
+        if !error.is_retryable() {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::Failed {
+                    id,
+                    message: error.to_string(),
+                },
+            )
+            .await;
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
+                    id,
+                    status: TransferStatus::Failed,
+                },
+            )
+            .await;
+            return Err(error);
         }
         let retries_left = controls.retries_left.load(Ordering::SeqCst);
         if retries_left == 0 {
-            let _ = events
-                .send(TransferEvent::Failed {
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::Failed {
                     id,
                     message: error.to_string(),
-                })
-                .await;
-            let _ = events
-                .send(TransferEvent::State {
+                },
+            )
+            .await;
+            emit(
+                &events,
+                &pump_alive,
+                TransferEvent::State {
                     id,
                     status: TransferStatus::Failed,
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(error);
         }
         controls
             .retries_left
             .store(retries_left - 1, Ordering::SeqCst);
-        let _ = events
-            .send(TransferEvent::State {
+        emit(
+            &events,
+            &pump_alive,
+            TransferEvent::State {
                 id,
                 status: TransferStatus::Retrying,
-            })
-            .await;
+            },
+        )
+        .await;
         current = attempt_transfer(
             backend.as_ref(),
             id,
             &request,
             &controls,
             &events,
+            &pump_alive,
             chunk_size,
         )
         .await;
     }
-    let _ = events
-        .send(TransferEvent::State {
+    emit(
+        &events,
+        &pump_alive,
+        TransferEvent::State {
             id,
             status: TransferStatus::Completed,
-        })
-        .await;
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -362,24 +588,37 @@ async fn attempt_transfer(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     wait_while_paused(controls).await;
     if controls.cancelled.load(Ordering::SeqCst) {
         return Err(SftpError::Cancelled);
     }
-    let _ = events
-        .send(TransferEvent::State {
+    emit(
+        events,
+        pump_alive,
+        TransferEvent::State {
             id,
             status: TransferStatus::Transferring,
-        })
-        .await;
+        },
+    )
+    .await;
+    if !pump_alive.load(Ordering::SeqCst) {
+        return Err(SftpError::Cancelled);
+    }
     match request.direction {
         TransferDirection::Upload => {
-            upload(backend, id, request, controls, events, chunk_size).await
+            upload(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await
         }
         TransferDirection::Download => {
-            download(backend, id, request, controls, events, chunk_size).await
+            download(
+                backend, id, request, controls, events, pump_alive, chunk_size,
+            )
+            .await
         }
     }
 }
@@ -390,6 +629,7 @@ async fn upload(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -402,11 +642,22 @@ async fn upload(
                 SftpError::Backend(format!("local open: {error}"))
             }
         })?;
-    let total = local
+    let initial_handle_meta = local
         .metadata()
         .await
-        .map_err(|error| SftpError::Backend(format!("local metadata: {error}")))?
-        .len();
+        .map_err(|error| SftpError::Backend(format!("local metadata: {error}")))?;
+    let initial_handle_identity = LocalFileIdentity::from_metadata(&initial_handle_meta);
+    let total = initial_handle_meta.len();
+    let initial_path_meta = tokio::fs::metadata(&request.local_path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SftpError::SourceChanged
+            } else {
+                SftpError::Backend(format!("local path metadata: {error}"))
+            }
+        })?;
+    let initial_identity = LocalFileIdentity::from_metadata(&initial_path_meta);
 
     let remote_part = part_path(&request.remote_path);
     // Resume only when the partial file is consistent: it must not be
@@ -414,7 +665,11 @@ async fn upload(
     // bad resume can never corrupt the destination.
     let resume_offset = if request.resume {
         let existing = existing_part_size(backend, &remote_part).await?;
-        if existing > total {
+        if existing > total
+            || (existing > 0
+                && !upload_prefix_matches(&request.local_path, backend, &remote_part, existing)
+                    .await?)
+        {
             0
         } else {
             existing
@@ -442,6 +697,9 @@ async fn upload(
         if controls.cancelled.load(Ordering::SeqCst) {
             return Err(SftpError::Cancelled);
         }
+        if !pump_alive.load(Ordering::SeqCst) {
+            return Err(SftpError::Cancelled);
+        }
         let n = local
             .read(&mut buf)
             .await
@@ -459,12 +717,31 @@ async fn upload(
             speed_bps,
         };
         if progress_throttle.should_emit(progress) {
-            let _ = events.send(TransferEvent::Progress { id, progress }).await;
+            emit(events, pump_alive, TransferEvent::Progress { id, progress }).await;
         }
     }
 
     writer.flush().await?;
     writer.close().await?;
+    let final_handle_meta = local
+        .metadata()
+        .await
+        .map_err(|error| SftpError::Backend(format!("local final handle metadata: {error}")))?;
+    let final_path_meta = tokio::fs::metadata(&request.local_path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SftpError::SourceChanged
+            } else {
+                SftpError::Backend(format!("local final metadata: {error}"))
+            }
+        })?;
+    if transferred != total
+        || LocalFileIdentity::from_metadata(&final_handle_meta) != initial_handle_identity
+        || LocalFileIdentity::from_metadata(&final_path_meta) != initial_identity
+    {
+        return Err(SftpError::SourceChanged);
+    }
     backend
         .rename(&remote_part, &request.remote_path)
         .await
@@ -481,6 +758,7 @@ async fn download(
     request: &TransferRequest,
     controls: &TransferControls,
     events: &mpsc::Sender<TransferEvent>,
+    pump_alive: &AtomicBool,
     chunk_size: usize,
 ) -> Result<(), SftpError> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -499,7 +777,11 @@ async fn download(
     // discarded so a bad resume can never corrupt the destination.
     let resume_offset = if request.resume {
         let existing = local_part_size(&local_part).await?;
-        if existing > total {
+        if existing > total
+            || (existing > 0
+                && !download_prefix_matches(&local_part, backend, &request.remote_path, existing)
+                    .await?)
+        {
             0
         } else {
             existing
@@ -536,6 +818,9 @@ async fn download(
         if controls.cancelled.load(Ordering::SeqCst) {
             return Err(SftpError::Cancelled);
         }
+        if !pump_alive.load(Ordering::SeqCst) {
+            return Err(SftpError::Cancelled);
+        }
         let n = reader.read(&mut buf).await?;
         if n == 0 {
             break;
@@ -558,7 +843,7 @@ async fn download(
             speed_bps,
         };
         if progress_throttle.should_emit(progress) {
-            let _ = events.send(TransferEvent::Progress { id, progress }).await;
+            emit(events, pump_alive, TransferEvent::Progress { id, progress }).await;
         }
     }
 
@@ -570,9 +855,70 @@ async fn download(
         .map_err(|error| SftpError::Backend(format!("local sync: {error}")))?;
     drop(file);
     reader.close().await?;
-    std::fs::rename(&local_part, &request.local_path)
+    let final_meta = backend.stat(&request.remote_path).await?;
+    let source_unchanged = final_meta.as_ref().is_some_and(|current| {
+        !current.is_dir && current.size == meta.size && current.modified_ms == meta.modified_ms
+    });
+    if transferred != total || !source_unchanged {
+        return Err(SftpError::SourceChanged);
+    }
+    replace_local_file(Path::new(&local_part), Path::new(&request.local_path))
         .map_err(|error| SftpError::Backend(format!("local rename: {error}")))?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalFileIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl LocalFileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+/// Replaces a completed download without failing when the destination already
+/// exists on Windows. The old destination is moved aside first so a failed
+/// final rename can restore it instead of leaving the user without a file.
+fn replace_local_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if !to.exists() {
+            return std::fs::rename(from, to);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = to
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("destination");
+        let backup = to.with_file_name(format!(
+            ".{name}.kodework-old-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::rename(to, &backup)?;
+        match std::fs::rename(from, to) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(backup);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::rename(&backup, to);
+                Err(error)
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
 }
 
 /// Emits progress events at most once per interval or byte step.
@@ -653,6 +999,82 @@ async fn local_part_size(part: &str) -> Result<u64, SftpError> {
     }
 }
 
+/// Verifies the exact bytes already present in a remote `.part` against the
+/// current local source. A size match alone is not a transfer identity.
+async fn upload_prefix_matches(
+    local_path: &str,
+    backend: &dyn SftpBackend,
+    remote_part: &str,
+    length: u64,
+) -> Result<bool, SftpError> {
+    use tokio::io::AsyncReadExt;
+    let mut local = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|error| SftpError::Backend(format!("prefix local open: {error}")))?;
+    let mut remote = backend.open_read(remote_part).await?;
+    let mut left = length;
+    let mut local_buf = vec![0u8; 64 * 1024];
+    let mut remote_buf = vec![0u8; 64 * 1024];
+    let mut equal = true;
+    while left > 0 {
+        let wanted = left.min(local_buf.len() as u64) as usize;
+        let local_n = local
+            .read(&mut local_buf[..wanted])
+            .await
+            .map_err(|error| SftpError::Backend(format!("prefix local read: {error}")))?;
+        let remote_n = remote.read(&mut remote_buf[..wanted]).await?;
+        if local_n != remote_n || local_buf[..local_n] != remote_buf[..remote_n] {
+            equal = false;
+            break;
+        }
+        if local_n == 0 {
+            equal = false;
+            break;
+        }
+        left -= local_n as u64;
+    }
+    remote.close().await?;
+    Ok(equal && left == 0)
+}
+
+/// Verifies the exact bytes already present in a local `.part` against the
+/// current remote source before resuming a download.
+async fn download_prefix_matches(
+    local_part: &str,
+    backend: &dyn SftpBackend,
+    remote_path: &str,
+    length: u64,
+) -> Result<bool, SftpError> {
+    use tokio::io::AsyncReadExt;
+    let mut local = tokio::fs::File::open(local_part)
+        .await
+        .map_err(|error| SftpError::Backend(format!("prefix local part open: {error}")))?;
+    let mut remote = backend.open_read(remote_path).await?;
+    let mut left = length;
+    let mut local_buf = vec![0u8; 64 * 1024];
+    let mut remote_buf = vec![0u8; 64 * 1024];
+    let mut equal = true;
+    while left > 0 {
+        let wanted = left.min(local_buf.len() as u64) as usize;
+        let local_n = local
+            .read(&mut local_buf[..wanted])
+            .await
+            .map_err(|error| SftpError::Backend(format!("prefix local part read: {error}")))?;
+        let remote_n = remote.read(&mut remote_buf[..wanted]).await?;
+        if local_n != remote_n || local_buf[..local_n] != remote_buf[..remote_n] {
+            equal = false;
+            break;
+        }
+        if local_n == 0 {
+            equal = false;
+            break;
+        }
+        left -= local_n as u64;
+    }
+    remote.close().await?;
+    Ok(equal && left == 0)
+}
+
 async fn wait_while_paused(controls: &TransferControls) {
     while controls.paused.load(Ordering::SeqCst) {
         controls.resume_notify.notified().await;
@@ -663,5 +1085,38 @@ fn map_disk_error(error: SftpError) -> SftpError {
     match error {
         SftpError::Backend(message) if message.contains("No space left") => SftpError::DiskFull,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_local_path;
+    use crate::TransferRequest;
+    use kodework_domain::TransferDirection;
+
+    #[test]
+    fn local_lease_key_collapses_parent_components() {
+        let (first_path, second_path) = if cfg!(windows) {
+            (
+                r"C:\workspace\models\..\model.bin",
+                r"C:\workspace\model.bin",
+            )
+        } else {
+            ("/workspace/models/../model.bin", "/workspace/model.bin")
+        };
+        let first = TransferRequest {
+            local_path: first_path.into(),
+            remote_path: "~/model.bin".into(),
+            direction: TransferDirection::Download,
+            resume: false,
+        };
+        let second = TransferRequest {
+            local_path: second_path.into(),
+            ..first.clone()
+        };
+        assert_eq!(
+            normalize_local_path(&first.local_path),
+            normalize_local_path(&second.local_path)
+        );
     }
 }

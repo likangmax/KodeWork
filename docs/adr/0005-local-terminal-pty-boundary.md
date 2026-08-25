@@ -1,4 +1,4 @@
-# ADR 0001: Local terminals use an independent PTY manager
+# ADR-0005: Local terminals use an independent PTY manager
 
 ## Decision
 

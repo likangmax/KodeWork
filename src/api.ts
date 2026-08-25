@@ -9,7 +9,28 @@ export type RuntimeKind = 'Tmux' | 'Herdr' | 'PlainShell'
 export type AuthenticationMode = 'Password' | 'PublicKey' | 'SshAgent' | 'KeyboardInteractive'
 export type ConnectionState =
   | 'Disconnected' | 'ResolvingAddress' | 'Connecting' | 'VerifyingHostKey'
-  | 'Authenticating' | 'Ready' | 'Reconnecting' | 'Failed'
+  | 'Authenticating' | 'WaitingForCredential' | 'Ready' | 'Reconnecting' | 'Failed'
+
+export type ConnectionRuntimeSnapshot = {
+  state: ConnectionState
+  generation: number
+}
+
+export type ConnectError = {
+  kind: 'Network' | 'Timeout' | 'Tailscale' | 'Authentication' | 'CredentialRequired' | 'HostKey' | 'InvalidConfiguration' | 'Cancelled' | 'Protocol' | 'Internal'
+  detail: string
+}
+
+export function asConnectError(error: unknown): ConnectError | null {
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as Partial<ConnectError>
+    if (typeof candidate.kind === 'string' && typeof candidate.detail === 'string') return candidate as ConnectError
+  }
+  if (typeof error === 'string' && error.startsWith('{')) {
+    try { return asConnectError(JSON.parse(error)) } catch { /* preserve raw diagnostic */ }
+  }
+  return null
+}
 
 export type HostAddress = {
   id: string
@@ -37,7 +58,14 @@ export type Host = {
   auth_mode: AuthenticationMode
   private_key_path: string | null
   default_remote_path: string
-  jump: { hostname: string; port: number; username: string } | null
+  jump: {
+    hostname: string
+    port: number
+    username: string
+    auth_ref?: { provider: string; opaque_id: string } | null
+    auth_mode?: AuthenticationMode
+    private_key_path?: string | null
+  } | null
   addresses: HostAddress[]
   tailscale: TailscaleConfig | null
   default_runtime: RuntimeKind
@@ -135,6 +163,16 @@ export const sendInput = (hostId: string, paneId: number, data: Uint8Array) =>
 export const resizePty = (hostId: string, paneId: number, cols: number, rows: number) =>
   invoke<void>('resize_pty', { hostId, paneId, cols, rows })
 export const sessionState = (hostId: string) => invoke<ConnectionState>('session_state', { hostId })
+export const subscribeSessionRuntime = (hostId: string, onEvent: (snapshot: ConnectionRuntimeSnapshot) => void): (() => void) => {
+  if (!isDesktop()) return () => {}
+  const channel = new Channel<ConnectionRuntimeSnapshot>()
+  channel.onmessage = onEvent
+  void invoke<void>('session_runtime_subscribe', { hostId, onEvent: channel }).catch(() => {})
+  return () => {
+    const raw = channel as unknown as { cleanupCallback?: () => void }
+    raw.cleanupCallback?.()
+  }
+}
 export const pendingHostKeyRequests = () => invoke<HostKeyRequest[]>('pending_host_key_requests')
 export const answerHostKey = (requestId: number, decision: 'trust_once' | 'trust_and_save' | 'reject') =>
   invoke<boolean>('answer_host_key', { requestId, decision })
@@ -255,6 +293,7 @@ export const tunnelOpen = (hostId: string, localPort: number, remoteHost: string
 export const tunnelClose = (tunnelId: string) => invoke<void>("tunnel_close", { tunnelId })
 export const tunnelList = () => invoke<TunnelInfo[]>("tunnel_list")
 export type HerdrBridgeInfo = {
+  bridge_id: string
   tunnel: TunnelInfo
   remote_socket: string
   remote_port: number
@@ -262,8 +301,8 @@ export type HerdrBridgeInfo = {
 
 export const herdrBridge = (hostId: string, localPort: number) =>
   invoke<HerdrBridgeInfo>("herdr_bridge", { hostId, localPort })
-export const herdrBridgeStop = (hostId: string, remotePort: number) =>
-  invoke<void>("herdr_bridge_stop", { hostId, remotePort })
+export const herdrBridgeStopById = (hostId: string, bridgeId: string) =>
+  invoke<void>("herdr_bridge_stop_by_id", { hostId, bridgeId })
 export type Snippet = {
   id: string
   name: string
@@ -297,6 +336,7 @@ export type Action = {
 }
 
 export type RunOutcome = {
+  disposition: 'Completed' | 'BackgroundStarted' | 'InteractiveDispatched'
   exit_code: number | null
   stdout_preview: string
   stderr_preview: string
@@ -304,16 +344,25 @@ export type RunOutcome = {
   remote_session_ref: string | null
 }
 
-export type RunStatus = 'Created' | 'Confirming' | 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled' | 'TimedOut'
+export type RunStatus = 'Created' | 'Confirming' | 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled' | 'TimedOut' | 'Interrupted' | 'Unknown'
 export type Run = {
   id: string
-  action_id: string
+  action_id: string | null
+  host_id: string
+  project_id: string | null
+  action_name: string
+  command_snapshot: string
+  mode: 'Interactive' | 'Quick' | 'Background'
+  cwd_snapshot: string | null
   status: RunStatus
   started_at_ms: number | null
   finished_at_ms: number | null
   exit_code: number | null
   remote_session_ref: string | null
+  stdout_preview: string
+  stderr_preview: string
   output_bytes: number
+  last_reconciled_at_ms: number | null
 }
 
 export const projectList = (hostId: string) => invoke<Project[]>('project_list', { hostId })
@@ -326,6 +375,7 @@ export const runAction = (hostId: string, action: Action, confirmed: boolean) =>
   invoke<RunOutcome>('run_action', { hostId, action, confirmed })
 export const runList = (actionId?: string, limit = 50, hostId?: string) =>
   invoke<Run[]>('run_list', { actionId: actionId ?? null, hostId: hostId ?? null, limit })
+export const runReconcile = (hostId: string) => invoke<number>('run_reconcile', { hostId })
 
 // --- Updater (tauri-plugin-updater) ---
 export type UpdateCheck =

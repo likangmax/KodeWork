@@ -7,28 +7,59 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to package (for example v0.2.2)
+        description: Existing tag to package (for example v0.2.3)
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows-msi:
     name: Windows MSI
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+          fetch-depth: 0
+      - name: Verify release tag lineage
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Release tag is not contained in origin/main; refusing to package unreviewed history.'
+          }
+      - name: Verify release version consistency
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must be an exact stable semver tag (vX.Y.Z): $env:RELEASE_TAG"
+          }
+          $expected = $Matches.version
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $workspaceVersions = @(
+            (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+              Where-Object { $null -eq $_.source } |
+              Select-Object -ExpandProperty version -Unique
+          )
+          if ($packageVersion -ne $expected -or $tauriVersion -ne $expected -or
+              $workspaceVersions.Count -ne 1 -or $workspaceVersions[0] -ne $expected) {
+            throw "Version mismatch: tag=$expected package=$packageVersion tauri=$tauriVersion workspace=$($workspaceVersions -join ',')"
+          }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: 1.98.0-x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - name: Prepare pinned Tailscale sidecars
         shell: pwsh
@@ -42,42 +73,83 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           KODEWORK_CERT_THUMBPRINT: ${{ secrets.KODEWORK_CERT_THUMBPRINT }}
           KODEWORK_TIMESTAMP_URL: ${{ secrets.KODEWORK_TIMESTAMP_URL }}
-          KODEWORK_REQUIRE_AUTHENTICODE: '0'
+          # Stable public releases require both updater and Authenticode
+          # signatures. Preview/developer builds must use a separate workflow.
+          KODEWORK_REQUIRE_AUTHENTICODE: '1'
         run: |
-          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            $keyDirectory = Join-Path $env:USERPROFILE '.tauri'
-            New-Item -ItemType Directory -Path $keyDirectory -Force | Out-Null
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY is required for stable releases; refusing to publish unsigned updater artifacts.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:KODEWORK_CERT_THUMBPRINT)) {
+            throw 'KODEWORK_CERT_THUMBPRINT is required for stable Authenticode releases.'
+          }
+          $keyDirectory = Join-Path $env:USERPROFILE '.tauri'
+          New-Item -ItemType Directory -Path $keyDirectory -Force | Out-Null
+          [System.IO.File]::WriteAllText(
+            (Join-Path $keyDirectory 'kodework.key'),
+            $env:TAURI_SIGNING_PRIVATE_KEY,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
             [System.IO.File]::WriteAllText(
-              (Join-Path $keyDirectory 'kodework.key'),
-              $env:TAURI_SIGNING_PRIVATE_KEY,
+              (Join-Path $keyDirectory 'kodework.pass'),
+              $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
               [System.Text.UTF8Encoding]::new($false)
             )
-            if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-              [System.IO.File]::WriteAllText(
-                (Join-Path $keyDirectory 'kodework.pass'),
-                $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
-                [System.Text.UTF8Encoding]::new($false)
-              )
-            }
-            ./scripts/build-release.ps1
-          } else {
-            Write-Warning 'Updater signing secrets are not configured; publishing the MSI without an updater signature.'
-            $overlayPath = Join-Path $env:RUNNER_TEMP 'kodework-release-overlay.json'
-            '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -LiteralPath $overlayPath -Encoding utf8NoBOM
-            npm run tauri -- build --config $overlayPath
           }
+          ./scripts/build-release.ps1
+          $msis = @(Get-ChildItem target/release/bundle/msi -Filter '*.msi')
+          if ($msis.Count -ne 1) { throw "Expected exactly one MSI, found $($msis.Count)." }
+          $msi = $msis[0]
+          $sig = Get-Item ($msi.FullName + '.sig') -ErrorAction SilentlyContinue
+          if (-not $sig) { throw 'Updater signature was not generated.' }
+          $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $staging = Join-Path $env:RUNNER_TEMP 'kodework-release-assets'
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item $msi.FullName $staging
+          Copy-Item $sig.FullName $staging
+          "$hash *$($msi.Name)" | Set-Content -LiteralPath (Join-Path $staging ($msi.Name + '.sha256')) -Encoding utf8NoBOM
+      - name: Remove temporary updater signing material
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.tauri\kodework.key') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.tauri\kodework.pass') -Force -ErrorAction SilentlyContinue
+      - name: Upload immutable release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kodework-release-assets
+          path: ${{ runner.temp }}/kodework-release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish release
+    needs: windows-msi
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download immutable release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kodework-release-assets
+          path: release-assets
       - name: Verify and publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          $msi = Get-ChildItem target/release/bundle/msi -Filter '*.msi' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $msi) { throw 'MSI was not generated.' }
+          $msis = @(Get-ChildItem release-assets -Filter '*.msi')
+          if ($msis.Count -ne 1) { throw "Expected exactly one MSI, found $($msis.Count)." }
+          $msi = $msis[0]
           $sig = Get-Item ($msi.FullName + '.sig') -ErrorAction SilentlyContinue
+          if (-not $sig) { throw 'Updater signature is missing from the release artifact.' }
           $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksumPath = Join-Path $msi.DirectoryName ($msi.Name + '.sha256')
-          "$hash *$($msi.Name)" | Set-Content -LiteralPath $checksumPath -Encoding utf8NoBOM
+          if (-not (Test-Path -LiteralPath $checksumPath)) { throw 'SHA-256 manifest is missing from the release artifact.' }
+          $expectedChecksum = "$hash *$($msi.Name)"
+          if ((Get-Content -Raw -LiteralPath $checksumPath).Trim() -ne $expectedChecksum) { throw 'SHA-256 manifest does not match the MSI.' }
           $notes = @(
             "## KodeWork $env:RELEASE_TAG",
             '',
@@ -88,12 +160,24 @@ jobs:
             '',
             'See the bilingual README for setup, security boundaries, and distribution notes.'
           ) -join "`n"
-          $assets = @($msi.FullName, $checksumPath)
-          if ($sig) { $assets += $sig.FullName }
+          $assets = @($msi.FullName, $checksumPath, $sig.FullName)
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG @assets --clobber
-            gh release edit $env:RELEASE_TAG --title "KodeWork $env:RELEASE_TAG" --notes $notes
+            $existingDir = Join-Path $env:RUNNER_TEMP 'existing-release'
+            New-Item -ItemType Directory -Path $existingDir -Force | Out-Null
+            foreach ($asset in $assets) {
+              gh release download $env:RELEASE_TAG --pattern ([System.IO.Path]::GetFileName($asset)) --dir $existingDir 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                throw "Release $env:RELEASE_TAG is missing asset $([System.IO.Path]::GetFileName($asset)); refusing partial mutation."
+              }
+              $existingPath = Join-Path $existingDir ([System.IO.Path]::GetFileName($asset))
+              $actual = (Get-FileHash $existingPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              $expected = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $expected) {
+                throw "Release $env:RELEASE_TAG contains a different $([System.IO.Path]::GetFileName($asset)); refusing to overwrite an immutable release."
+              }
+            }
+            Write-Host "Release $env:RELEASE_TAG is complete and byte-identical; no-op."
           } else {
             gh release create $env:RELEASE_TAG @assets --title "KodeWork $env:RELEASE_TAG" --notes $notes --verify-tag
           }

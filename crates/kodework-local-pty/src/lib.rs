@@ -114,11 +114,23 @@ impl LocalTerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<LocalTerminalDescriptor, LocalPtyError> {
+        self.open_with_options(kind, distribution, cols, rows, false)
+    }
+
+    fn open_with_options(
+        &self,
+        kind: LocalTerminalKind,
+        distribution: Option<String>,
+        cols: u16,
+        rows: u16,
+        no_profile: bool,
+    ) -> Result<LocalTerminalDescriptor, LocalPtyError> {
         let mut sessions = self.sessions.lock().map_err(|_| LocalPtyError::Poisoned)?;
         if sessions.len() >= MAX_SESSIONS {
             return Err(LocalPtyError::LimitReached);
         }
-        let (program, args, label) = command_plan(&kind, distribution.as_deref())?;
+        let (program, args, label) =
+            command_plan_with_options(&kind, distribution.as_deref(), no_profile)?;
         let id = {
             let mut next = self.next_id.lock().map_err(|_| LocalPtyError::Poisoned)?;
             let id = *next;
@@ -319,9 +331,10 @@ fn emit(session: &LocalSession, event: LocalTerminalEvent) {
     }
 }
 
-fn command_plan(
+fn command_plan_with_options(
     kind: &LocalTerminalKind,
     distribution: Option<&str>,
+    no_profile: bool,
 ) -> Result<(OsString, Vec<OsString>, String), LocalPtyError> {
     match kind {
         LocalTerminalKind::PowerShell => {
@@ -332,7 +345,11 @@ fn command_plan(
             let program = resolve_command("powershell.exe")
                 .or_else(|| resolve_command("pwsh.exe"))
                 .ok_or_else(|| LocalPtyError::Pty("PowerShell 未安装或不在 PATH 中".into()))?;
-            Ok((program, vec!["-NoLogo".into()], "PowerShell".into()))
+            let mut args = vec!["-NoLogo".into()];
+            if no_profile {
+                args.push("-NoProfile".into());
+            }
+            Ok((program, args, "PowerShell".into()))
         }
         LocalTerminalKind::CommandPrompt => Ok((
             resolve_command("cmd.exe")
@@ -429,12 +446,12 @@ fn decode_wsl_distributions(input: &[u8]) -> Vec<String> {
         bytes = bytes[2..].to_vec();
     }
     let text = if bytes.len() >= 2 && bytes.iter().skip(1).step_by(2).all(|byte| *byte == 0) {
-        String::from_utf16_lossy(
-            &bytes
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                .collect::<Vec<_>>(),
-        )
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let units = pairs
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
     };
@@ -455,24 +472,94 @@ mod tests {
     use super::decode_wsl_distributions;
 
     #[cfg(windows)]
+    async fn wait_for_terminal_sentinel(
+        manager: &super::LocalTerminalManager,
+        id: u32,
+        events: &mut tokio::sync::mpsc::Receiver<super::LocalTerminalEvent>,
+        readiness_command: &[u8],
+        readiness_sentinel: &str,
+    ) -> Result<Vec<u8>, String> {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut output = Vec::new();
+        let mut answered_device_query = false;
+        // Queue the probe immediately.  A shell may emit a prompt only after
+        // startup scripts and PSReadLine have initialized, so prompt shape is
+        // not a reliable readiness protocol.  The command sits in the PTY
+        // input buffer until the shell can consume it.
+        manager
+            .write(id, readiness_command)
+            .map_err(|error| error.to_string())?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "local terminal did not become ready; output was {}",
+                    String::from_utf8_lossy(&output)
+                ));
+            }
+            let event = tokio::time::timeout(remaining, events.recv())
+                .await
+                .map_err(|_| "local terminal readiness timed out".to_string())?
+                .ok_or_else(|| "local terminal event stream closed before readiness".to_string())?;
+            match event {
+                super::LocalTerminalEvent::Data { bytes } => {
+                    output.extend(bytes);
+                    if output
+                        .windows(b"\x1b[6n".len())
+                        .any(|window| window == b"\x1b[6n")
+                        && !answered_device_query
+                    {
+                        manager
+                            .write(id, b"\x1b[1;1R")
+                            .map_err(|error| error.to_string())?;
+                        answered_device_query = true;
+                    }
+                    if String::from_utf8_lossy(&output).contains(readiness_sentinel) {
+                        return Ok(output);
+                    }
+                }
+                super::LocalTerminalEvent::Exited { code } => {
+                    return Err(format!(
+                        "local terminal exited with {code} before readiness; output was {}",
+                        String::from_utf8_lossy(&output)
+                    ));
+                }
+                super::LocalTerminalEvent::Error { message } => {
+                    return Err(format!("local PTY read failed before readiness: {message}"));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
     async fn assert_real_terminal_round_trip(
         kind: super::LocalTerminalKind,
-        input: &[u8],
+        readiness_command: &[u8],
+        readiness_sentinel: &str,
+        command: &[u8],
         sentinel: &str,
     ) -> Result<(), String> {
         let manager = super::LocalTerminalManager::new();
         let descriptor = manager
-            .open(kind, None, 80, 24)
+            .open_with_options(kind.clone(), None, 80, 24, true)
             .map_err(|error| error.to_string())?;
         let mut events = manager
             .subscribe(descriptor.id)
             .map_err(|error| error.to_string())?;
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let mut output = wait_for_terminal_sentinel(
+            &manager,
+            descriptor.id,
+            &mut events,
+            readiness_command,
+            readiness_sentinel,
+        )
+        .await?;
         manager
-            .write(descriptor.id, input)
+            .write(descriptor.id, command)
             .map_err(|error| error.to_string())?;
         let output = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let mut output = Vec::new();
             while let Some(event) = events.recv().await {
                 match event {
                     super::LocalTerminalEvent::Data { bytes } => {
@@ -529,11 +616,12 @@ mod tests {
         }
         assert_real_terminal_round_trip(
             super::LocalTerminalKind::PowerShell,
-            // PowerShell asks for the cursor position during startup.
-            // xterm.js answers this automatically; this headless test
-            // emulates the same device-status response.
-            b"\x1b[1;1RWrite-Output KODEWORK_LOCAL_PTY_SENTINEL\rexit\r",
-            "KODEWORK_LOCAL_PTY_SENTINEL",
+            // Build the marker from separate PowerShell string literals so
+            // command echo cannot satisfy the readiness check accidentally.
+            b"Write-Output ('KODEWORK_' + 'READY_PS_7A31')\r",
+            "KODEWORK_READY_PS_7A31",
+            b"Write-Output ('KODEWORK_' + 'ROUNDTRIP_PS_7A31')\r",
+            "KODEWORK_ROUNDTRIP_PS_7A31",
         )
         .await
     }
@@ -546,7 +634,9 @@ mod tests {
         }
         assert_real_terminal_round_trip(
             super::LocalTerminalKind::CommandPrompt,
-            b"\x1b[1;1Recho KODEWORK_CMD_PTY_SENTINEL\rexit\r",
+            b"echo KODEWORK_READY_CMD_7A31\r",
+            "KODEWORK_READY_CMD_7A31",
+            b"echo KODEWORK_CMD_PTY_SENTINEL\rexit\r",
             "KODEWORK_CMD_PTY_SENTINEL",
         )
         .await

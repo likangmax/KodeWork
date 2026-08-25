@@ -10,7 +10,9 @@ Hosts need to survive application restarts, but passwords, private keys, passphr
 
 ## Decision
 
-- Store only non-secret metadata in SQLite.
+- Store only non-secret metadata in SQLite. Run history persists lifecycle
+  metadata and byte counts, never stdout/stderr previews; bounded output is
+  returned only to the active renderer.
 - Store credentials as `{ provider, opaque_id }` references.
 - Use Windows Credential Manager for passwords, passphrases, and tokens; use a DPAPI-protected per-user file for managed private-key material when a file copy is required.
 - Keep a fake in-memory `SecretStore` for tests; it redacts `Debug` output and zeroizes owned buffers.
@@ -20,7 +22,9 @@ Hosts need to survive application restarts, but passwords, private keys, passphr
 
 ### Positive
 
-- Renderer state and database dumps cannot directly reveal credentials.
+- Renderer state and database dumps cannot directly reveal credentials from
+  the secret store or persisted run output. User-authored action commands and
+  snippets remain workspace text and are not treated as a credential store.
 - Database backups remain useful without becoming credential backups.
 - Migration and round-trip tests can run offline with an in-memory database.
 

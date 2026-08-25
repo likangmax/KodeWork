@@ -7,9 +7,10 @@
 //! rmdir, realpath.
 
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
 };
 use russh_sftp::server::{Handler as SftpHandler, StatusReply};
+use russh_sftp::{de, extensions};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -146,6 +147,18 @@ impl SftpHandler for InMemorySftp {
 
     fn unimplemented(&self) -> Self::Error {
         StatusReply::new(StatusCode::OpUnsupported)
+    }
+
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, Self::Error> {
+        let mut version = Version::new();
+        version
+            .extensions
+            .insert(extensions::EXPAND_PATH.to_string(), "1".to_string());
+        Ok(version)
     }
 
     async fn open(
@@ -379,6 +392,29 @@ impl SftpHandler for InMemorySftp {
             id,
             files: vec![File::dummy(normalize(&path))],
         })
+    }
+
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, Self::Error> {
+        if request != extensions::EXPAND_PATH {
+            return Err(StatusReply::new(StatusCode::OpUnsupported));
+        }
+        let mut bytes = bytes::Bytes::from(data);
+        let request = de::from_bytes::<extensions::ExpandPathExtension>(&mut bytes)
+            .map_err(|_| StatusReply::new(StatusCode::BadMessage))?;
+        let path = match request.path.as_str() {
+            "~" => "/home/tester".to_string(),
+            path if path.starts_with("~/") => format!("/home/tester/{}", &path[2..]),
+            path => normalize(path),
+        };
+        Ok(Packet::Name(Name {
+            id,
+            files: vec![File::dummy(path)],
+        }))
     }
 
     async fn rename(

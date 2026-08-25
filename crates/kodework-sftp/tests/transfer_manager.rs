@@ -4,7 +4,7 @@
 
 use kodework_domain::{TransferDirection, TransferStatus};
 use kodework_sftp::manager::{TransferEvent, TransferManager};
-use kodework_sftp::{TransferRequest, DEFAULT_CHUNK_SIZE};
+use kodework_sftp::{SftpError, TransferRequest, DEFAULT_CHUNK_SIZE};
 use kodework_testkit::fake_sftp::{FakeSftpBackend, FakeSftpFaults};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,6 +104,136 @@ async fn upload_completes_atomically() {
 }
 
 #[tokio::test]
+async fn same_destination_is_rejected_while_transfer_is_active() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    let local = temp_file("lease", 16 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/lease.bin");
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    let duplicate = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await;
+    assert!(
+        matches!(duplicate, Err(SftpError::DestinationBusy)),
+        "duplicate destination must be rejected: {duplicate:?}"
+    );
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Completed)
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn equivalent_remote_home_aliases_share_destination_lease() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    let local = temp_file("lease-alias", 16 * DEFAULT_CHUNK_SIZE);
+    let first = format!("{REMOTE_DIR}/alias.bin");
+    let second = "/home/tester/uploads/alias.bin";
+
+    let id = manager
+        .enqueue(upload_request(&local, &first, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+
+    let duplicate = manager
+        .enqueue(upload_request(&local, second, false), 0)
+        .await;
+    assert!(
+        matches!(duplicate, Err(SftpError::DestinationBusy)),
+        "equivalent remote aliases must share one lease: {duplicate:?}"
+    );
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Completed)
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn upload_fails_when_source_changes_before_commit() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("source-changed-upload", 16 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/source-changed-upload.bin");
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 2)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    std::fs::write(&local, vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE])
+        .unwrap_or_else(|error| unreachable!("mutate source: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Failed)
+    );
+    assert!(
+        !backend.contains(&remote),
+        "changed source must not be committed"
+    );
+    assert!(backend.contains(&format!("{remote}.part")));
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn download_fails_when_remote_source_changes_before_commit() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        read_delay_ms: 3,
+        ..FakeSftpFaults::default()
+    }));
+    let remote = format!("{REMOTE_DIR}/source-changed-download.bin");
+    backend.seed(&remote, vec![BYTE_X; 16 * DEFAULT_CHUNK_SIZE]);
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("source-changed-download", 8);
+    let id = manager
+        .enqueue(download_request(&local, &remote, false), 2)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(manager.transferred_bytes(id) > 0, "transfer must start");
+    backend.seed(&remote, vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE]);
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(10)).await,
+        Some(TransferStatus::Failed)
+    );
+    assert_eq!(
+        std::fs::read(&local).unwrap_or_else(|error| unreachable!("read destination: {error}")),
+        vec![BYTE_X; 8]
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
 async fn enqueue_and_wait_returns_only_after_atomic_completion() {
     let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
     let (manager, _rx) = TransferManager::new(backend.clone(), 2, 256);
@@ -156,6 +286,27 @@ async fn download_completes_atomically() {
     assert_eq!(data.len(), 512 * 1024);
     assert_eq!(data.iter().filter(|b| **b == BYTE_Y).count(), 512 * 1024);
     assert!(!local.with_extension("bin.part").exists());
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn download_replaces_existing_destination() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let remote = format!("{REMOTE_DIR}/overwrite.bin");
+    backend.seed(&remote, vec![BYTE_Y; 128 * 1024]);
+    let (manager, mut rx) = TransferManager::new(backend, 2, 256);
+    // Windows rename does not replace an existing destination. The transfer
+    // must still complete and leave the new payload in place.
+    let local = temp_file("download-overwrite", 32);
+
+    let id = manager
+        .enqueue(download_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let status = wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await;
+    assert_eq!(status, Some(TransferStatus::Completed));
+    let data = std::fs::read(&local).unwrap_or_else(|error| unreachable!("read: {error}"));
+    assert_eq!(data, vec![BYTE_Y; 128 * 1024]);
     cleanup(&local);
 }
 
@@ -232,8 +383,16 @@ async fn cancel_keeps_part_file_for_resume() {
         }
     }
     assert!(started, "transfer must start");
-    // Let a few chunks land, then cancel mid-flight.
-    tokio::time::sleep(Duration::from_millis(3)).await;
+    // Wait until a chunk is durable in the remote `.part`, then cancel
+    // mid-flight. Seeing `Transferring` alone is earlier than `open_write`.
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < progress_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "partial upload must exist"
+    );
     manager
         .cancel(id)
         .unwrap_or_else(|error| unreachable!("cancel: {error}"));
@@ -363,8 +522,16 @@ async fn resume_upload_continues_from_part() {
         }
     }
     assert!(started, "transfer must start");
-    // Let a few chunks land, then cancel mid-flight.
-    tokio::time::sleep(Duration::from_millis(3)).await;
+    // Wait until a chunk is durable in the remote `.part`, then cancel
+    // mid-flight. Seeing `Transferring` alone is earlier than `open_write`.
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < progress_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "partial upload must exist"
+    );
     manager
         .cancel(id)
         .unwrap_or_else(|error| unreachable!("cancel: {error}"));
@@ -387,6 +554,63 @@ async fn resume_upload_continues_from_part() {
         .unwrap_or_else(|| unreachable!("file"));
     assert_eq!(data.len(), 8 * DEFAULT_CHUNK_SIZE);
     assert!(!backend.contains(&format!("{remote}.part")));
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn same_size_wrong_upload_part_is_rebuilt() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let local = temp_file("wrong-upload-prefix", 4 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/wrong-upload-prefix.bin");
+    backend.seed(
+        &format!("{remote}.part"),
+        vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE],
+    );
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, true), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await,
+        Some(TransferStatus::Completed)
+    );
+    assert_eq!(
+        backend.read(&remote),
+        Some(vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE])
+    );
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn same_size_wrong_download_part_is_rebuilt() {
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults::default()));
+    let (manager, mut rx) = TransferManager::new(backend.clone(), 2, 256);
+    let remote = format!("{REMOTE_DIR}/wrong-download-prefix.bin");
+    backend.seed(&remote, vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE]);
+    let local = std::env::temp_dir().join(format!(
+        "kodework-sftp-test-{}-wrong-download-prefix",
+        std::process::id()
+    ));
+    std::fs::write(
+        format!("{}.part", local.display()),
+        vec![BYTE_Y; 2 * DEFAULT_CHUNK_SIZE],
+    )
+    .unwrap_or_else(|error| unreachable!("part write: {error}"));
+
+    let id = manager
+        .enqueue(download_request(&local, &remote, true), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    assert_eq!(
+        wait_for_terminal(&mut rx, id, Duration::from_secs(5)).await,
+        Some(TransferStatus::Completed)
+    );
+    assert_eq!(
+        std::fs::read(&local).ok(),
+        Some(vec![BYTE_X; 4 * DEFAULT_CHUNK_SIZE])
+    );
     cleanup(&local);
 }
 
@@ -568,5 +792,116 @@ async fn finished_transfers_are_reaped_from_the_registry() {
         manager.cancel(id).is_err(),
         "completed transfer must be reaped from the registry"
     );
+    cleanup(&local);
+}
+
+/// Polls until the destination lease is free again: a fresh enqueue to the
+/// same remote path must be accepted, not rejected as `DestinationBusy`.
+/// This is the observable proof that an in-flight worker has stopped.
+async fn wait_for_destination_free(
+    manager: &TransferManager,
+    local: &std::path::Path,
+    remote: &str,
+    timeout: Duration,
+) -> kodework_domain::TransferId {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match manager
+            .enqueue(upload_request(local, remote, false), 0)
+            .await
+        {
+            Ok(id) => return id,
+            Err(SftpError::DestinationBusy) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "destination stayed busy after the event pump died"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => unreachable!("unexpected enqueue error: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn dead_event_pump_aborts_worker_and_releases_destination() {
+    // Dropping the receiver models the renderer subscription going away
+    // (reconnect, panel teardown). The pump stops draining the bounded
+    // event channel; an in-flight worker must not block on it. It aborts at
+    // the next chunk boundary and releases the destination lease, so the
+    // same destination can be used again instead of staying busy for the
+    // process lifetime.
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 5,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, rx) = TransferManager::new(backend.clone(), 2, 8);
+    let local = temp_file("deadpump", 32 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/deadpump.bin");
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    // Provably mid-flight before the consumer disappears.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.transferred_bytes(id) > 0,
+        "slow backend must be transferring"
+    );
+    drop(rx);
+    // Old behavior: the worker blocked forever on `send`, held the lease and
+    // never exited, so this poll timed out. New behavior: the worker aborts
+    // and the lease is released promptly.
+    let second = wait_for_destination_free(&manager, &local, &remote, Duration::from_secs(5)).await;
+    let _ = manager.cancel(second);
+    cleanup(&local);
+}
+
+#[tokio::test]
+async fn abandoned_transfer_can_be_retried_after_pump_death() {
+    // After the consumer disappears and the worker aborts, `retry()` must
+    // find the worker stopped and the transfer still registered (inside the
+    // grace window). The old blocking send would leave the worker stranded
+    // in `running` forever and `retry()` would fail with "worker did not
+    // stop".
+    let backend = Arc::new(FakeSftpBackend::new(FakeSftpFaults {
+        write_delay_ms: 5,
+        ..FakeSftpFaults::default()
+    }));
+    let (manager, rx) = TransferManager::new(backend.clone(), 2, 8);
+    let local = temp_file("retrypump", 8 * DEFAULT_CHUNK_SIZE);
+    let remote = format!("{REMOTE_DIR}/retrypump.bin");
+
+    let id = manager
+        .enqueue(upload_request(&local, &remote, false), 0)
+        .await
+        .unwrap_or_else(|error| unreachable!("enqueue: {error}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while manager.transferred_bytes(id) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(rx);
+    // Wait until the worker has provably stopped before retrying. A second
+    // transfer uses a different remote path so it never disturbs the
+    // original destination lease.
+    let second = wait_for_destination_free(
+        &manager,
+        &local,
+        &format!("{REMOTE_DIR}/retrypump-second.bin"),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = manager.cancel(second);
+
+    manager
+        .retry(id)
+        .await
+        .unwrap_or_else(|error| unreachable!("retry after pump death: {error}"));
+    // The retried worker has no consumer and cancels again; what matters is
+    // that the retry path did not see a permanently "running" worker.
     cleanup(&local);
 }

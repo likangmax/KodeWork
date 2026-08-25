@@ -7,7 +7,7 @@ use kodework_ssh::handler::SessionEvent;
 use kodework_ssh::host_key::{HostKeyBroker, HostKeyDecision, MemoryKnownHosts};
 use kodework_ssh::SshConnection;
 use kodework_testkit::fake_ssh::{
-    FakeExecBehavior, FakeShellBehavior, FakeSshOptions, FakeSshServer,
+    FakeExecBehavior, FakeExecResponse, FakeShellBehavior, FakeSshOptions, FakeSshServer,
 };
 use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
 use std::sync::Arc;
@@ -609,5 +609,68 @@ async fn run_command_accepts_exit_status_after_eof() {
         .disconnect()
         .await
         .unwrap_or_else(|error| unreachable!("disconnect: {error}"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracked_command_distinguishes_pre_dispatch_rejection() {
+    let server = FakeSshServer::start(FakeSshOptions {
+        exec: FakeExecBehavior::Reject,
+        ..FakeSshOptions::default()
+    })
+    .await
+    .unwrap_or_else(|error| unreachable!("fake server start: {error}"));
+    let broker = new_broker();
+    let options = options_for(server.addr().port(), PASSWORD, Arc::clone(&broker), 1);
+    let (connection, _events) =
+        connect_with_trust(options, Arc::clone(&broker), HostKeyDecision::TrustOnce)
+            .await
+            .unwrap_or_else(|error| unreachable!("connect: {error}"));
+
+    let error = match connection
+        .run_command_tracked("echo never-started", Duration::from_secs(1), 1024)
+        .await
+    {
+        Err(error) => error,
+        Ok(output) => unreachable!("rejected exec unexpectedly succeeded: {output:?}"),
+    };
+    assert!(!error.dispatched);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracked_command_marks_timeout_after_exec_ack_as_dispatched() {
+    let server = FakeSshServer::start(FakeSshOptions {
+        exec: FakeExecBehavior::ScriptedWithPersistent {
+            script: Vec::new(),
+            fallback: FakeExecResponse {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+            persistent_prefixes: vec!["sleep".to_string()],
+        },
+        ..FakeSshOptions::default()
+    })
+    .await
+    .unwrap_or_else(|error| unreachable!("fake server start: {error}"));
+    let broker = new_broker();
+    let options = options_for(server.addr().port(), PASSWORD, Arc::clone(&broker), 1);
+    let (connection, _events) =
+        connect_with_trust(options, Arc::clone(&broker), HostKeyDecision::TrustOnce)
+            .await
+            .unwrap_or_else(|error| unreachable!("connect: {error}"));
+
+    let error = match connection
+        .run_command_tracked("sleep forever", Duration::from_millis(100), 1024)
+        .await
+    {
+        Err(error) => error,
+        Ok(output) => unreachable!("persistent exec unexpectedly completed: {output:?}"),
+    };
+    assert!(error.dispatched);
+    assert_eq!(error.source, kodework_ssh::SshError::Timeout);
+
     server.shutdown().await;
 }

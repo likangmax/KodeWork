@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 rand = "0.10"
 kodework-domain = { path = "../kodework-domain" }
 kodework-herdr = { path = "../kodework-herdr" }

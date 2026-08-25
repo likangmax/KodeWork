@@ -1,23 +1,24 @@
 #![forbid(unsafe_code)]
 
 //! Connection/session manager: address fallback, generation-guarded event
-//! streams, pane routing, and PTY control. Automatic reconnection is
-//! driven by the renderer (bounded, with backoff) because the core keeps
-//! no credential material.
+//! streams, pane routing, and PTY control. Connection state and transport
+//! generations are guarded by one authoritative controller; reconnect policy
+//! may live above this crate, but it can no longer bypass lifecycle rules.
 
 use crate::tunnel::{TunnelInfo, TunnelManager};
 use kodework_domain::{
-    classify_danger, validate_remote_path, Action, ActionMode, ConfirmationPolicy, ConnectionState,
-    DangerLevel, Host, HostId, TransferDirection, TransferId,
+    validate_remote_path, Action, ActionMode, BridgeId, ConnectionState, Host, HostId, RunId,
+    TransferDirection, TransferId,
 };
 use kodework_herdr::cli::{ExecOutput, HerdrClient, RemoteExecutor};
 use kodework_herdr::HerdrError;
 use kodework_network::CandidateResolver;
 use kodework_sftp::backend::{RemoteFileMeta, RusshSftpBackend, SftpBackend};
-use kodework_sftp::manager::{TransferEvent, TransferManager};
+use kodework_sftp::manager::{TransferEvent, TransferLeaseRegistry, TransferManager};
 use kodework_sftp::{TransferRequest, DEFAULT_MAX_CONCURRENCY};
 use kodework_ssh::connection::{
-    AuthMethod, CommandOutput, ConnectionOptions, JumpSpec, ProxyCommand, SshConnection, SshPty,
+    AuthMethod, CommandExecutionError, CommandOutput, ConnectionOptions, JumpSpec, ProxyCommand,
+    SshConnection, SshPty,
 };
 use kodework_ssh::handler::SessionEvent;
 use kodework_ssh::host_key::HostKeyBroker;
@@ -57,6 +58,235 @@ pub enum SessionOutcome {
     Failed { host_id: HostId, reason: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConnectErrorKind {
+    Network,
+    Timeout,
+    Tailscale,
+    Authentication,
+    CredentialRequired,
+    HostKey,
+    InvalidConfiguration,
+    Cancelled,
+    Protocol,
+    Internal,
+}
+
+impl ConnectErrorKind {
+    #[must_use]
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Network | Self::Timeout | Self::Tailscale)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConnectError {
+    pub kind: ConnectErrorKind,
+    pub detail: String,
+}
+
+impl ConnectError {
+    fn internal(detail: impl Into<String>) -> Self {
+        Self {
+            kind: ConnectErrorKind::Internal,
+            detail: detail.into(),
+        }
+    }
+
+    fn invalid(detail: impl Into<String>) -> Self {
+        Self {
+            kind: ConnectErrorKind::InvalidConfiguration,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.kind, self.detail)
+    }
+}
+
+impl std::fmt::Display for ConnectErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Network => "network",
+            Self::Timeout => "timeout",
+            Self::Tailscale => "tailscale",
+            Self::Authentication => "authentication",
+            Self::CredentialRequired => "credential_required",
+            Self::HostKey => "host_key",
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::Cancelled => "cancelled",
+            Self::Protocol => "protocol",
+            Self::Internal => "internal",
+        })
+    }
+}
+
+impl From<kodework_ssh::SshError> for ConnectError {
+    fn from(error: kodework_ssh::SshError) -> Self {
+        use kodework_ssh::SshError;
+        let kind = match &error {
+            SshError::Timeout => ConnectErrorKind::Timeout,
+            SshError::ConnectionRefused | SshError::Unreachable | SshError::NameResolution(_) => {
+                ConnectErrorKind::Network
+            }
+            SshError::AuthenticationFailed => ConnectErrorKind::Authentication,
+            SshError::CredentialRequired(_) => ConnectErrorKind::CredentialRequired,
+            SshError::HostKeyChanged
+            | SshError::HostKeyRejected
+            | SshError::HostKeyDecisionTimeout
+            | SshError::HostKeyStoreUnavailable(_) => ConnectErrorKind::HostKey,
+            SshError::Cancelled => ConnectErrorKind::Cancelled,
+            SshError::InvalidConfiguration(_) | SshError::AuthMethodUnavailable(_) => {
+                ConnectErrorKind::InvalidConfiguration
+            }
+            SshError::Protocol(_) | SshError::MissingExitStatus | SshError::ChannelClosed => {
+                ConnectErrorKind::Protocol
+            }
+            SshError::Io(_) => ConnectErrorKind::Internal,
+        };
+        Self {
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionRuntimeSnapshot {
+    pub state: ConnectionState,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateTransitionError {
+    Invalid {
+        from: ConnectionState,
+        to: ConnectionState,
+    },
+    StaleGeneration {
+        expected: u64,
+        actual: u64,
+    },
+}
+
+impl std::fmt::Display for StateTransitionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid { from, to } => {
+                write!(
+                    formatter,
+                    "invalid connection transition: {from:?} -> {to:?}"
+                )
+            }
+            Self::StaleGeneration { expected, actual } => write!(
+                formatter,
+                "stale connection generation: expected {expected}, current {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StateTransitionError {}
+
+/// The sole mutable authority for a session's lifecycle state and transport
+/// generation. Callers cannot write either field directly, which prevents a
+/// stale event pump from overwriting a newer connection.
+pub struct ConnectionStateController {
+    state: Mutex<ConnectionState>,
+    generation: AtomicU64,
+}
+
+impl Default for ConnectionStateController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnectionStateController {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(ConnectionState::Disconnected),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> ConnectionRuntimeSnapshot {
+        ConnectionRuntimeSnapshot {
+            state: self
+                .state
+                .lock()
+                .map(|value| *value)
+                .unwrap_or(ConnectionState::Disconnected),
+            generation: self.generation.load(Ordering::SeqCst),
+        }
+    }
+
+    #[must_use]
+    pub fn state(&self) -> ConnectionState {
+        self.snapshot().state
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    pub fn transition(&self, to: ConnectionState) -> Result<(), StateTransitionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateTransitionError::Invalid {
+                from: ConnectionState::Failed,
+                to,
+            })?;
+        if *state != to && !kodework_domain::connection_transition(*state, to) {
+            return Err(StateTransitionError::Invalid { from: *state, to });
+        }
+        *state = to;
+        Ok(())
+    }
+
+    pub fn transition_for_generation(
+        &self,
+        generation: u64,
+        to: ConnectionState,
+    ) -> Result<(), StateTransitionError> {
+        let actual = self.generation();
+        if actual != generation {
+            return Err(StateTransitionError::StaleGeneration {
+                expected: generation,
+                actual,
+            });
+        }
+        self.transition(to)
+    }
+
+    /// Reserve the next transport generation. The state itself is unchanged;
+    /// the connect path transitions it explicitly after address resolution.
+    pub fn reserve_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Installs a generation obtained by the connect path. This is monotonic
+    /// and rejects stale transport attachment.
+    pub fn install_generation(&self, generation: u64) -> Result<(), StateTransitionError> {
+        let current = self.generation();
+        if generation < current {
+            return Err(StateTransitionError::StaleGeneration {
+                expected: generation,
+                actual: current,
+            });
+        }
+        self.generation.store(generation, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 /// Manages one SSH session per host.
 #[derive(Clone)]
 pub struct SessionManager {
@@ -66,6 +296,7 @@ pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<HostId, ActiveSession>>>,
     event_buffer: usize,
     connect_timeout: Duration,
+    transfer_leases: TransferLeaseRegistry,
 }
 
 /// A session-event subscription: optional channel filter plus sender.
@@ -85,8 +316,7 @@ struct TransferSlot {
 }
 
 struct ActiveSession {
-    state: Arc<Mutex<ConnectionState>>,
-    generation: Arc<AtomicU64>,
+    controller: Arc<ConnectionStateController>,
     /// Serializes connect/disconnect transitions for one host. Without a
     /// per-host async gate, two IPC callers can reserve the same generation
     /// and race to install different transports.
@@ -104,13 +334,20 @@ struct ActiveSession {
     /// Bounded output received before a pane-specific renderer subscription.
     pending_events: Arc<Mutex<HashMap<u32, PendingPaneEvents>>>,
     dropped_events: Arc<AtomicU64>,
+    herdr_bridges: Arc<Mutex<HashMap<BridgeId, ActiveBridge>>>,
+}
+
+struct ActiveBridge {
+    owner: Arc<kodework_ssh::connection::SshExec>,
+    tunnel_id: crate::tunnel::TunnelInfo,
+    remote_port: u16,
+    generation: u64,
 }
 
 impl Clone for ActiveSession {
     fn clone(&self) -> Self {
         Self {
-            state: Arc::clone(&self.state),
-            generation: Arc::clone(&self.generation),
+            controller: Arc::clone(&self.controller),
             connect_guard: Arc::clone(&self.connect_guard),
             connection: Arc::clone(&self.connection),
             panes: Arc::clone(&self.panes),
@@ -120,6 +357,7 @@ impl Clone for ActiveSession {
             subscribers: Arc::clone(&self.subscribers),
             pending_events: Arc::clone(&self.pending_events),
             dropped_events: Arc::clone(&self.dropped_events),
+            herdr_bridges: Arc::clone(&self.herdr_bridges),
         }
     }
 }
@@ -138,6 +376,7 @@ impl SessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: event_buffer.max(8),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            transfer_leases: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -148,27 +387,59 @@ impl SessionManager {
         host: &Host,
         auth: Vec<AuthMethod>,
     ) -> Result<SessionOutcome, String> {
+        // Kept for library compatibility. The desktop command path uses
+        // `connect_with_jump_auth` whenever a bastion has its own credential.
+        self.connect_with_jump_auth_typed(host, auth, None)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Connects with explicitly separate target and jump-host credentials.
+    /// `None` is retained only for older library callers that have no jump
+    /// credential model yet; the Tauri production path passes `Some(...)` and
+    /// therefore never reuses target credentials implicitly.
+    pub async fn connect_with_jump_auth(
+        &self,
+        host: &Host,
+        auth: Vec<AuthMethod>,
+        jump_auth: Option<Vec<AuthMethod>>,
+    ) -> Result<SessionOutcome, String> {
+        self.connect_with_jump_auth_typed(host, auth, jump_auth)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Typed connection boundary used by native supervision. The compatibility
+    /// methods above stringify only at their public legacy boundary; retry and
+    /// credential policy never inspect those strings.
+    pub async fn connect_with_jump_auth_typed(
+        &self,
+        host: &Host,
+        auth: Vec<AuthMethod>,
+        jump_auth: Option<Vec<AuthMethod>>,
+    ) -> Result<SessionOutcome, ConnectError> {
         self.ensure_session(host.id);
         let connect_guard = self
             .sessions
             .lock()
-            .map_err(|_| "session registry poisoned".to_string())?
+            .map_err(|_| ConnectError::internal("session registry poisoned"))?
             .get(&host.id)
             .cloned()
-            .ok_or_else(|| "session was not created".to_string())?
+            .ok_or_else(|| ConnectError::internal("session was not created"))?
             .connect_guard;
         let _connect_guard = connect_guard.lock().await;
-        self.set_state(host.id, ConnectionState::ResolvingAddress);
+        self.set_state(host.id, ConnectionState::ResolvingAddress)?;
         let candidates = self.resolver.candidates(host).await;
         if candidates.is_empty() {
-            self.set_state(host.id, ConnectionState::Failed);
-            return Err("no enabled address candidates".into());
+            self.set_state(host.id, ConnectionState::Failed)?;
+            return Err(ConnectError::invalid("no enabled address candidates"));
         }
         let generation = self.next_generation(host.id);
+        let jump_auth = jump_auth.unwrap_or_else(|| auth.clone());
 
-        let mut last_error = String::from("no candidate attempted");
+        let mut last_error = ConnectError::internal("no candidate attempted");
         for candidate in candidates {
-            self.set_state(host.id, ConnectionState::Connecting);
+            self.set_state(host.id, ConnectionState::Connecting)?;
             let mut options = ConnectionOptions::new(
                 candidate.address.hostname_or_ip.clone(),
                 candidate.address.port,
@@ -177,6 +448,7 @@ impl SessionManager {
                 Arc::clone(&self.host_key),
                 generation,
             );
+            options.logical_host_id = Some(host.id);
             options.connect_timeout = self.connect_timeout;
             if host.jump.is_none() {
                 if let Some(proxy) = candidate.proxy {
@@ -191,33 +463,39 @@ impl SessionManager {
                     hostname: jump.hostname.clone(),
                     port: jump.port,
                     username: jump.username.clone(),
-                    auth: auth.clone(),
+                    auth: jump_auth.clone(),
                 });
             }
             match SshConnection::connect(options).await {
                 Ok((connection, events)) => {
-                    self.attach(host.id, connection, events, generation);
-                    self.set_state(host.id, ConnectionState::Ready);
+                    self.attach(host.id, connection, events, generation)?;
+                    self.set_state(host.id, ConnectionState::Ready)?;
                     return Ok(SessionOutcome::Connected {
                         host_id: host.id,
                         generation,
                     });
                 }
                 Err(error) => {
-                    last_error = error.to_string();
-                    if kodework_ssh::host_key_error_is_fatal(&error) {
-                        self.set_state(host.id, ConnectionState::Failed);
-                        return Err(format!(
-                            "fatal connection error for {}: {}",
-                            candidate.address.hostname_or_ip, last_error
-                        ));
+                    last_error = error.clone().into();
+                    if !kodework_ssh::address_fallback_is_retryable(&error) {
+                        self.set_state(host.id, ConnectionState::Failed)?;
+                        return Err(ConnectError {
+                            kind: last_error.kind,
+                            detail: format!(
+                                "candidate {}: {}",
+                                candidate.address.hostname_or_ip, last_error.detail
+                            ),
+                        });
                     }
                     // Network-class failures continue to the next candidate.
                 }
             }
         }
-        self.set_state(host.id, ConnectionState::Failed);
-        Err(format!("all candidates failed: {last_error}"))
+        self.set_state(host.id, ConnectionState::Failed)?;
+        Err(ConnectError {
+            kind: last_error.kind,
+            detail: format!("all candidates failed: {}", last_error.detail),
+        })
     }
 
     /// Subscribes to session events. When `channel` is `Some`, only
@@ -260,11 +538,33 @@ impl SessionManager {
         else {
             return ConnectionState::Disconnected;
         };
-        session
-            .state
+        session.controller.state()
+    }
+
+    #[must_use]
+    pub fn runtime_snapshot(&self, host_id: HostId) -> ConnectionRuntimeSnapshot {
+        self.sessions
             .lock()
-            .map(|guard| *guard)
-            .unwrap_or(ConnectionState::Disconnected)
+            .ok()
+            .and_then(|sessions| sessions.get(&host_id).cloned())
+            .map(|session| session.controller.snapshot())
+            .unwrap_or(ConnectionRuntimeSnapshot {
+                state: ConnectionState::Disconnected,
+                generation: 0,
+            })
+    }
+
+    /// Marks a transport as waiting for fresh user input. The native
+    /// supervisor uses this instead of retrying a credential failure forever.
+    pub fn mark_waiting_for_credential(&self, host_id: HostId) -> Result<(), ConnectError> {
+        self.set_state(host_id, ConnectionState::WaitingForCredential)
+    }
+
+    /// Keeps a transient network failure under native supervisor ownership so
+    /// the next supervisor tick can make another bounded attempt. This is
+    /// intentionally separate from `WaitingForCredential` and `Failed`.
+    pub fn mark_reconnecting(&self, host_id: HostId) -> Result<(), ConnectError> {
+        self.set_state(host_id, ConnectionState::Reconnecting)
     }
 
     #[must_use]
@@ -275,7 +575,7 @@ impl SessionManager {
             .and_then(|sessions| {
                 sessions
                     .get(&host_id)
-                    .map(|session| session.generation.load(Ordering::SeqCst))
+                    .map(|session| session.controller.generation())
             })
             .unwrap_or(0)
     }
@@ -460,22 +760,33 @@ impl SessionManager {
         command: &str,
         timeout: Duration,
     ) -> Result<CommandOutput, String> {
+        self.run_remote_with_timeout_tracked(host_id, command, timeout)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn run_remote_with_timeout_tracked(
+        &self,
+        host_id: HostId,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<CommandOutput, ActionRunError> {
         let connection = self
             .sessions
             .lock()
-            .map_err(|_| "session registry poisoned".to_string())?
+            .map_err(|_| ActionRunError::before_dispatch("session registry poisoned"))?
             .get(&host_id)
             .cloned()
-            .ok_or_else(|| "no session for host".to_string())?
+            .ok_or_else(|| ActionRunError::before_dispatch("no session for host"))?
             .connection
             .lock()
-            .map_err(|_| "connection lock poisoned".to_string())?
+            .map_err(|_| ActionRunError::before_dispatch("connection lock poisoned"))?
             .clone()
-            .ok_or_else(|| "not connected".to_string())?;
+            .ok_or_else(|| ActionRunError::before_dispatch("not connected"))?;
         connection
-            .run_command(command, timeout, DEFAULT_CAPTURE_CAP)
+            .run_command_tracked(command, timeout, DEFAULT_CAPTURE_CAP)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(ActionRunError::from_command)
     }
 
     /// Opens an SSH local port forward to `remote_host:remote_port`.
@@ -578,7 +889,13 @@ impl SessionManager {
         }
         let sftp = self.sftp_session(host_id).await?;
         let backend: Arc<dyn SftpBackend> = Arc::new(RusshSftpBackend::new(sftp));
-        let (manager, events) = TransferManager::new(backend, DEFAULT_MAX_CONCURRENCY, 512);
+        let (manager, events) = TransferManager::new_with_leases(
+            backend,
+            DEFAULT_MAX_CONCURRENCY,
+            512,
+            Arc::clone(&self.transfer_leases),
+            host_id.as_uuid().simple().to_string(),
+        );
         let manager = Arc::new(manager);
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let dropped_events = Arc::new(AtomicU64::new(0));
@@ -586,6 +903,7 @@ impl SessionManager {
             events,
             Arc::clone(&subscribers),
             Arc::clone(&dropped_events),
+            Arc::clone(&manager),
         ));
         {
             let mut guard = session
@@ -795,9 +1113,10 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
-    /// Bridges the remote herdr control socket to a local loopback port:
-    /// starts a detached socat UNIX->TCP bridge on the remote host and
-    /// opens an SSH local tunnel to it. Returns the local endpoint.
+    /// Bridges the remote herdr control socket to a local loopback port.
+    /// The remote socat process is owned by a long-lived SSH exec channel;
+    /// closing the local tunnel or transport therefore closes the owner and
+    /// cannot leave a detached remote process behind.
     /// Requires socat on the remote (documented; herdr's own --remote
     /// mechanism is the alternative on managed setups).
     pub async fn herdr_bridge(
@@ -820,35 +1139,119 @@ impl SessionManager {
         {
             return Err("远程需要 socat 才能桥接 herdr socket（apt install socat）".to_string());
         }
-        // Stable per-host remote port so a stale bridge can be reused.
-        let remote_port = 28000u16 + u16::try_from(host_id.as_uuid().as_u128() % 2000).unwrap_or(0);
         let socket_path = socket;
         let quoted_socket = shell_quote(&socket_path)?;
-        let start = format!(
-            "nohup setsid socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket} >/dev/null 2>&1 </dev/null & echo started"
-        );
-        let output = self.run_remote(host_id, &start).await?;
-        if !output.stdout.windows(7).any(|window| window == b"started") {
-            return Err(format!(
-                "socat 启动失败: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| "no session for host".to_string())?;
+        let connection = session
+            .connection
+            .lock()
+            .map_err(|_| "connection lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "not connected".to_string())?;
+        let base_port = 28000u16 + u16::try_from(host_id.as_uuid().as_u128() % 2000).unwrap_or(0);
+        let generation = self.generation(host_id);
+        let occupied = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .values()
+            .map(|bridge| bridge.remote_port)
+            .collect::<std::collections::HashSet<_>>();
+        let mut last_error = String::from("no bridge port candidate succeeded");
+        for offset in 0..16u16 {
+            let remote_port = 28000u16 + ((base_port - 28000 + offset) % 2000);
+            if occupied.contains(&remote_port) {
+                continue;
+            }
+            let owner = match connection
+                .exec_owned(&format!(
+                    "exec socat TCP-LISTEN:{remote_port},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{quoted_socket}"
+                ))
+                .await
+            {
+                Ok(owner) => Arc::new(owner),
+                Err(error) => {
+                    last_error = format!("socat port {remote_port} failed: {error}");
+                    continue;
+                }
+            };
+            if let Err(error) = owner.ensure_running(Duration::from_millis(250)).await {
+                let _ = owner.close().await;
+                last_error = format!("socat port {remote_port} exited during startup: {error}");
+                continue;
+            }
+            let tunnel = match self
+                .open_tunnel(host_id, local_port, "127.0.0.1", remote_port)
+                .await
+            {
+                Ok(tunnel) => tunnel,
+                Err(error) => {
+                    let _ = owner.close().await;
+                    last_error = error;
+                    continue;
+                }
+            };
+            let bridge_id = BridgeId::new();
+            let info = HerdrBridgeInfo {
+                bridge_id,
+                tunnel: tunnel.clone(),
+                remote_socket: socket_path.clone(),
+                remote_port,
+            };
+            session
+                .herdr_bridges
+                .lock()
+                .map_err(|_| "bridge registry poisoned".to_string())?
+                .insert(
+                    bridge_id,
+                    ActiveBridge {
+                        owner,
+                        tunnel_id: tunnel,
+                        remote_port,
+                        generation,
+                    },
+                );
+            return Ok(info);
         }
-        let tunnel = self
-            .open_tunnel(host_id, local_port, "127.0.0.1", remote_port)
-            .await?;
-        Ok(HerdrBridgeInfo {
-            tunnel,
-            remote_socket: socket_path,
-            remote_port,
-        })
+        Err(last_error)
     }
 
-    /// Stops the remote socat bridge (idempotent). The local tunnel is
-    /// closed separately via close_tunnel.
-    pub async fn herdr_bridge_stop(&self, host_id: HostId, remote_port: u16) -> Result<(), String> {
-        let command = format!("pkill -f 'socat.*{remote_port}' 2>/dev/null || true");
-        self.run_remote(host_id, &command).await.map(|_| ())
+    pub async fn herdr_bridge_stop_by_id(
+        &self,
+        host_id: HostId,
+        bridge_id: BridgeId,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| "no session for host".to_string())?;
+        let owner = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .remove(&bridge_id);
+        if let Some(bridge) = owner {
+            // A BridgeId is scoped to the transport generation.  The current
+            // generation may be newer after reconnect, but stopping an old
+            // id remains idempotent and must never affect a new bridge.
+            let _bridge_generation = bridge.generation;
+            let _ = self.tunnels.close(bridge.tunnel_id.id).await;
+            bridge
+                .owner
+                .close()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// Detects whether `yazi` is installed on the remote host.
@@ -879,19 +1282,27 @@ impl SessionManager {
         host_id: HostId,
         action: &Action,
         confirmed: bool,
-    ) -> Result<RunOutcome, String> {
+    ) -> Result<RunOutcome, ActionRunError> {
+        self.run_action_with_id(host_id, action, confirmed, None)
+            .await
+    }
+
+    /// Runs an action with a caller-owned RunId. Persisted background runs use
+    /// the same identity in SQLite, tmux and remote completion metadata.
+    pub async fn run_action_with_id(
+        &self,
+        host_id: HostId,
+        action: &Action,
+        confirmed: bool,
+        run_id: Option<kodework_domain::RunId>,
+    ) -> Result<RunOutcome, ActionRunError> {
         // Recompute the danger level server-side: the renderer-declared
         // field is only a hint and must never gate confirmation.
-        let danger = classify_danger(&action.command);
-        let requires_confirmation = match action.confirmation {
-            ConfirmationPolicy::Always => true,
-            ConfirmationPolicy::OnDangerous => danger == DangerLevel::Dangerous,
-            ConfirmationPolicy::Never => danger == DangerLevel::Dangerous,
-        };
+        let requires_confirmation = crate::action_requires_confirmation(action);
         if requires_confirmation && !confirmed {
-            return Err("危险动作需要确认后才能运行".to_string());
+            return Err(ActionRunError::before_dispatch("该动作需要确认后才能运行"));
         }
-        let command = build_action_command(action)?;
+        let command = build_action_command(action).map_err(ActionRunError::before_dispatch)?;
         match action.mode {
             ActionMode::Interactive => {
                 let pty = self.first_pane_pty(host_id)?;
@@ -899,8 +1310,9 @@ impl SessionManager {
                 line.push('\r');
                 pty.write(line.as_bytes())
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| ActionRunError::before_dispatch(error.to_string()))?;
                 Ok(RunOutcome {
+                    disposition: RunDisposition::InteractiveDispatched,
                     exit_code: None,
                     stdout_preview: "interactive: 命令已发送到终端".to_string(),
                     stderr_preview: String::new(),
@@ -913,8 +1325,22 @@ impl SessionManager {
                     .timeout_ms
                     .map(Duration::from_millis)
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+                // Quick runs use the same atomic remote lifecycle markers as
+                // background runs. The wrapper stays in the foreground so
+                // normal quick commands still return captured output, while
+                // a client timeout leaves enough evidence for reconciliation.
+                // Library callers may execute a non-persisted Quick action.
+                // Still give its remote lifecycle marker a unique identity so
+                // concurrent calls cannot overwrite the nil/default run
+                // directory used by older implementations.
+                let run_id = match run_id {
+                    Some(run_id) => run_id,
+                    None => kodework_domain::RunId::new(),
+                };
+                let run_key = run_id.as_uuid().simple().to_string();
+                let run_script = build_run_script(&command, &run_key)?;
                 let output = self
-                    .run_remote_with_timeout(host_id, &command, timeout)
+                    .run_remote_with_timeout_tracked(host_id, &run_script, timeout)
                     .await?;
                 let preview = |bytes: &[u8]| -> String {
                     let text = String::from_utf8_lossy(bytes);
@@ -922,31 +1348,40 @@ impl SessionManager {
                     trimmed
                 };
                 Ok(RunOutcome {
+                    disposition: RunDisposition::Completed,
                     exit_code: output.exit_code,
                     stdout_preview: preview(&output.stdout),
                     stderr_preview: preview(&output.stderr),
                     output_bytes: (output.stdout.len() + output.stderr.len()) as u64,
-                    remote_session_ref: None,
+                    remote_session_ref: Some(format!("metadata:{run_key}")),
                 })
             }
             ActionMode::Background => {
                 // A background action must survive UI/SSH disconnects. Run it
                 // inside a detached tmux session and return the external
                 // session name in the bounded preview for observability.
-                let session_name = format!(
-                    "kodework-run-{}",
-                    kodework_domain::RunId::new().as_uuid().simple()
-                );
+                let run_id = match run_id {
+                    Some(run_id) => run_id,
+                    None => kodework_domain::RunId::new(),
+                };
+                let session_name = format!("kodework-run-{}", run_id.as_uuid().simple());
+                let run_key = run_id.as_uuid().simple().to_string();
+                let run_script = build_run_script(&command, &run_key)?;
                 let tmux_command = format!(
                     "tmux new-session -d -s {} -- sh -lc {}",
                     session_name,
-                    shell_quote(&command)?
+                    shell_quote(&run_script)?
                 );
                 let output = self
-                    .run_remote_with_timeout(host_id, &tmux_command, DEFAULT_COMMAND_TIMEOUT)
+                    .run_remote_with_timeout_tracked(
+                        host_id,
+                        &tmux_command,
+                        DEFAULT_COMMAND_TIMEOUT,
+                    )
                     .await?;
                 if output.exit_code != Some(0) {
                     return Ok(RunOutcome {
+                        disposition: RunDisposition::Completed,
                         exit_code: output.exit_code,
                         stdout_preview: String::from_utf8_lossy(&output.stdout).trim().to_string(),
                         stderr_preview: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -955,7 +1390,10 @@ impl SessionManager {
                     });
                 }
                 Ok(RunOutcome {
-                    exit_code: Some(0),
+                    disposition: RunDisposition::BackgroundStarted,
+                    // tmux accepted the launcher; the user command has not
+                    // finished yet. The caller must reconcile it later.
+                    exit_code: None,
                     stdout_preview: format!("background tmux session: {session_name}"),
                     stderr_preview: String::new(),
                     output_bytes: 0,
@@ -963,6 +1401,92 @@ impl SessionManager {
                 })
             }
         }
+    }
+
+    /// Reconciles one persisted Quick/Background run using authoritative
+    /// remote metadata. Missing metadata is deliberately reported as Unknown.
+    pub async fn reconcile_remote_run(
+        &self,
+        host_id: HostId,
+        run_id: RunId,
+        mode: ActionMode,
+    ) -> Result<RemoteRunState, String> {
+        let request = RemoteRunProbeRequest { run_id, mode };
+        self.reconcile_remote_runs(host_id, std::slice::from_ref(&request))
+            .await?
+            .into_iter()
+            .next()
+            .map(|probe| probe.state)
+            .ok_or_else(|| "remote run probe returned no result".to_string())
+    }
+
+    /// Probes a bounded batch of persisted runs in one SSH exec.  Run ids are
+    /// UUID hex strings validated before interpolation, and the mode controls
+    /// the only authoritative live signal: Background requires its owned tmux
+    /// session; Quick never treats a started marker as proof of liveness.
+    pub async fn reconcile_remote_runs(
+        &self,
+        host_id: HostId,
+        requests: &[RemoteRunProbeRequest],
+    ) -> Result<Vec<RemoteRunProbe>, String> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let command = build_remote_run_probe_command(requests)?;
+        let output = self.run_remote(host_id, &command).await?;
+        let mut parsed = std::collections::HashMap::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split('\t');
+            let Some(id) = fields.next() else { continue };
+            let Some(request) = requests
+                .iter()
+                .find(|request| request.run_id.as_uuid().simple().to_string() == id)
+            else {
+                continue;
+            };
+            let state = match fields.next() {
+                Some("completed") => fields
+                    .next()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .map(|exit_code| RemoteRunState::Completed {
+                        exit_code,
+                        started_at_ms: parse_epoch_seconds(fields.next()),
+                        finished_at_ms: parse_epoch_seconds(fields.next()),
+                    })
+                    .unwrap_or(RemoteRunState::Unknown),
+                Some("running") if request.mode == ActionMode::Background => {
+                    RemoteRunState::Running
+                }
+                _ => RemoteRunState::Unknown,
+            };
+            parsed.insert(request.run_id, state);
+        }
+        Ok(requests
+            .iter()
+            .map(|request| RemoteRunProbe {
+                run_id: request.run_id,
+                state: parsed
+                    .get(&request.run_id)
+                    .copied()
+                    .unwrap_or(RemoteRunState::Unknown),
+            })
+            .collect())
+    }
+
+    /// Best-effort cleanup after local durable persistence.  A cleanup error
+    /// is intentionally ignored by callers: local run history is authoritative
+    /// and must not be rolled back because remote metadata is unavailable.
+    pub async fn cleanup_remote_run_metadata(
+        &self,
+        host_id: HostId,
+        run_id: RunId,
+    ) -> Result<(), String> {
+        let id = run_id.as_uuid().simple().to_string();
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("remote run id is not a safe UUID token".to_string());
+        }
+        let command = format!("base=\"$HOME/.cache/kodework/runs/{id}\"; rm -rf -- \"$base\"");
+        self.run_remote(host_id, &command).await.map(|_| ())
     }
     /// Lists remote tmux sessions (empty when tmux is unavailable).
     pub async fn tmux_list(&self, host_id: HostId) -> Result<Vec<TmuxSession>, String> {
@@ -1083,6 +1607,16 @@ impl SessionManager {
             .transfers
             .lock()
             .map_err(|_| "transfers lock poisoned".to_string())? = None;
+        let bridges = session
+            .herdr_bridges
+            .lock()
+            .map_err(|_| "bridge registry poisoned".to_string())?
+            .drain()
+            .map(|(_, bridge)| bridge.owner)
+            .collect::<Vec<_>>();
+        for owner in bridges {
+            let _ = owner.close().await;
+        }
         session
             .subscribers
             .lock()
@@ -1094,13 +1628,13 @@ impl SessionManager {
             .map_err(|_| "pending events lock poisoned".to_string())?
             .clear();
         self.tunnels.close_all_for_host(host_id).await;
-        self.set_state(host_id, ConnectionState::Disconnected);
+        self.set_state(host_id, ConnectionState::Disconnected)
+            .map_err(|error| error.to_string())?;
         disconnect_result
     }
 
-    /// Automatic reconnection lives in the renderer (bounded, with
-    /// backoff); the core layer deliberately keeps no credential material
-    /// to drive background reconnects on its own.
+    /// Reconnect state is owned by the desktop supervisor. The core keeps no
+    /// credential material; the supervisor resolves secrets on each attempt.
     #[must_use]
     pub fn dropped_events(&self, host_id: HostId) -> u64 {
         self.sessions
@@ -1121,7 +1655,7 @@ impl SessionManager {
             .lock()
             .ok()
             .and_then(|sessions| sessions.get(&host_id).cloned())
-            .map(|session| session.generation.load(Ordering::SeqCst) + 1)
+            .map(|session| session.controller.reserve_generation())
             .unwrap_or(1)
     }
 
@@ -1131,8 +1665,7 @@ impl SessionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sessions.entry(host_id).or_insert_with(|| ActiveSession {
-            state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
-            generation: Arc::new(AtomicU64::new(0)),
+            controller: Arc::new(ConnectionStateController::new()),
             connect_guard: Arc::new(tokio::sync::Mutex::new(())),
             connection: Arc::new(Mutex::new(None)),
             panes: Arc::new(Mutex::new(HashMap::new())),
@@ -1142,6 +1675,7 @@ impl SessionManager {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             pending_events: Arc::new(Mutex::new(HashMap::new())),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            herdr_bridges: Arc::new(Mutex::new(HashMap::new())),
         });
     }
 
@@ -1151,7 +1685,7 @@ impl SessionManager {
         connection: SshConnection,
         events: mpsc::Receiver<SessionEvent>,
         generation: u64,
-    ) {
+    ) -> Result<(), ConnectError> {
         let session = self
             .sessions
             .lock()
@@ -1159,6 +1693,10 @@ impl SessionManager {
             .get(&host_id)
             .cloned()
             .unwrap_or_else(|| unreachable!("session must exist"));
+        session
+            .controller
+            .install_generation(generation)
+            .map_err(|error| ConnectError::internal(error.to_string()))?;
         *session
             .connection
             .lock()
@@ -1181,28 +1719,49 @@ impl SessionManager {
         // Tunnels from the old transport are useless; close them.
         let manager = self.tunnels.clone();
         tokio::spawn(async move { manager.close_all_for_host(host_id).await });
+        let bridges = session
+            .herdr_bridges
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .map(|(_, bridge)| bridge.owner)
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for owner in bridges {
+                let _ = owner.close().await;
+            }
+        });
         *session
             .transfers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        session.generation.store(generation, Ordering::SeqCst);
-        self.set_state(host_id, ConnectionState::Connecting);
-
         let session_for_pump = Arc::new(session);
         tokio::spawn(async move {
             pump_events(session_for_pump, events, generation).await;
         });
+        Ok(())
     }
 
-    fn set_state(&self, host_id: HostId, state: ConnectionState) {
-        if let Ok(sessions) = self.sessions.lock() {
-            if let Some(session) = sessions.get(&host_id) {
-                if let Ok(mut guard) = session.state.lock() {
-                    *guard = state;
-                }
-            }
-        }
+    fn set_state(&self, host_id: HostId, state: ConnectionState) -> Result<(), ConnectError> {
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| ConnectError::internal("session registry poisoned"))?
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| ConnectError::internal("session was not created"))?;
+        session
+            .controller
+            .transition(state)
+            .map_err(|error| ConnectError::internal(error.to_string()))
     }
+}
+
+fn build_run_script(command: &str, run_key: &str) -> Result<String, String> {
+    let quoted_command = shell_quote(command)?;
+    Ok(format!(
+        "umask 077 || exit 125; base=\"$HOME/.cache/kodework/runs/{run_key}\"; if ! mkdir -p -- \"$base\"; then exit 125; fi; started_tmp=\"$base/started_at_s.tmp.$$\"; if ! date +%s > \"$started_tmp\" || ! mv -f -- \"$started_tmp\" \"$base/started_at_s\"; then rm -f -- \"$started_tmp\"; exit 125; fi; sh -lc {quoted_command}; code=$?; finished_tmp=\"$base/finished_at_s.tmp.$$\"; exit_tmp=\"$base/exit_code.tmp.$$\"; if ! date +%s > \"$finished_tmp\" || ! mv -f -- \"$finished_tmp\" \"$base/finished_at_s\"; then rm -f -- \"$finished_tmp\" \"$exit_tmp\"; exit 125; fi; if ! printf '%s\\n' \"$code\" > \"$exit_tmp\" || ! mv -f -- \"$exit_tmp\" \"$base/exit_code\"; then rm -f -- \"$exit_tmp\"; exit 125; fi; exit \"$code\""
+    ))
 }
 
 /// Forwards connection events to subscribers; the primary subscriber gets
@@ -1216,6 +1775,12 @@ async fn pump_events(
     // subscribers for the same filter are best-effort mirrors.
     let mut primaries: HashMap<Option<u32>, mpsc::Sender<SessionEvent>> = HashMap::new();
     while let Some(event) = events.recv().await {
+        // A reconnect installs a new transport generation while an older
+        // pump may still be draining its channel. Drop stale events before
+        // they can reach subscribers or the bounded pending-event replay.
+        if session.controller.generation() != generation {
+            continue;
+        }
         let subscribers = {
             let Ok(mut guard) = session.subscribers.lock() else {
                 break;
@@ -1306,13 +1871,13 @@ async fn pump_events(
                 // Only the pump of the CURRENT transport may flip the
                 // state; a stale pump from an older generation must not
                 // overwrite a freshly connected Ready session.
-                if session.generation.load(Ordering::SeqCst) != generation {
+                if session.controller.generation() != generation {
                     continue;
                 }
-                if let Ok(mut guard) = session.state.lock() {
-                    if *guard == ConnectionState::Ready {
-                        *guard = ConnectionState::Reconnecting;
-                    }
+                if session.controller.state() == ConnectionState::Ready {
+                    let _ = session
+                        .controller
+                        .transition_for_generation(generation, ConnectionState::Reconnecting);
                 }
             }
             _ => {}
@@ -1421,12 +1986,15 @@ impl RemoteExecutor for SessionExecutor {
 }
 /// Forwards transfer events to subscribers; the primary subscriber gets
 /// true backpressure, mirrors use best-effort delivery with a drop
-/// counter. Always running, so the manager never blocks on its event
-/// buffer.
+/// counter. Always running while the manager is alive, so the manager never
+/// blocks on its event buffer. When this pump exits, it marks the manager
+/// dead: in-flight workers then abort at their next chunk boundary instead
+/// of blocking on a full channel while nobody drains it.
 async fn pump_transfer_events(
     mut events: mpsc::Receiver<TransferEvent>,
     subscribers: Arc<Mutex<Vec<mpsc::Sender<TransferEvent>>>>,
     dropped_events: Arc<AtomicU64>,
+    manager: Arc<TransferManager>,
 ) {
     let mut primary: Option<mpsc::Sender<TransferEvent>> = None;
     while let Some(event) = events.recv().await {
@@ -1465,10 +2033,14 @@ async fn pump_transfer_events(
             primary = None;
         }
     }
+    // Nothing drains the manager's event stream any more. Tell in-flight
+    // workers to stop cleanly rather than blocking on the channel forever.
+    manager.event_pump_stopped();
 }
 /// Result of bridging the remote herdr socket to a local port.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HerdrBridgeInfo {
+    pub bridge_id: BridgeId,
     pub tunnel: crate::tunnel::TunnelInfo,
     pub remote_socket: String,
     pub remote_port: u16,
@@ -1476,11 +2048,123 @@ pub struct HerdrBridgeInfo {
 /// Result of running one action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunOutcome {
+    pub disposition: RunDisposition,
     pub exit_code: Option<i32>,
     pub stdout_preview: String,
     pub stderr_preview: String,
     pub output_bytes: u64,
     pub remote_session_ref: Option<String>,
+}
+
+/// Action execution failure with the protocol fact needed to classify the
+/// persisted Run. `dispatched` means the exec request may have reached the
+/// server and was not explicitly rejected; a later failure is therefore
+/// Unknown, not proof that the remote command failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRunError {
+    message: String,
+    dispatched: bool,
+    timed_out: bool,
+}
+
+impl ActionRunError {
+    fn before_dispatch(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            dispatched: false,
+            timed_out: false,
+        }
+    }
+
+    fn from_command(error: CommandExecutionError) -> Self {
+        let timed_out = matches!(error.source, kodework_ssh::SshError::Timeout);
+        Self {
+            message: error.to_string(),
+            dispatched: error.dispatched,
+            timed_out,
+        }
+    }
+
+    #[must_use]
+    pub fn was_dispatched(&self) -> bool {
+        self.dispatched
+    }
+
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        self.timed_out
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<String> for ActionRunError {
+    fn from(message: String) -> Self {
+        Self::before_dispatch(message)
+    }
+}
+
+impl std::fmt::Display for ActionRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ActionRunError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteRunProbeRequest {
+    pub run_id: RunId,
+    pub mode: ActionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteRunProbe {
+    pub run_id: RunId,
+    pub state: RemoteRunState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoteRunState {
+    Running,
+    Completed {
+        exit_code: i32,
+        started_at_ms: Option<u64>,
+        finished_at_ms: Option<u64>,
+    },
+    Unknown,
+}
+
+fn parse_epoch_seconds(value: Option<&str>) -> Option<u64> {
+    value?.parse::<u64>().ok()?.checked_mul(1_000)
+}
+
+fn build_remote_run_probe_command(requests: &[RemoteRunProbeRequest]) -> Result<String, String> {
+    let mut command = String::from("set -f; ");
+    for request in requests {
+        let id = request.run_id.as_uuid().simple().to_string();
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("remote run id is not a safe UUID token".to_string());
+        }
+        let mode = match request.mode {
+            ActionMode::Background => "background",
+            ActionMode::Quick | ActionMode::Interactive => "quick",
+        };
+        command.push_str(&format!(
+            "id='{id}'; base=\"$HOME/.cache/kodework/runs/$id\"; if [ -f \"$base/exit_code\" ]; then printf '%s\\tcompleted\\t%s\\t%s\\t%s\\n' \"$id\" \"$(cat -- \"$base/exit_code\" 2>/dev/null || true)\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif [ '{mode}' = 'background' ] && tmux has-session -t \"kodework-run-$id\" >/dev/null 2>&1; then printf '%s\\trunning\\n' \"$id\"; else printf '%s\\tunknown\\n' \"$id\"; fi; "
+        ));
+    }
+    Ok(command)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RunDisposition {
+    Completed,
+    BackgroundStarted,
+    InteractiveDispatched,
 }
 
 /// Quotes data fields before they are embedded in a POSIX remote shell
@@ -1568,6 +2252,173 @@ mod command_safety_tests {
             .unwrap_or_else(|error| unreachable!("valid action should build: {error}"));
         assert!(command.contains("cd -- \"$HOME\" && cd -- 'workspace/project'"));
         assert!(!command.contains("'~/workspace/project'"));
+    }
+
+    #[test]
+    fn remote_epoch_seconds_are_converted_without_overflow() {
+        assert_eq!(
+            parse_epoch_seconds(Some("1720000000")),
+            Some(1_720_000_000_000)
+        );
+        assert_eq!(parse_epoch_seconds(Some("invalid")), None);
+        assert_eq!(parse_epoch_seconds(None), None);
+        assert_eq!(parse_epoch_seconds(Some(&u64::MAX.to_string())), None);
+    }
+
+    #[test]
+    fn background_metadata_preflight_is_fail_closed() {
+        let script = build_run_script("printf user-command", "run-123")
+            .unwrap_or_else(|error| unreachable!("script should be quoted: {error}"));
+        let mkdir = script.find("mkdir -p --").unwrap_or(usize::MAX);
+        let command = script.find("sh -lc").unwrap_or(usize::MAX);
+        assert!(mkdir < command, "metadata setup must precede user command");
+        assert!(script.contains("if ! mkdir -p --"));
+        assert!(script.contains("exit 125"), "metadata failures must abort");
+        assert!(script.contains("started_at_s"));
+        assert!(script.contains("finished_at_s"));
+        assert!(script.contains("exit_code"));
+    }
+
+    #[test]
+    fn remote_run_probe_uses_mode_specific_live_evidence() {
+        let quick = RunId::new();
+        let background = RunId::new();
+        let script = build_remote_run_probe_command(&[
+            RemoteRunProbeRequest {
+                run_id: quick,
+                mode: ActionMode::Quick,
+            },
+            RemoteRunProbeRequest {
+                run_id: background,
+                mode: ActionMode::Background,
+            },
+        ])
+        .unwrap_or_else(|error| unreachable!("safe UUIDs must build: {error}"));
+        assert!(script.contains("[ 'quick' = 'background' ]"));
+        assert!(script.contains("tmux has-session"));
+        assert!(!script.contains("[ -f \"$base/started_at_s\" ] ||"));
+        assert!(script.contains("else printf '%s\\tunknown\\n'"));
+    }
+
+    #[tokio::test]
+    async fn stale_generation_events_are_dropped_before_replay() {
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (subscriber_tx, mut subscriber_rx) = mpsc::channel(2);
+        let controller = Arc::new(ConnectionStateController::new());
+        controller
+            .install_generation(2)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition(ConnectionState::ResolvingAddress)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition(ConnectionState::Connecting)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition(ConnectionState::VerifyingHostKey)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition(ConnectionState::Authenticating)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition(ConnectionState::Ready)
+            .unwrap_or_else(|_| unreachable!());
+        let session = Arc::new(ActiveSession {
+            controller,
+            connect_guard: Arc::new(tokio::sync::Mutex::new(())),
+            connection: Arc::new(Mutex::new(None::<Arc<SshConnection>>)),
+            panes: Arc::new(Mutex::new(HashMap::new())),
+            next_pane: Arc::new(AtomicU32::new(0)),
+            sftp: Arc::new(Mutex::new(None::<Arc<russh_sftp::client::SftpSession>>)),
+            transfers: Arc::new(Mutex::new(None::<TransferSlot>)),
+            subscribers: Arc::new(Mutex::new(vec![(None, subscriber_tx)])),
+            pending_events: Arc::new(Mutex::new(HashMap::new())),
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            herdr_bridges: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        event_tx
+            .send(SessionEvent::Data {
+                channel: 7,
+                bytes: b"stale transport output".to_vec(),
+            })
+            .await
+            .unwrap_or_else(|error| unreachable!("send stale event: {error}"));
+        drop(event_tx);
+        pump_events(session.clone(), event_rx, 1).await;
+
+        assert!(subscriber_rx.try_recv().is_err());
+        assert!(session
+            .pending_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn controller_rejects_invalid_and_stale_transitions() {
+        let controller = ConnectionStateController::new();
+        assert!(matches!(
+            controller.transition(ConnectionState::Ready),
+            Err(StateTransitionError::Invalid {
+                from: ConnectionState::Disconnected,
+                to: ConnectionState::Ready
+            })
+        ));
+        let generation = controller.reserve_generation();
+        assert_eq!(generation, 1);
+        assert!(matches!(
+            controller.transition_for_generation(0, ConnectionState::ResolvingAddress),
+            Err(StateTransitionError::StaleGeneration {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        controller
+            .transition_for_generation(generation, ConnectionState::ResolvingAddress)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition_for_generation(generation, ConnectionState::Connecting)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition_for_generation(generation, ConnectionState::VerifyingHostKey)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition_for_generation(generation, ConnectionState::Authenticating)
+            .unwrap_or_else(|_| unreachable!());
+        controller
+            .transition_for_generation(generation, ConnectionState::Ready)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(
+            controller.transition_for_generation(0, ConnectionState::Reconnecting),
+            Err(StateTransitionError::StaleGeneration { .. })
+        ));
+        assert_eq!(controller.state(), ConnectionState::Ready);
+    }
+
+    #[test]
+    fn current_transport_loss_moves_to_reconnecting_only_once() {
+        let controller = ConnectionStateController::new();
+        let generation = controller.reserve_generation();
+        for state in [
+            ConnectionState::ResolvingAddress,
+            ConnectionState::Connecting,
+            ConnectionState::VerifyingHostKey,
+            ConnectionState::Authenticating,
+            ConnectionState::Ready,
+        ] {
+            controller
+                .transition_for_generation(generation, state)
+                .unwrap_or_else(|_| unreachable!());
+        }
+        controller
+            .transition_for_generation(generation, ConnectionState::Reconnecting)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(controller.state(), ConnectionState::Reconnecting);
+        assert!(matches!(
+            controller.transition_for_generation(generation - 1, ConnectionState::Ready),
+            Err(StateTransitionError::StaleGeneration { .. })
+        ));
     }
 }
 

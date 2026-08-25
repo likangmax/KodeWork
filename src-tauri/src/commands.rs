@@ -8,7 +8,9 @@ use kodework_domain::{
 use kodework_secrets::SecretStore;
 use kodework_ssh::connection::AuthMethod;
 use kodework_ssh::host_key::{HostKeyDecision, HostKeyRequest};
-use tauri::State;
+use tauri::{Manager, State};
+
+use kodework_core::session::{ConnectError, ConnectErrorKind};
 
 #[tauri::command]
 pub(crate) fn local_terminal_capabilities() -> kodework_local_pty::LocalTerminalCapabilities {
@@ -121,33 +123,48 @@ pub(crate) fn save_host(state: State<'_, AppState>, mut host: Host) -> Result<()
         .map_err(|_| AppError::StatePoisoned.to_string())?
         .get_host(host.id)
         .map_err(|error| error.to_string())?;
-    let (previous_auth_ref, previous_tailscale_ref) = if let Some(existing) = existing {
-        let previous_auth_ref = existing.auth_ref.clone();
-        // A credential has meaning only inside its authentication mode. Never
-        // reinterpret a saved password as a private-key passphrase (or vice
-        // versa) after the renderer changes the mode.
-        host.auth_ref = if existing.auth_mode == host.auth_mode {
-            existing.auth_ref
+    let (previous_auth_ref, previous_tailscale_ref, previous_jump_ref) =
+        if let Some(existing) = existing {
+            let previous_auth_ref = existing.auth_ref.clone();
+            // A credential has meaning only inside its authentication mode. Never
+            // reinterpret a saved password as a private-key passphrase (or vice
+            // versa) after the renderer changes the mode.
+            host.auth_ref = if existing.auth_mode == host.auth_mode {
+                existing.auth_ref.clone()
+            } else {
+                None
+            };
+            let previous = existing
+                .tailscale
+                .as_ref()
+                .and_then(|config| config.auth_key_ref.clone());
+            if let Some(config) = host.tailscale.as_mut() {
+                config.auth_key_ref = previous.clone();
+            }
+            let previous_jump = existing
+                .jump
+                .as_ref()
+                .and_then(|jump| jump.auth_ref.clone());
+            if let Some(jump) = host.jump.as_mut() {
+                jump.auth_ref = existing
+                    .jump
+                    .as_ref()
+                    .filter(|old| old.auth_mode == jump.auth_mode)
+                    .and(previous_jump.clone());
+            }
+            (previous_auth_ref, previous, previous_jump)
         } else {
-            None
+            // New hosts cannot import credential references supplied by the
+            // renderer; those must be created by the dedicated commands.
+            host.auth_ref = None;
+            if let Some(config) = host.tailscale.as_mut() {
+                config.auth_key_ref = None;
+            }
+            if let Some(jump) = host.jump.as_mut() {
+                jump.auth_ref = None;
+            }
+            (None, None, None)
         };
-        let previous = existing
-            .tailscale
-            .as_ref()
-            .and_then(|config| config.auth_key_ref.clone());
-        if let Some(config) = host.tailscale.as_mut() {
-            config.auth_key_ref = previous.clone();
-        }
-        (previous_auth_ref, previous)
-    } else {
-        // New hosts cannot import credential references supplied by the
-        // renderer; those must be created by the dedicated commands.
-        host.auth_ref = None;
-        if let Some(config) = host.tailscale.as_mut() {
-            config.auth_key_ref = None;
-        }
-        (None, None)
-    };
     validate_host(&host).map_err(|error| AppError::InvalidHost(error).to_string())?;
     state
         .database
@@ -184,6 +201,17 @@ pub(crate) fn save_host(state: State<'_, AppState>, mut host: Host) -> Result<()
             }
         }
     }
+    let current_jump_ref = host.jump.as_ref().and_then(|jump| jump.auth_ref.as_ref());
+    if previous_jump_ref.as_ref() != current_jump_ref {
+        if let Some(reference) = previous_jump_ref
+            .as_ref()
+            .filter(|reference| crate::secrets::is_managed_reference(reference))
+        {
+            if let Ok(mut secrets) = state.secrets.lock() {
+                let _ = secrets.delete(reference);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -192,22 +220,41 @@ pub(crate) async fn delete_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<bool, String> {
+    let (auth_ref, tailscale_auth_ref, jump_auth_ref, run_count) = {
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        let refs = db
+            .get_host(host_id)
+            .map_err(|error| error.to_string())?
+            .map(|host| {
+                (
+                    host.auth_ref,
+                    host.tailscale.and_then(|config| config.auth_key_ref),
+                    host.jump.and_then(|jump| jump.auth_ref),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let run_count = kodework_storage::repositories::RunRepository::new(db.connection())
+            .count_by_host(host_id)
+            .map_err(|error| error.to_string())?;
+        (refs.0, refs.1, refs.2, run_count)
+    };
+    if run_count > 0 {
+        return Err(format!(
+            "无法删除工作站：该工作站仍有 {run_count} 条运行历史。请先保留或清理运行历史后再删除。"
+        ));
+    }
     // Deleting a host must not leave an SSH transport, tunnel or PTY alive
     // after its persistent record and credential references are gone.
+    if let Ok(mut active) = state.reconnecting.lock() {
+        active.remove(&host_id);
+    }
+    if let Ok(mut profiles) = state.reconnect_profiles.lock() {
+        profiles.remove(&host_id);
+    }
     let _ = state.sessions.disconnect(host_id).await;
-    let (auth_ref, tailscale_auth_ref) = state
-        .database
-        .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
-        .get_host(host_id)
-        .map_err(|error| error.to_string())?
-        .map(|host| {
-            (
-                host.auth_ref,
-                host.tailscale.and_then(|config| config.auth_key_ref),
-            )
-        })
-        .unwrap_or((None, None));
     let deleted = state
         .database
         .lock()
@@ -228,6 +275,16 @@ pub(crate) async fn delete_host(
                 .delete(reference);
         }
         if let Some(reference) = tailscale_auth_ref
+            .as_ref()
+            .filter(|reference| crate::secrets::is_managed_reference(reference))
+        {
+            let _ = state
+                .secrets
+                .lock()
+                .map_err(|_| AppError::StatePoisoned.to_string())?
+                .delete(reference);
+        }
+        if let Some(reference) = jump_auth_ref
             .as_ref()
             .filter(|reference| crate::secrets::is_managed_reference(reference))
         {
@@ -280,6 +337,19 @@ pub(crate) fn save_host_password(
         provider: crate::secrets::provider(),
         opaque_id: format!("{credential_kind}/{}", host.id.as_uuid()),
     };
+    // The reference is deterministic, so replacing a credential can overwrite
+    // the only copy of the old value. Keep the previous bytes until the DB
+    // transaction succeeds, then restore them if SQLite rejects the update.
+    let previous_secret = if previous_reference.as_ref() == Some(&reference) {
+        state
+            .secrets
+            .lock()
+            .ok()
+            .and_then(|store| store.get(&reference).ok())
+            .map(|secret| Zeroizing::new(secret.expose().to_vec()))
+    } else {
+        None
+    };
     {
         let mut secrets = state
             .secrets
@@ -297,7 +367,11 @@ pub(crate) fn save_host_password(
         .upsert_host(&host);
     if let Err(error) = stored {
         if let Ok(mut secrets) = state.secrets.lock() {
-            let _ = secrets.delete(&reference);
+            if let Some(previous_secret) = previous_secret {
+                let _ = secrets.put(reference.clone(), previous_secret.as_slice());
+            } else {
+                let _ = secrets.delete(&reference);
+            }
         }
         return Err(error.to_string());
     }
@@ -323,7 +397,16 @@ pub(crate) async fn connect_host(
     state: State<'_, AppState>,
     host: Host,
     password: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, ConnectError> {
+    connect_host_inner_with_profile(&state, host, password, true).await
+}
+
+async fn connect_host_inner_with_profile(
+    state: &AppState,
+    host: Host,
+    password: Option<String>,
+    register_reconnect_profile: bool,
+) -> Result<String, ConnectError> {
     // The renderer may hold a stale or tampered copy of a Host.  Resolve the
     // authoritative record by id before selecting credentials or addresses;
     // otherwise an IPC caller could combine one host's credential reference
@@ -331,11 +414,23 @@ pub(crate) async fn connect_host(
     let host = state
         .database
         .lock()
-        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
         .get_host(host.id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "host does not exist".to_string())?;
-    validate_host(&host).map_err(|error| AppError::InvalidHost(error).to_string())?;
+        .map_err(|error| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| ConnectError {
+            kind: ConnectErrorKind::InvalidConfiguration,
+            detail: "host does not exist".to_string(),
+        })?;
+    validate_host(&host).map_err(|error| ConnectError {
+        kind: ConnectErrorKind::InvalidConfiguration,
+        detail: AppError::InvalidHost(error).to_string(),
+    })?;
     // Embedded userspace mode is the only mode Kodework starts itself. A
     // missing/invalid auth key is reported before SSH address resolution so
     // the user sees a Tailscale error rather than an opaque network timeout.
@@ -352,17 +447,26 @@ pub(crate) async fn connect_host(
                 state
                     .secrets
                     .lock()
-                    .map_err(|_| AppError::StatePoisoned.to_string())?
+                    .map_err(|_| ConnectError {
+                        kind: ConnectErrorKind::Internal,
+                        detail: AppError::StatePoisoned.to_string(),
+                    })?
                     .get(reference)
                     .map(|secret| zeroize::Zeroizing::new(secret.expose().to_vec()))
-                    .map_err(|error| format!("Tailscale auth key lookup failed: {error}"))
+                    .map_err(|error| ConnectError {
+                        kind: ConnectErrorKind::Tailscale,
+                        detail: format!("Tailscale auth key lookup failed: {error}"),
+                    })
             })
             .transpose()?;
         state
             .tailscale
             .ensure(config, key.as_ref().map(|value| value.as_slice()))
             .await
-            .map_err(|error| format!("Tailscale userspace startup failed: {error}"))?;
+            .map_err(|error| ConnectError {
+                kind: ConnectErrorKind::Tailscale,
+                detail: format!("Tailscale userspace startup failed: {error}"),
+            })?;
         key
     } else {
         None
@@ -370,72 +474,260 @@ pub(crate) async fn connect_host(
     let supplied_secret = password
         .filter(|value| !value.is_empty())
         .map(|value| kodework_ssh::connection::ZeroizingVec::new(value.into_bytes()));
-    let stored_secret = if supplied_secret.is_none() {
-        match host.auth_ref.as_ref() {
-            Some(reference) if crate::secrets::is_managed_reference(reference) => {
-                let secret = state
-                    .secrets
-                    .lock()
-                    .map_err(|_| AppError::StatePoisoned.to_string())?
-                    .get(reference)
-                    .map_err(|error| format!("credential lookup failed: {error}"))?;
-                if secret.expose().is_empty() {
-                    return Err("stored credential is empty".to_string());
-                }
-                Some(kodework_ssh::connection::ZeroizingVec::new(
-                    secret.expose().to_vec(),
-                ))
-            }
-            Some(reference) => {
-                return Err(format!(
-                    "credential provider {:?} is not supported for SSH authentication",
-                    reference.provider
-                ));
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-    let secret = supplied_secret.or(stored_secret);
-    let auth = match host.auth_mode {
-        AuthenticationMode::Password => vec![AuthMethod::Password(
-            secret.ok_or_else(|| "password is required".to_string())?,
-        )],
-        AuthenticationMode::PublicKey => {
-            let key_path = host
-                .private_key_path
-                .as_deref()
-                .filter(|path| !path.trim().is_empty())
-                .map(expand_user_path)
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .map(|home| home.join(".ssh").join("id_ed25519"))
-                        .unwrap_or_else(|| std::path::PathBuf::from(".ssh/id_ed25519"))
-                });
-            if !key_path.is_file() {
-                return Err(format!(
-                    "private key does not exist: {}",
-                    key_path.display()
-                ));
-            }
-            vec![AuthMethod::PublicKey {
-                key_path,
-                passphrase: secret,
-            }]
-        }
-        AuthenticationMode::SshAgent => vec![AuthMethod::SshAgent],
-        AuthenticationMode::KeyboardInteractive => vec![AuthMethod::KeyboardInteractive {
-            broker: std::sync::Arc::clone(&state.keyboard_interactive),
-        }],
-    };
-    let outcome = state.sessions.connect(&host, auth).await?;
+    let auth = resolve_auth_methods(
+        state,
+        host.auth_mode,
+        host.private_key_path.as_deref(),
+        host.auth_ref.as_ref(),
+        supplied_secret,
+    )?;
+    let jump_auth = host
+        .jump
+        .as_ref()
+        .map(|jump| {
+            resolve_auth_methods(
+                state,
+                jump.auth_mode,
+                jump.private_key_path.as_deref(),
+                jump.auth_ref.as_ref(),
+                None,
+            )
+        })
+        .transpose()?;
+    let outcome = state
+        .sessions
+        .connect_with_jump_auth_typed(&host, auth, jump_auth)
+        .await?;
     match outcome {
         kodework_core::session::SessionOutcome::Connected { generation, .. } => {
+            if register_reconnect_profile {
+                if let Ok(mut profiles) = state.reconnect_profiles.lock() {
+                    profiles.insert(host.id);
+                }
+            }
             Ok(format!("connected; generation {generation}"))
         }
-        kodework_core::session::SessionOutcome::Failed { reason, .. } => Err(reason),
+        kodework_core::session::SessionOutcome::Failed { reason, .. } => Err(ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: reason,
+        }),
     }
+}
+
+/// Starts the native, process-owned reconnect supervisor. The renderer may
+/// observe `session_state`, but it no longer owns retry timing or lifecycle.
+pub(crate) fn start_connection_supervisor(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let retry_schedule =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                HostId,
+                (u32, std::time::Instant),
+            >::new()));
+        let mut observed_wake_epoch = app
+            .state::<AppState>()
+            .reconnect_wake_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        loop {
+            let wake_epoch = app
+                .state::<AppState>()
+                .reconnect_wake_epoch
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if wake_epoch != observed_wake_epoch {
+                observed_wake_epoch = wake_epoch;
+                if let Ok(mut schedule) = retry_schedule.lock() {
+                    schedule.clear();
+                }
+            }
+            let host_ids = {
+                let state = app.state::<AppState>();
+                state
+                    .reconnect_profiles
+                    .lock()
+                    .map(|profiles| profiles.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            };
+            for host_id in host_ids {
+                let state = app.state::<AppState>();
+                if state.sessions.state(host_id) != ConnectionState::Reconnecting {
+                    if let Ok(mut schedule) = retry_schedule.lock() {
+                        schedule.remove(&host_id);
+                    }
+                    continue;
+                }
+                let retry_is_due = retry_schedule
+                    .lock()
+                    .map(|schedule| {
+                        schedule
+                            .get(&host_id)
+                            .is_none_or(|(_, due)| std::time::Instant::now() >= *due)
+                    })
+                    .unwrap_or(false);
+                if !retry_is_due {
+                    continue;
+                }
+                let acquired = state
+                    .reconnecting
+                    .lock()
+                    .map(|mut active| active.insert(host_id))
+                    .unwrap_or(false);
+                if !acquired {
+                    continue;
+                }
+                let app_for_attempt = app.clone();
+                let retry_schedule_for_attempt = retry_schedule.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = reconnect_host_inner(&app_for_attempt, host_id).await;
+                    if let Some(state) = app_for_attempt.try_state::<AppState>() {
+                        if let Ok(mut active) = state.reconnecting.lock() {
+                            active.remove(&host_id);
+                        }
+                        if let Err(error) = result {
+                            let profile_active = state
+                                .reconnect_profiles
+                                .lock()
+                                .map(|profiles| profiles.contains(&host_id))
+                                .unwrap_or(false);
+                            if profile_active {
+                                if matches!(
+                                    error.kind,
+                                    ConnectErrorKind::CredentialRequired
+                                        | ConnectErrorKind::Authentication
+                                ) {
+                                    if let Err(state_error) =
+                                        state.sessions.mark_waiting_for_credential(host_id)
+                                    {
+                                        eprintln!(
+                                            "failed to mark host {host_id:?} waiting for credential: {state_error}"
+                                        );
+                                    }
+                                    if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                                        schedule.remove(&host_id);
+                                    }
+                                } else if error.kind.retryable() {
+                                    // A bounded attempt batch must not turn a
+                                    // transient outage into a terminal Failed
+                                    // state. Keep ownership visible so the next
+                                    // supervisor tick can retry after backoff.
+                                    if let Err(state_error) =
+                                        state.sessions.mark_reconnecting(host_id)
+                                    {
+                                        eprintln!(
+                                            "failed to retain reconnect ownership for host {host_id:?}: {state_error}"
+                                        );
+                                        if let Ok(mut schedule) = retry_schedule_for_attempt.lock()
+                                        {
+                                            schedule.remove(&host_id);
+                                        }
+                                    } else if let Ok(mut schedule) =
+                                        retry_schedule_for_attempt.lock()
+                                    {
+                                        let attempts = schedule
+                                            .get(&host_id)
+                                            .map_or(1, |(attempts, _)| attempts.saturating_add(1));
+                                        schedule.insert(
+                                            host_id,
+                                            (
+                                                attempts,
+                                                std::time::Instant::now()
+                                                    + reconnect_backoff(attempts),
+                                            ),
+                                        );
+                                    }
+                                } else if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                                    schedule.remove(&host_id);
+                                }
+                            }
+                        } else if let Ok(mut schedule) = retry_schedule_for_attempt.lock() {
+                            schedule.remove(&host_id);
+                        }
+                    }
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+    });
+}
+
+pub(crate) fn wake_connection_supervisor(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state
+            .reconnect_wake_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn reconnect_backoff(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1).min(4);
+    std::time::Duration::from_millis(1_200 * (1_u64 << exponent))
+}
+
+async fn reconnect_host_inner(
+    app: &tauri::AppHandle,
+    host_id: HostId,
+) -> Result<String, ConnectError> {
+    let state = app.state::<AppState>();
+    reconnect_once(&state, host_id).await
+}
+
+async fn reconnect_once(state: &AppState, host_id: HostId) -> Result<String, ConnectError> {
+    let host = state
+        .database
+        .lock()
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
+        .get_host(host_id)
+        .map_err(|error| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| ConnectError {
+            kind: ConnectErrorKind::InvalidConfiguration,
+            detail: "host does not exist".to_string(),
+        })?;
+    if !can_attempt_unattended(&host) {
+        return Err(ConnectError {
+            kind: ConnectErrorKind::CredentialRequired,
+            detail: "this authentication mode requires user interaction".to_string(),
+        });
+    }
+    if !reconnect_is_active(state, host_id)? {
+        return Err(ConnectError {
+            kind: ConnectErrorKind::Cancelled,
+            detail: "reconnect cancelled".to_string(),
+        });
+    }
+    let message = connect_host_inner_with_profile(state, host, None, false).await?;
+    if !reconnect_is_active(state, host_id)?
+        || state.sessions.state(host_id) != ConnectionState::Ready
+    {
+        let _ = state.sessions.disconnect(host_id).await;
+        return Err(ConnectError {
+            kind: ConnectErrorKind::Cancelled,
+            detail: "reconnect cancelled".to_string(),
+        });
+    }
+    Ok(message)
+}
+
+fn can_attempt_unattended(host: &Host) -> bool {
+    match host.auth_mode {
+        AuthenticationMode::Password => host.auth_ref.is_some(),
+        AuthenticationMode::PublicKey | AuthenticationMode::SshAgent => true,
+        AuthenticationMode::KeyboardInteractive => false,
+    }
+}
+
+fn reconnect_is_active(state: &AppState, host_id: HostId) -> Result<bool, ConnectError> {
+    Ok(state
+        .reconnecting
+        .lock()
+        .map_err(|_| ConnectError {
+            kind: ConnectErrorKind::Internal,
+            detail: AppError::StatePoisoned.to_string(),
+        })?
+        .contains(&host_id))
 }
 
 fn expand_user_path(value: &str) -> std::path::PathBuf {
@@ -452,6 +744,89 @@ fn expand_user_path(value: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(trimmed)
+}
+
+fn resolve_auth_methods(
+    state: &AppState,
+    mode: AuthenticationMode,
+    private_key_path: Option<&str>,
+    auth_ref: Option<&kodework_domain::CredentialRef>,
+    supplied_secret: Option<kodework_ssh::connection::ZeroizingVec>,
+) -> Result<Vec<AuthMethod>, ConnectError> {
+    let stored_secret = if supplied_secret.is_none() {
+        match auth_ref {
+            Some(reference) if crate::secrets::is_managed_reference(reference) => {
+                let secret = state
+                    .secrets
+                    .lock()
+                    .map_err(|_| ConnectError {
+                        kind: ConnectErrorKind::Internal,
+                        detail: AppError::StatePoisoned.to_string(),
+                    })?
+                    .get(reference)
+                    .map_err(|error| ConnectError {
+                        kind: ConnectErrorKind::CredentialRequired,
+                        detail: format!("credential lookup failed: {error}"),
+                    })?;
+                if secret.expose().is_empty() {
+                    return Err(ConnectError {
+                        kind: ConnectErrorKind::CredentialRequired,
+                        detail: "stored credential is empty".to_string(),
+                    });
+                }
+                Some(kodework_ssh::connection::ZeroizingVec::new(
+                    secret.expose().to_vec(),
+                ))
+            }
+            Some(reference) => {
+                return Err(ConnectError {
+                    kind: ConnectErrorKind::InvalidConfiguration,
+                    detail: format!(
+                        "credential provider {:?} is not supported for SSH authentication",
+                        reference.provider
+                    ),
+                });
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let secret = supplied_secret.or(stored_secret);
+    match mode {
+        AuthenticationMode::Password => {
+            Ok(vec![AuthMethod::Password(secret.ok_or_else(|| {
+                ConnectError {
+                    kind: ConnectErrorKind::CredentialRequired,
+                    detail: "password is required".to_string(),
+                }
+            })?)])
+        }
+        AuthenticationMode::PublicKey => {
+            let key_path = private_key_path
+                .filter(|path| !path.trim().is_empty())
+                .map(expand_user_path)
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .map(|home| home.join(".ssh").join("id_ed25519"))
+                        .unwrap_or_else(|| std::path::PathBuf::from(".ssh/id_ed25519"))
+                });
+            if !key_path.is_file() {
+                return Err(ConnectError {
+                    kind: ConnectErrorKind::InvalidConfiguration,
+                    detail: format!("private key does not exist: {}", key_path.display()),
+                });
+            }
+            Ok(vec![AuthMethod::PublicKey {
+                key_path,
+                passphrase: secret,
+            }])
+        }
+        AuthenticationMode::SshAgent => Ok(vec![AuthMethod::SshAgent]),
+        AuthenticationMode::KeyboardInteractive => Ok(vec![AuthMethod::KeyboardInteractive {
+            broker: std::sync::Arc::clone(&state.keyboard_interactive),
+        }]),
+    }
 }
 
 /// Warms the optional managed network path before the user presses Connect.
@@ -630,12 +1005,47 @@ pub(crate) async fn disconnect_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<(), String> {
+    if let Ok(mut active) = state.reconnecting.lock() {
+        active.remove(&host_id);
+    }
+    if let Ok(mut profiles) = state.reconnect_profiles.lock() {
+        profiles.remove(&host_id);
+    }
     state.sessions.disconnect(host_id).await
 }
 
 #[tauri::command]
 pub(crate) fn session_state(state: State<'_, AppState>, host_id: HostId) -> ConnectionState {
     state.sessions.state(host_id)
+}
+
+/// Streams native connection snapshots. The renderer observes this channel;
+/// it does not schedule retries or maintain a lifecycle polling loop.
+#[tauri::command]
+pub(crate) async fn session_runtime_subscribe(
+    state: State<'_, AppState>,
+    host_id: HostId,
+    on_event: tauri::ipc::Channel<kodework_core::session::ConnectionRuntimeSnapshot>,
+) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut previous = None;
+        let mut last_delivery = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        loop {
+            let snapshot = sessions.runtime_snapshot(host_id);
+            if previous != Some(snapshot)
+                || last_delivery.elapsed() >= std::time::Duration::from_secs(5)
+            {
+                if on_event.send(snapshot).is_err() {
+                    break;
+                }
+                previous = Some(snapshot);
+                last_delivery = std::time::Instant::now();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1017,12 +1427,15 @@ pub(crate) async fn herdr_bridge(
 
 /// Stops the remote socat bridge.
 #[tauri::command]
-pub(crate) async fn herdr_bridge_stop(
+pub(crate) async fn herdr_bridge_stop_by_id(
     state: State<'_, AppState>,
     host_id: HostId,
-    remote_port: u16,
+    bridge_id: kodework_domain::BridgeId,
 ) -> Result<(), String> {
-    state.sessions.herdr_bridge_stop(host_id, remote_port).await
+    state
+        .sessions
+        .herdr_bridge_stop_by_id(host_id, bridge_id)
+        .await
 }
 /// Lists all command snippets.
 #[tauri::command]
@@ -1161,9 +1574,16 @@ pub(crate) fn action_list(
         .database
         .lock()
         .map_err(|_| AppError::StatePoisoned.to_string())?;
-    ActionRepository::new(db.connection())
+    let mut actions = ActionRepository::new(db.connection())
         .list_by_project(project_id)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // Older databases may contain a renderer-supplied danger label from
+    // before server-side classification was enforced. Recompute it before
+    // rendering so the confirmation dialog matches the backend decision.
+    for action in &mut actions {
+        action.danger_level = classify_danger(&action.command);
+    }
+    Ok(actions)
 }
 
 #[tauri::command]
@@ -1173,6 +1593,12 @@ pub(crate) fn action_save(
 ) -> Result<(), String> {
     use kodework_storage::repositories::ActionRepository;
     validate_action(&action).map_err(|error| error.to_string())?;
+    if action.mode != kodework_domain::ActionMode::Quick {
+        // Only Quick has a locally observable exec deadline. Do not retain a
+        // stale timeout on Interactive/Background actions where it would
+        // falsely suggest enforcement.
+        action.timeout_ms = None;
+    }
     // Danger classification is a server-side decision; never trust the
     // renderer-declared level (it gates the confirmation dialog).
     action.danger_level = classify_danger(&action.command);
@@ -1246,8 +1672,20 @@ pub(crate) async fn run_action(
         stored
     };
     validate_action(&action).map_err(|error| error.to_string())?;
+    if kodework_core::action_requires_confirmation(&action) && !confirmed {
+        return Err("该动作需要确认后才能运行".to_string());
+    }
+
+    // An interactive command has no native exit boundary: the PTY shell owns
+    // its eventual status and may run indefinitely. Persisting it as a
+    // terminal Run would create a misleading permanent Unknown row, so only
+    // Quick and Background actions enter Run History.
     if action.mode == kodework_domain::ActionMode::Interactive {
-        return state.sessions.run_action(host_id, &action, confirmed).await;
+        return state
+            .sessions
+            .run_action_with_id(host_id, &action, confirmed, None)
+            .await
+            .map_err(|error| error.to_string());
     }
 
     let started_at_ms = SystemTime::now()
@@ -1256,13 +1694,24 @@ pub(crate) async fn run_action(
         .as_millis() as u64;
     let run = Run {
         id: RunId::new(),
-        action_id: action.id,
-        status: RunStatus::Running,
+        action_id: Some(action.id),
+        host_id,
+        project_id: Some(action.project_id),
+        action_name: action.name.clone(),
+        command_snapshot: action.command.clone(),
+        mode: action.mode,
+        cwd_snapshot: action.cwd.clone(),
+        // Persistence precedes dispatch so a desktop crash cannot erase the
+        // user's intent. It is not Running until remote evidence exists.
+        status: RunStatus::Queued,
         started_at_ms: Some(started_at_ms),
         finished_at_ms: None,
         exit_code: None,
         remote_session_ref: None,
+        stdout_preview: String::new(),
+        stderr_preview: String::new(),
         output_bytes: 0,
+        last_reconciled_at_ms: None,
     };
     {
         let db = state
@@ -1274,23 +1723,95 @@ pub(crate) async fn run_action(
             .map_err(|error| error.to_string())?;
     }
 
-    let outcome = state.sessions.run_action(host_id, &action, confirmed).await;
+    let outcome = state
+        .sessions
+        .run_action_with_id(host_id, &action, confirmed, Some(run.id))
+        .await;
     let finished_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis() as u64;
-    let (status, exit_code, remote_ref, output_bytes) = match &outcome {
-        Ok(value) => (
-            if value.exit_code == Some(0) {
-                RunStatus::Succeeded
-            } else {
-                RunStatus::Failed
-            },
-            value.exit_code,
-            value.remote_session_ref.as_deref(),
-            value.output_bytes,
+    let (
+        status,
+        exit_code,
+        finished_at_ms,
+        remote_ref,
+        output_bytes,
+        stdout_preview,
+        stderr_preview,
+    ) = match &outcome {
+        Ok(value) => match value.disposition {
+            kodework_core::session::RunDisposition::BackgroundStarted => (
+                RunStatus::Running,
+                None,
+                None,
+                value.remote_session_ref.as_deref(),
+                value.output_bytes,
+                value.stdout_preview.as_str(),
+                value.stderr_preview.as_str(),
+            ),
+            kodework_core::session::RunDisposition::Completed => {
+                // A channel can close after the remote accepted the command
+                // but before SSH delivered an exit status. That is not proof
+                // of failure; keep the result explicitly unknowable so a
+                // later reconciliation can provide authoritative evidence.
+                let status = completed_run_status(value.exit_code);
+                (
+                    status,
+                    value.exit_code,
+                    (value.exit_code.is_some()).then_some(finished_at_ms),
+                    value.remote_session_ref.as_deref(),
+                    value.output_bytes,
+                    value.stdout_preview.as_str(),
+                    value.stderr_preview.as_str(),
+                )
+            }
+            kodework_core::session::RunDisposition::InteractiveDispatched => (
+                RunStatus::Unknown,
+                None,
+                Some(finished_at_ms),
+                None,
+                0,
+                value.stdout_preview.as_str(),
+                value.stderr_preview.as_str(),
+            ),
+        },
+        Err(error)
+            if matches!(
+                action.mode,
+                kodework_domain::ActionMode::Quick | kodework_domain::ActionMode::Background
+            ) && error.was_dispatched() =>
+        {
+            (
+                // Any transport error after dispatch is ambiguous: a
+                // remote process may still be running, and a lost channel is
+                // not evidence of a non-zero exit. Keep it reconcilable
+                // rather than manufacturing Failed/TimedOut.
+                RunStatus::Unknown,
+                None,
+                None,
+                None,
+                0,
+                "",
+                if error.is_timeout() {
+                    "等待远端结果超时；远端进程可能仍在运行。"
+                } else {
+                    "远端结果未知；连接在完成状态返回前中断，稍后可重试对账。"
+                },
+            )
+        }
+        Err(error) => (
+            // The exec request was never handed to the transport, or the
+            // server explicitly rejected it. This is a genuine start failure,
+            // not Unknown.
+            RunStatus::Failed,
+            None,
+            Some(finished_at_ms),
+            None,
+            0,
+            "",
+            error.message(),
         ),
-        Err(_) => (RunStatus::Failed, None, None, 0),
     };
     let db = state
         .database
@@ -1301,12 +1822,23 @@ pub(crate) async fn run_action(
             run.id,
             status,
             exit_code,
-            Some(finished_at_ms),
+            finished_at_ms,
             remote_ref,
             output_bytes,
+            stdout_preview,
+            stderr_preview,
+            None,
         )
         .map_err(|error| error.to_string())?;
-    outcome
+    outcome.map_err(|error| error.to_string())
+}
+
+fn completed_run_status(exit_code: Option<i32>) -> kodework_domain::RunStatus {
+    match exit_code {
+        Some(0) => kodework_domain::RunStatus::Succeeded,
+        Some(_) => kodework_domain::RunStatus::Failed,
+        None => kodework_domain::RunStatus::Unknown,
+    }
 }
 
 /// Lists persisted Action runs for the Activity surface with a bounded page.
@@ -1344,4 +1876,260 @@ pub(crate) fn run_list(
         (None, None) => repository.list_recent(limit),
     }
     .map_err(|error| error.to_string())
+}
+
+/// Reconcile persisted Quick/Background runs against the remote source of
+/// truth. This is intentionally explicit and bounded so a reconnect cannot
+/// spawn an unbounded number of SSH probes.
+#[tauri::command]
+pub(crate) async fn run_reconcile(
+    state: State<'_, AppState>,
+    host_id: HostId,
+) -> Result<usize, String> {
+    use kodework_storage::repositories::RunRepository;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let acquired = state
+        .reconciling
+        .lock()
+        .map_err(|_| AppError::StatePoisoned.to_string())?
+        .insert(host_id);
+    if !acquired {
+        // Renderer tab changes can request the same reconciliation several
+        // times in quick succession. The first pass owns the host; later
+        // calls are harmless no-ops rather than duplicate SSH probe batches.
+        return Ok(0);
+    }
+    let _guard = ReconcileGuard {
+        hosts: state.reconciling.clone(),
+        host_id,
+    };
+
+    let runs = {
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        RunRepository::new(db.connection())
+            .list_reconcilable_by_host(host_id, 100)
+            .map_err(|error| error.to_string())?
+    };
+    // Probe bounded batches rather than opening one SSH exec channel per run.
+    // A network/probe failure leaves that batch untouched; it is not business
+    // evidence that any remote command stopped.
+    let mut completed_probes = Vec::with_capacity(runs.len());
+    for batch in runs.chunks(32) {
+        let requests = batch
+            .iter()
+            .map(|run| kodework_core::session::RemoteRunProbeRequest {
+                run_id: run.id,
+                mode: run.mode,
+            })
+            .collect::<Vec<_>>();
+        let probes = match state
+            .sessions
+            .reconcile_remote_runs(host_id, &requests)
+            .await
+        {
+            Ok(probes) => probes,
+            Err(_) => continue,
+        };
+        for probe in probes {
+            if let Some(run) = batch.iter().find(|run| run.id == probe.run_id) {
+                completed_probes.push((run.clone(), probe.state));
+            }
+        }
+    }
+
+    let (reconciled, cleanup) = {
+        let mut reconciled = 0usize;
+        let mut cleanup = Vec::new();
+        let db = state
+            .database
+            .lock()
+            .map_err(|_| AppError::StatePoisoned.to_string())?;
+        let repository = RunRepository::new(db.connection());
+        let mut updates = Vec::with_capacity(completed_probes.len());
+        for (run, remote) in completed_probes {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_millis() as u64;
+            let (status, exit_code, finished) =
+                reconciled_run_fields(remote, run.started_at_ms, now);
+            updates.push(kodework_storage::repositories::RunReconciliationUpdate {
+                id: run.id,
+                status,
+                exit_code,
+                finished_at_ms: finished,
+                remote_session_ref: run.remote_session_ref.clone(),
+                output_bytes: run.output_bytes,
+                reconciled_at_ms: now,
+            });
+            if matches!(
+                remote,
+                kodework_core::session::RemoteRunState::Completed { .. }
+            ) {
+                cleanup.push(run.id);
+            }
+            reconciled += 1;
+        }
+        repository
+            .finish_batch(&updates)
+            .map_err(|error| error.to_string())?;
+        (reconciled, cleanup)
+    };
+    // Local storage is durable now; remote cleanup is strictly best effort and
+    // cannot invalidate or roll back a terminal local result.
+    for run_id in cleanup {
+        let _ = state
+            .sessions
+            .cleanup_remote_run_metadata(host_id, run_id)
+            .await;
+    }
+    Ok(reconciled)
+}
+
+struct ReconcileGuard {
+    hosts: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<HostId>>>,
+    host_id: HostId,
+}
+
+impl Drop for ReconcileGuard {
+    fn drop(&mut self) {
+        if let Ok(mut hosts) = self.hosts.lock() {
+            hosts.remove(&self.host_id);
+        }
+    }
+}
+
+fn reconciled_run_fields(
+    remote: kodework_core::session::RemoteRunState,
+    local_started_at_ms: Option<u64>,
+    observed_at_ms: u64,
+) -> (kodework_domain::RunStatus, Option<i32>, Option<u64>) {
+    use kodework_core::session::RemoteRunState;
+    use kodework_domain::RunStatus;
+
+    match remote {
+        RemoteRunState::Running => (RunStatus::Running, None, None),
+        RemoteRunState::Completed {
+            exit_code,
+            started_at_ms,
+            finished_at_ms,
+        } => (
+            if exit_code == 0 {
+                RunStatus::Succeeded
+            } else {
+                RunStatus::Failed
+            },
+            Some(exit_code),
+            Some(match (local_started_at_ms, started_at_ms, finished_at_ms) {
+                (Some(local_start), Some(remote_start), Some(remote_finish))
+                    if remote_finish >= remote_start =>
+                {
+                    local_start.saturating_add(remote_finish.saturating_sub(remote_start))
+                }
+                // Without a local anchor, keep the UI timeline on the local
+                // observation clock rather than mixing in a remote epoch.
+                _ => observed_at_ms,
+            }),
+        ),
+        // Unknown means that the remote source of truth is temporarily
+        // unavailable; it remains reconcilable and must not look finished.
+        RemoteRunState::Unknown => (RunStatus::Unknown, None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{completed_run_status, reconciled_run_fields, reconnect_backoff};
+    use kodework_core::session::{ConnectErrorKind, RemoteRunState};
+    use kodework_domain::RunStatus;
+
+    #[test]
+    fn reconnect_does_not_retry_fatal_or_credential_errors() {
+        assert!(!ConnectErrorKind::HostKey.retryable());
+        assert!(!ConnectErrorKind::Authentication.retryable());
+        assert!(!ConnectErrorKind::InvalidConfiguration.retryable());
+        assert!(!ConnectErrorKind::Cancelled.retryable());
+        assert!(ConnectErrorKind::Timeout.retryable());
+        assert!(ConnectErrorKind::Network.retryable());
+        assert!(ConnectErrorKind::Tailscale.retryable());
+    }
+
+    #[test]
+    fn reconnect_backoff_is_bounded_and_monotonic() {
+        assert_eq!(
+            reconnect_backoff(1),
+            std::time::Duration::from_millis(1_200)
+        );
+        assert_eq!(
+            reconnect_backoff(2),
+            std::time::Duration::from_millis(2_400)
+        );
+        assert_eq!(
+            reconnect_backoff(5),
+            std::time::Duration::from_millis(19_200)
+        );
+        assert_eq!(
+            reconnect_backoff(100),
+            std::time::Duration::from_millis(19_200)
+        );
+    }
+
+    #[test]
+    fn unknown_reconciliation_keeps_run_open_for_later_evidence() {
+        assert_eq!(
+            reconciled_run_fields(RemoteRunState::Unknown, Some(1_000), 123),
+            (RunStatus::Unknown, None, None)
+        );
+        assert_eq!(
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 0,
+                    started_at_ms: Some(1_000),
+                    finished_at_ms: Some(2_000),
+                },
+                Some(1_000),
+                123,
+            ),
+            (RunStatus::Succeeded, Some(0), Some(2_000))
+        );
+        assert_eq!(
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 17,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+                Some(1_000),
+                123,
+            ),
+            (RunStatus::Failed, Some(17), Some(123))
+        );
+    }
+
+    #[test]
+    fn reconciliation_anchors_remote_duration_to_local_start() {
+        assert_eq!(
+            reconciled_run_fields(
+                RemoteRunState::Completed {
+                    exit_code: 0,
+                    started_at_ms: Some(5_000_000),
+                    finished_at_ms: Some(5_010_000),
+                },
+                Some(1_000_000),
+                9_999_999,
+            ),
+            (RunStatus::Succeeded, Some(0), Some(1_010_000))
+        );
+    }
+
+    #[test]
+    fn missing_exit_status_is_unknown_after_dispatch() {
+        assert_eq!(completed_run_status(None), RunStatus::Unknown);
+        assert_eq!(completed_run_status(Some(0)), RunStatus::Succeeded);
+        assert_eq!(completed_run_status(Some(23)), RunStatus::Failed);
+    }
 }

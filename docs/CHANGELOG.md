@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 — 2026-08-18 — Guided setup, bilingual UI, and reproducible release
+
+- Added bilingual first-run/settings/editor/terminal/local-terminal/workspace UI labels and a language switch without changing saved connection secrets.
+- Added zero-base English/Chinese user guides and an Agent/maintainer runbook covering every connection field, Tailscale modes, Herdr/tmux, files, clipboard assets, WSL, acceptance evidence, and safe release handling.
+- Fixed terminal host sizing so the final row and toolbar remain visible across split panes and window resizing.
+- Rebuilt the pinned Tailscale v1.102.2 sidecars from the expected upstream source revision and verified the Windows MSI plus Tauri updater signature artifact.
+- This release publishes a Windows 10/11 x64 MSI only; native macOS/Linux desktop bundles, public updater hosting, and commercial Authenticode signing remain unconfigured.
+
 ## 0.2.2 — 2026-08-18 — Local terminals, release hygiene, and startup performance
 
 - 增加独立的 Windows ConPTY 本机终端工作区：PowerShell、CMD、WSL 发行版、多标签、关闭、事件背压和 20 会话上限。
@@ -7,7 +15,7 @@
 - 本机终端渲染器改为按需加载，生产首屏主 JS 从约 554 KB 降至约 270 KB，xterm.js 不再阻塞首屏。
 - 修复远程最后一个终端不能关闭、关闭后空状态误导，以及本机终端标签的嵌套交互元素问题。
 - 清理公开仓库中的生成目录、内部验收交接材料和真实测试主机信息；测试 fixture 改用文档地址与通用账号。
-- 当前构建已生成新的 release EXE 和 Tailscale sidecar；本机 WiX ICE 校验因自动化会话无法访问 Windows Installer，MSI 本轮未标记为通过。
+- 当前版本引入了本机终端和公开仓库清理；具体安装包与签名状态以 0.2.3 发布说明和项目状态页为准。
 
 ## 0.2.1 — 2026-08-17 — Terminal clipboard and pinned files
 

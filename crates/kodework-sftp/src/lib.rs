@@ -53,12 +53,27 @@ pub enum SftpError {
     DiskFull,
     #[error("source file not found")]
     SourceNotFound,
+    #[error("transfer destination is already busy")]
+    DestinationBusy,
+    #[error("source changed during transfer")]
+    SourceChanged,
     #[error("transfer failed after {0} retries")]
     RetriesExhausted(u32),
     #[error("unknown transfer id")]
     UnknownTransfer,
     #[error("backend error: {0}")]
     Backend(String),
+}
+
+impl SftpError {
+    /// Returns whether an automatic retry is safe. Semantic failures must be
+    /// surfaced immediately: retrying them can publish a different source,
+    /// overwrite a user's destination, or repeat an operation that cannot
+    /// succeed without user intervention.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Backend(_))
+    }
 }
 
 pub fn validate_request(request: &TransferRequest) -> Result<(), SftpError> {
@@ -69,6 +84,10 @@ pub fn validate_request(request: &TransferRequest) -> Result<(), SftpError> {
         || request.remote_path.starts_with("~/")
         || request.remote_path.starts_with('/'))
         || request.remote_path.chars().any(char::is_control)
+        || request
+            .remote_path
+            .split('/')
+            .any(|component| component == "." || component == "..")
     {
         return Err(SftpError::InvalidRemotePath);
     }
@@ -120,5 +139,31 @@ mod tests {
             resume: true,
         };
         assert_eq!(validate_request(&remote), Err(SftpError::InvalidRemotePath));
+    }
+
+    #[test]
+    fn rejects_remote_dot_segments() {
+        for remote_path in ["~/uploads/../secret.bin", "/tmp/./file.bin"] {
+            let request = TransferRequest {
+                local_path: "C:/tmp/a.bin".into(),
+                remote_path: remote_path.into(),
+                direction: TransferDirection::Upload,
+                resume: false,
+            };
+            assert_eq!(
+                validate_request(&request),
+                Err(SftpError::InvalidRemotePath)
+            );
+        }
+    }
+
+    #[test]
+    fn only_backend_failures_are_automatically_retryable() {
+        assert!(SftpError::Backend("connection reset".into()).is_retryable());
+        assert!(!SftpError::SourceChanged.is_retryable());
+        assert!(!SftpError::DiskFull.is_retryable());
+        assert!(!SftpError::SourceNotFound.is_retryable());
+        assert!(!SftpError::DestinationBusy.is_retryable());
+        assert!(!SftpError::Cancelled.is_retryable());
     }
 }

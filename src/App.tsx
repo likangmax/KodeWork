@@ -5,11 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import type { Action, HerdrAgentInfo, Host, HostKeyRequest, KeyboardInteractiveRequest, Project, RemoteFileMeta, Run, RunOutcome, Snippet, TmuxSession, TunnelInfo, UpdateCheck } from './api'
 import {
-  answerHostKey, answerKeyboardInteractive, connectHost, deleteHost, isDesktop,
-  listHosts, pendingHostKeyRequests, pendingKeyboardInteractiveRequests, prepareHostNetwork, saveHost, saveHostPassword, saveTailscaleAuthKey, sessionState, disconnectHost, tailscaleRuntimeInfo,
+  answerHostKey, answerKeyboardInteractive, asConnectError, connectHost, deleteHost, isDesktop,
+  listHosts, pendingHostKeyRequests, pendingKeyboardInteractiveRequests, prepareHostNetwork, saveHost, saveHostPassword, saveTailscaleAuthKey, sessionState, subscribeSessionRuntime, disconnectHost, tailscaleRuntimeInfo,
   actionDelete, actionList, actionSave,
-  closePane, herdrAgents, herdrAttach, herdrBridge, herdrBridgeStop, herdrDetect, openPane,
-  projectDelete, projectList, projectSave, runAction, runList, sendInput,
+  closePane, herdrAgents, herdrAttach, herdrBridge, herdrBridgeStopById, herdrDetect, openPane,
+  projectDelete, projectList, projectSave, runAction, runList, runReconcile, sendInput,
   autostartStatus, checkForUpdates, installUpdate, sftpCancel, sftpDownload, sftpList, sftpPause, sftpResume, sftpUpload, setAutostart, subscribeSftp,
   snippetDelete, snippetList, snippetSave,
   tmuxKill, tmuxList, tmuxNew,
@@ -25,13 +25,16 @@ import { useResumeRecovery } from './runtime/useResumeRecovery'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
+import { useLanguage } from './settings/useLanguage'
+import { LanguagePrompt } from './settings/LanguagePrompt'
+import { translate } from './i18n'
 import { WorkspaceHeader } from './workspace/WorkspaceHeader'
 
 const inputEncoder = new TextEncoder()
 
 const newHost = (): Host => ({
   id: crypto.randomUUID(),
-  label: '新建工作站',
+  label: 'New workstation',
   username: '',
   port: 22,
   auth_ref: null,
@@ -64,7 +67,7 @@ export default function App() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Host | null>(null)
-  const [message, setMessageState] = useState('正在读取本地配置…')
+  const [message, setMessageState] = useState('')
   const [messageIsError, setMessageIsError] = useState(false)
   const messageTimer = useRef<number | null>(null)
   // Enhanced message: errors are highlighted and any message expires so a
@@ -80,7 +83,9 @@ export default function App() {
     }, isError ? 30000 : 10000)
   }, [])
   const [phase, setPhase] = useState<ConnectPhase>('idle')
-  const [stateLabel, setStateLabel] = useState('未连接')
+  // Empty initial value: language is resolved below; render sites fall
+  // back to the translated "disconnected" label until the first refresh.
+  const [stateLabel, setStateLabel] = useState('')
   // Keep credentials out of React state/devtools snapshots. The value lives
   // only in the native input element until submit and is cleared immediately.
   const passwordInputRef = useRef<HTMLInputElement | null>(null)
@@ -102,6 +107,8 @@ export default function App() {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [theme, onThemeChange] = useTheme()
+  const [language, onLanguageChange, needsLanguagePrompt] = useLanguage()
+  const t = useCallback((key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args), [language])
   const [activeTab, setActiveTab] = useState<'terminal' | 'local' | 'files' | 'preview' | 'actions'>('terminal')
   const [panes, setPanes] = useState<{ id: number; channel: number }[]>([])
   const [splitDir, setSplitDir] = useState<'h' | 'v'>('h')
@@ -119,7 +126,7 @@ export default function App() {
   const [tunnelRemoteHost, setTunnelRemoteHost] = useState('127.0.0.1')
   const [tunnelRemotePort, setTunnelRemotePort] = useState('3000')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [bridgeInfo, setBridgeInfo] = useState<{ local: string; socket: string; tunnelId: string; remotePort: number } | null>(null)
+  const [bridgeInfo, setBridgeInfo] = useState<{ local: string; socket: string; tunnelId: string; bridgeId: string } | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const [snippetsOpen, setSnippetsOpen] = useState(false)
   const [snippetDraft, setSnippetDraft] = useState<Snippet | null>(null)
@@ -138,7 +145,6 @@ export default function App() {
   const herdrMissingPolls = useRef(0)
   const connectSeq = useRef(0)
   const lastHostRef = useRef<Host | null>(null)
-  const reconnectAttemptsRef = useRef(0)
   const filesSeq = useRef(0)
   const selectedIdRef = useRef<string | null>(null)
   const pollRef = useRef<number | null>(null)
@@ -166,7 +172,7 @@ export default function App() {
     let active = true
     const load = async () => {
       if (!isDesktop()) {
-        if (active) setMessage('Preview 模式：浏览器仅作界面预览，配置不会写入磁盘。')
+        if (active) setMessage(t('previewMode'))
         return
       }
       try {
@@ -175,14 +181,14 @@ export default function App() {
         setHosts(loaded)
         setSelectedId(loaded[0]?.id ?? null)
         setFilesPath(loaded[0]?.default_remote_path || '/')
-        setMessage(loaded.length === 0 ? '尚未配置工作站。' : '已读取 ' + loaded.length + ' 台工作站。')
+        setMessage(loaded.length === 0 ? t('noWorkstationConfigured') : t('loadedWorkstations', String(loaded.length)))
       } catch (error) {
-        if (active) setMessage('读取配置失败：' + String(error))
+        if (active) setMessage(t('loadConfigFailed', String(error)))
       }
     }
     void load()
     return () => { active = false }
-  }, [setMessage])
+  }, [setMessage, t])
 
   // Warm the selected embedded Tailscale path once per host selection.  The
   // previous implementation also warmed the first host during initial load
@@ -234,14 +240,14 @@ export default function App() {
     try {
       const state = await sessionState(hostId)
       const labels: Record<string, string> = {
-        Disconnected: '未连接', ResolvingAddress: '解析地址…', Connecting: '连接中…',
-        VerifyingHostKey: '验证主机密钥…', Authenticating: '认证中…', Ready: '已连接',
-        Reconnecting: '重连中…', Failed: '连接失败',
+        Disconnected: t('stateDisconnected'), ResolvingAddress: t('stateResolving'), Connecting: t('stateConnecting'),
+        VerifyingHostKey: t('stateVerifyingHostKey'), Authenticating: t('stateAuthenticating'), Ready: t('stateReady'),
+        Reconnecting: t('stateReconnecting'), WaitingForCredential: t('stateWaitingForCredential'), Failed: t('stateFailed'),
       }
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
     } catch { /* transient */ }
-  }, [])
+  }, [t])
 
   useResumeRecovery(Boolean(selectedId && phase !== 'idle'), () => {
     if (selectedId) void refreshState(selectedId)
@@ -318,24 +324,19 @@ export default function App() {
         return
       }
       setPanes([{ id, channel }])
-    }).catch((error) => setMessage('打开终端失败：' + String(error)))
+    }).catch((error) => setMessage(t('openTerminalFailed', String(error))))
     return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, selectedId, activeTab])
 
-  // Detect disconnects and recover: key-auth hosts reconnect
-  // automatically (bounded attempts); password hosts are prompted.
+  // Observe native connection supervision. The renderer updates its view and
+  // prompts for credentials, but never owns reconnect timing or retry loops.
   useEffect(() => {
     if (!isDesktop() || !selectedId) return
-    let active = true
-    let busy = false
-    const poll = async () => {
-      if (!active || busy || phaseRef.current === 'idle') return
-      busy = true
-      try {
-        const state = await sessionState(selectedId)
+    const unsubscribe = subscribeSessionRuntime(selectedId, (snapshot) => {
+        const state = snapshot.state
         if (state === 'Reconnecting') {
-          setStateLabel('重连中…')
+          setStateLabel(t('stateReconnecting'))
           setPhase('connecting')
           // Panes belong to the dead transport: the backend cleared them
           // on attach, so drop the stale ids and let the ready-effect
@@ -344,43 +345,34 @@ export default function App() {
           const host = lastHostRef.current
           const canReconnectWithoutPassword = host && (
             host.auth_ref !== null ||
+            host.auth_mode === 'PublicKey' ||
             host.auth_mode === 'SshAgent' ||
             host.auth_mode === 'KeyboardInteractive'
           )
-          if (canReconnectWithoutPassword && host && reconnectAttemptsRef.current < 3) {
-            const attempt = reconnectAttemptsRef.current
-            reconnectAttemptsRef.current += 1
-            setMessage('连接断开，正在自动重连…')
-            // Bounded backoff so bursts of drops do not hammer the host.
-            await new Promise((resolve) => window.setTimeout(resolve, attempt * 1200))
-            if (active && connectSeq.current > 0 && lastHostRef.current?.id === host.id) {
-              void runConnect(host)
-            }
-          } else if (host && host.auth_ref === null && (host.auth_mode === 'Password' || host.auth_mode === 'PublicKey')) {
-            reconnectAttemptsRef.current += 1
-            if (reconnectAttemptsRef.current === 1) {
-              setMessage(host.auth_mode === 'PublicKey'
-                ? '连接已断开：请确认私钥口令后重新连接。'
-                : '连接已断开：请输入密码重新连接。')
-              setPromptPassword(true)
-            }
+          if (canReconnectWithoutPassword && host) {
+            setMessage(t('reconnectAttempting'))
+          } else if (host && host.auth_ref === null && host.auth_mode === 'Password') {
+            setMessage(t('reconnectNeedsPassword'))
+            setPromptPassword(true)
+          }
+        } else if (state === 'WaitingForCredential') {
+          setPhase('connecting')
+          setStateLabel(t('stateWaitingForCredential'))
+          if (lastHostRef.current?.auth_mode === 'Password') {
+            setMessage(t('reconnectNeedsCredential'))
+            setPromptPassword(true)
           }
         } else if (state === 'Failed') {
           setPhase('failed')
-          setStateLabel('连接失败')
+          setStateLabel(t('stateFailed'))
         } else if (state === 'Ready') {
-          reconnectAttemptsRef.current = 0
-          if (phase !== 'ready') {
+          if (phaseRef.current !== 'ready') {
             setPhase('ready')
-            setStateLabel('已连接')
+            setStateLabel(t('stateReady'))
           }
         }
-      } catch { /* transient */ }
-      finally { busy = false }
-    }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 3000)
-    return () => { active = false; window.clearInterval(timer) }
+    })
+    return unsubscribe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId])
 
@@ -391,7 +383,7 @@ export default function App() {
       setPanes((items) => [...items, { id, channel }])
       setSplitDir(dir)
     } catch (error) {
-      setMessage('分屏失败：' + String(error))
+      setMessage(t('splitFailed', String(error)))
     }
   }
 
@@ -413,7 +405,7 @@ export default function App() {
     setKeyboardInteractiveRequest(null)
     if (passwordInputRef.current) passwordInputRef.current.value = ''
     setPhase('connecting')
-    setMessage('正在连接 ' + host.label + '…')
+    setMessage(t('connectingTo', host.label))
     try {
       const result = await connectHost(host, passwordValue)
       if (seq !== connectSeq.current) return
@@ -421,15 +413,23 @@ export default function App() {
       void refreshState(host.id)
     } catch (error) {
       if (seq !== connectSeq.current) return
+      const connectError = asConnectError(error)
+      if (connectError?.kind === 'CredentialRequired') {
+        setPhase('failed')
+        setStateLabel(t('stateFailed'))
+        setMessage(t('credentialRequired'))
+        setPromptPassword(true)
+        return
+      }
       setPhase('failed')
-      setStateLabel('连接失败')
-      setMessage('连接失败：' + String(error))
+      setStateLabel(t('stateFailed'))
+      setMessage(t('connectFailed', connectError?.detail ?? String(error)))
     }
   }
 
   const onConnectClick = () => {
     if (!selected) return
-    if ((selected.auth_mode === 'Password' || selected.auth_mode === 'PublicKey') && selected.auth_ref === null) {
+    if (selected.auth_mode === 'Password' && selected.auth_ref === null) {
       setPromptPassword(true)
     } else {
       void runConnect(selected)
@@ -449,15 +449,15 @@ export default function App() {
     setKeyboardInteractiveRequest(null)
     try {
       const answered = await answerKeyboardInteractive(requestId, responses)
-      if (!answered) setMessage('交互式认证请求已过期，请重新连接。')
+      if (!answered) setMessage(t('keyboardInteractiveExpired'))
     } catch (error) {
-      setMessage('提交交互式认证失败：' + String(error))
+      setMessage(t('keyboardInteractiveSubmitFailed', String(error)))
     }
   }
   const saveDraft = async () => {
     if (!draft) return
     if (!draft.label.trim() || !draft.username.trim() || !firstAddress(draft)?.hostname_or_ip.trim()) {
-      setMessage('请填写名称、用户名和至少一个地址。')
+      setMessage(t('fillRequiredFields'))
       return
     }
     if (isDesktop()) {
@@ -469,7 +469,7 @@ export default function App() {
           setTransfers({})
           setFiles([])
           setPhase('idle')
-          setStateLabel('未连接')
+          setStateLabel(t('stateDisconnected'))
         }
         await saveHost(draft)
         let storedDraft = draft
@@ -486,19 +486,19 @@ export default function App() {
           setSelectedId(storedHost.id)
           setDraft(null)
           setMessage(editingActiveHost
-            ? '工作站与 Tailscale 凭据已保存；连接已安全断开，请使用新配置重新连接。'
-            : '工作站与 Tailscale 凭据已保存。')
+            ? t('hostAndTailscaleSavedDisconnected')
+            : t('hostAndTailscaleSaved'))
           return
         }
         setHosts((items) => [...items.filter((h) => h.id !== storedDraft.id), storedDraft].sort((a, b) => a.label.localeCompare(b.label)))
         setSelectedId(storedDraft.id)
         setDraft(null)
         setMessage(editingActiveHost
-          ? '工作站配置已保存；连接已安全断开，请使用新配置重新连接。'
-          : '工作站配置已保存。')
+          ? t('hostSavedDisconnected')
+          : t('hostSaved'))
         return
       } catch (error) {
-        setMessage('保存失败：' + String(error))
+        setMessage(t('saveFailed', String(error)))
         return
       }
     }
@@ -508,18 +508,20 @@ export default function App() {
     setSelectedId(draft.id)
     setDraft(null)
     setMessage(isDesktop()
-      ? '工作站配置已保存；如果刚才正在连接，请使用新配置重新连接。'
-      : 'Preview：配置仅保留在当前页面。')
+      ? t('hostSavedReconnectHint')
+      : t('previewConfigKeptInPage'))
   }
 
   const deleteSelected = async () => {
     if (!selected) return
+    // Deleting cascades projects/actions/sessions/tunnels: confirm first.
+    if (!window.confirm(t('confirmDeleteWorkstation', selected.label))) return
     if (isDesktop()) {
-      try { await deleteHost(selected.id) } catch (error) { setMessage('删除失败：' + String(error)); return }
+      try { await deleteHost(selected.id) } catch (error) { setMessage(t('deleteFailed', String(error))); return }
     }
     setHosts((items) => items.filter((h) => h.id !== selected.id))
     setSelectedId(null)
-    setMessage(isDesktop() ? '工作站已删除。' : 'Preview：已从当前页面移除。')
+    setMessage(isDesktop() ? t('workstationDeleted') : t('previewRemovedFromPage'))
   }
 
   /** Switching hosts must tear down the previous session's UI state
@@ -532,7 +534,7 @@ export default function App() {
     setSelectedId(host.id)
     setFilesPath(host.default_remote_path || '/')
     setPhase('idle')
-    setStateLabel('未连接')
+    setStateLabel(t('stateDisconnected'))
     setPanes([])
     setTransfers({})
     setFiles([])
@@ -563,8 +565,8 @@ export default function App() {
     setTransfers({})
     setFiles([])
     setPhase('idle')
-    setStateLabel('未连接')
-    setMessage('已断开；远端 tmux/Herdr 会话不受影响。')
+    setStateLabel(t('stateDisconnected'))
+    setMessage(t('disconnectedRemoteSessionsSurvive'))
   }
 
   const updateDraft = (update: (host: Host) => Host) => setDraft((value) => (value ? update(value) : value))
@@ -575,12 +577,12 @@ export default function App() {
     // same character set the server-side tmux_new whitelist enforces so
     // a malicious remote session name cannot inject shell metacharacters.
     if (!/^[A-Za-z0-9_.-]{1,64}$/.test(name)) {
-      setMessage('tmux 会话名包含不安全字符，已拒绝附加。')
+      setMessage(t('tmuxUnsafeName'))
       return
     }
     const paneId = firstPaneId()
     if (paneId === null) {
-      setMessage('没有打开的终端，无法附加 tmux 会话。')
+      setMessage(t('tmuxNeedsTerminal'))
       return
     }
     void sendInput(selected.id, paneId, inputEncoder.encode('tmux attach -t ' + name + '\r'))
@@ -593,7 +595,7 @@ export default function App() {
       setNewTmuxName('')
       setTmuxSessions(await tmuxList(selected.id))
     } catch (error) {
-      setMessage('tmux 新建失败：' + String(error))
+      setMessage(t('tmuxCreateFailed', String(error)))
     }
   }
 
@@ -603,38 +605,38 @@ export default function App() {
       await tmuxKill(selected.id, name)
       setTmuxSessions(await tmuxList(selected.id))
     } catch (error) {
-      setMessage('tmux 删除失败：' + String(error))
+      setMessage(t('tmuxKillFailed', String(error)))
     }
   }
 
   const onHerdrAttach = () => {
     if (!selected) return
-    void herdrAttach(selected.id).catch((error) => setMessage('herdr 启动失败：' + String(error)))
+    void herdrAttach(selected.id).catch((error) => setMessage(t('herdrLaunchFailed', String(error))))
   }
 
   const onHerdrBridge = async () => {
     if (!selected) return
     try {
       const info = await herdrBridge(selected.id, 0)
-      setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, remotePort: info.remote_port })
-      setMessage('herdr socket 已桥接：' + info.tunnel.local_addr)
+      setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, bridgeId: info.bridge_id })
+      setMessage(t('herdrBridged', info.tunnel.local_addr))
     } catch (error) {
-      setMessage('桥接失败：' + String(error))
+      setMessage(t('bridgeFailed', String(error)))
     }
   }
 
   const onHerdrBridgeStop = async () => {
     if (!selected || !bridgeInfo) return
     try {
-      // The local tunnel must be closed explicitly; the remote socat is
-      // killed with the real remote port (never the local loopback one).
+      // Close the local tunnel and then the exact SSH-owned BridgeId. The
+      // remote port/PID are compatibility metadata, never ownership keys.
       await tunnelClose(bridgeInfo.tunnelId).catch(() => {})
-      await herdrBridgeStop(selected.id, bridgeInfo.remotePort).catch(() => {})
+      await herdrBridgeStopById(selected.id, bridgeInfo.bridgeId).catch(() => {})
       setBridgeInfo(null)
       setTunnels(await tunnelList())
-      setMessage('herdr 桥接已停止')
+      setMessage(t('herdrBridgeStopped'))
     } catch (error) {
-      setMessage('停止桥接失败：' + String(error))
+      setMessage(t('bridgeStopFailed', String(error)))
     }
   }
 
@@ -648,7 +650,7 @@ export default function App() {
     if (!selected) return
     const paneId = firstPaneId()
     if (paneId === null) {
-      setMessage('没有打开的终端，无法运行片段。')
+      setMessage(t('snippetNeedsTerminal'))
       return
     }
     void sendInput(selected.id, paneId, inputEncoder.encode(snippet.text + '\r')).catch(() => {})
@@ -662,7 +664,7 @@ export default function App() {
       setSnippets(await snippetList())
       setSnippetDraft(null)
     } catch (error) {
-      setMessage('片段保存失败：' + String(error))
+      setMessage(t('snippetSaveFailed', String(error)))
     }
   }
 
@@ -671,18 +673,19 @@ export default function App() {
       await snippetDelete(id)
       setSnippets(await snippetList())
     } catch (error) {
-      setMessage('片段删除失败：' + String(error))
+      setMessage(t('snippetDeleteFailed', String(error)))
     }
   }
 
   // ---- workspace controls ----
   useEffect(() => {
-    if (!isDesktop() || !selectedId) return
+    if (!isDesktop() || !selectedId || phase !== 'ready') return
     void projectList(selectedId).then(setProjects).catch(() => {})
+    void runReconcile(selectedId).then(() => runList(undefined, 50, selectedId).then(setRuns)).catch(() => {})
     if (activeTab === 'actions') {
       void runList(undefined, 50, selectedId).then(setRuns).catch(() => {})
     }
-  }, [selectedId, activeTab])
+  }, [selectedId, activeTab, phase])
 
   const refreshActions = async (projectId: string) => {
     try {
@@ -703,27 +706,29 @@ export default function App() {
       setProjects(await projectList(selectedId))
       setProjectDraft(null)
     } catch (error) {
-      setMessage('项目保存失败：' + String(error))
+      setMessage(t('projectSaveFailed', String(error)))
     }
   }
 
   const onActionSave = async () => {
     if (!actionDraft) return
     try {
-      await actionSave(actionDraft)
-      await refreshActions(actionDraft.project_id)
+      const action = actionDraft.mode === 'Quick'
+        ? actionDraft
+        : { ...actionDraft, timeout_ms: null }
+      await actionSave(action)
+      await refreshActions(action.project_id)
       setActionDraft(null)
     } catch (error) {
-      setMessage('动作保存失败：' + String(error))
+      setMessage(t('actionSaveFailed', String(error)))
     }
   }
 
   const onRunAction = async (action: Action) => {
     if (!selected) return
-    // Dangerous commands always require an explicit user confirmation.  The
-    // backend independently recomputes the level, so this only keeps the UI
-    // from presenting a misleading one-click path.
-    if (action.danger_level === 'Dangerous') {
+    // The backend independently recomputes the level. Review and Always
+    // actions need the same explicit confirmation path as Dangerous actions.
+    if (action.confirmation === 'Always' || action.danger_level !== 'Safe') {
       setConfirmAction(action)
       return
     }
@@ -737,9 +742,16 @@ export default function App() {
       const outcome = await runAction(selected.id, action, confirmed)
       setRunResult(outcome)
       void runList(undefined, 50, selected.id).then(setRuns).catch(() => {})
-      setMessage('动作完成：退出码 ' + String(outcome.exit_code ?? '交互式') + (outcome.output_bytes > 400 ? '（输出已截断）' : ''))
+      const resultMessage = outcome.disposition === 'Completed'
+        ? (outcome.exit_code === 0
+          ? t('actionCompleted')
+          : t('actionFailedExitCode', String(outcome.exit_code ?? 'unknown')))
+        : outcome.disposition === 'BackgroundStarted'
+          ? t('backgroundTaskStarted')
+          : t('commandSentToTerminal')
+      setMessage(resultMessage + (outcome.output_bytes > 400 ? t('outputTruncatedSuffix') : ''))
     } catch (error) {
-      setMessage('动作失败：' + String(error))
+      setMessage(t('actionFailed', String(error)))
     } finally {
       setActionBusy(false)
     }
@@ -755,7 +767,7 @@ export default function App() {
     const windowAny = window as any
     const Impl = windowAny.SpeechRecognition || windowAny.webkitSpeechRecognition
     if (!Impl) {
-      setMessage('当前 WebView 不支持语音输入')
+      setMessage(t('speechUnsupported'))
       return
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -768,7 +780,7 @@ export default function App() {
       if (text.trim()) {
         const paneId = firstPaneId()
         if (paneId === null) {
-          setMessage('没有打开的终端，无法输入语音文本。')
+          setMessage(t('speechNeedsTerminal'))
           return
         }
         // Read the CURRENT host at delivery time: the recognition closure
@@ -776,7 +788,7 @@ export default function App() {
         const target = selectedIdRef.current
         if (!target) return
         void sendInput(target, paneId, inputEncoder.encode(text.trim())).catch(() => {})
-        setMessage('语音已输入：' + text.trim())
+        setMessage(t('speechInput', text.trim()))
       }
     }
     recognition.onend = () => setMicListening(false)
@@ -807,12 +819,12 @@ export default function App() {
     } catch (error) {
       if (seq === filesSeq.current) {
         setFiles([])
-        setMessage('文件列表失败：' + String(error))
+        setMessage(t('fileListFailed', String(error)))
       }
     } finally {
       if (seq === filesSeq.current) setFilesLoading(false)
     }
-  }, [selectedId, filesPath, setMessage])
+  }, [selectedId, filesPath, setMessage, t])
 
   useEffect(() => {
     if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return () => {}
@@ -871,7 +883,7 @@ export default function App() {
       try {
         await sftpUpload(selected.id, localPath, remote)
       } catch (error) {
-        setMessage('上传失败：' + String(error))
+        setMessage(t('uploadFailed', String(error)))
       }
     }
   }
@@ -883,12 +895,12 @@ export default function App() {
       try {
         await saveHost(updated)
       } catch (error) {
-        setMessage(`固定目录失败：${String(error)}`)
+        setMessage(t('pinFailed', String(error)))
         return
       }
     }
     setHosts((items) => items.map((host) => host.id === updated.id ? updated : host))
-    setMessage(`已将 ${filesPath} 固定为 ${selected.label} 的默认文件目录。`)
+    setMessage(t('pinnedDefaultDir', filesPath, selected.label))
   }
 
   const onDownloadClick = async () => {
@@ -900,7 +912,7 @@ export default function App() {
     try {
       await sftpDownload(selected.id, selectedRemote, target)
     } catch (error) {
-      setMessage('下载失败：' + String(error))
+      setMessage(t('downloadFailed', String(error)))
     }
   }
 
@@ -926,21 +938,21 @@ export default function App() {
     if (!selected) return
     const remotePort = Number(tunnelRemotePort)
     if (!remotePort || remotePort < 1 || remotePort > 65535) {
-      setMessage('远程端口需为 1–65535')
+      setMessage(t('remotePortRange'))
       return
     }
     try {
       const local = tunnelLocal.trim() === '' ? 0 : Number(tunnelLocal)
       if (Number.isNaN(local) || local < 0 || local > 65535) {
-        setMessage('本地端口需为 0–65535（0 表示自动分配）')
+        setMessage(t('localPortRange'))
         return
       }
       const info = await tunnelOpen(selected.id, local, tunnelRemoteHost.trim() || '127.0.0.1', remotePort)
       setTunnels(await tunnelList())
       setTunnelLocal(String(info.local_addr.split(':')[1]))
-      setMessage('隧道已建立：' + info.local_addr + ' → ' + info.remote_host + ':' + info.remote_port)
+      setMessage(t('tunnelEstablished', info.local_addr, info.remote_host, String(info.remote_port)))
     } catch (error) {
-      setMessage('隧道建立失败：' + String(error))
+      setMessage(t('tunnelCreateFailed', String(error)))
     }
   }
 
@@ -954,7 +966,7 @@ export default function App() {
         return url
       })
     } catch (error) {
-      setMessage('隧道关闭失败：' + String(error))
+      setMessage(t('tunnelCloseFailed', String(error)))
     }
   }
 
@@ -963,9 +975,9 @@ export default function App() {
   return (
     <div className={'shell' + (terminalFocusMode ? ' terminal-focus-mode' : '')}>
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark" /><span className="brand-name">kodework<em>.</em></span><span className="brand-meta">远程工作台</span></div>
-        <div className="section-label">工作站 <button aria-label="添加工作站" onClick={() => setDraft(newHost())}><Icon name="plus" size={13} /></button></div>
-        {hosts.length === 0 && <div className="empty-nav">还没有工作站配置</div>}
+        <div className="brand"><span className="brand-mark" /><span className="brand-name">kodework<em>.</em></span><span className="brand-meta">{t('remoteWorkbench')}</span></div>
+        <div className="section-label">{t('workstations')} <button aria-label={t('addWorkstationShort')} onClick={() => setDraft(newHost())}><Icon name="plus" size={13} /></button></div>
+        {hosts.length === 0 && <div className="empty-nav">{t('noWorkstationsConfigured')}</div>}
         {hosts.map((host) => (
           <button
             className={'nav-row ' + (selectedId === host.id ? 'selected' : '')}
@@ -974,32 +986,32 @@ export default function App() {
           >
             <span className={'dot ' + (phase === 'ready' && selectedId === host.id ? 'online' : 'offline')} />
             <span>{host.label}</span>
-            <small>{host.tailscale?.enabled ? 'Tailscale' : '手动地址'}</small>
+            <small>{host.tailscale?.enabled ? 'Tailscale' : t('manualAddress')}</small>
           </button>
         ))}
         <div className="sidebar-footer">
           <div className="connection-pill">
             <span className={'dot ' + (phase === 'ready' ? 'online' : 'offline')} />
-            {stateLabel} · {phase === 'ready' && selected ? selected.label : '无会话'}
+            {stateLabel || t('stateDisconnected')} · {phase === 'ready' && selected ? selected.label : t('noSession')}
           </div>
           <div className="sidebar-actions">
-            <button className="settings" onClick={() => setSnippetsOpen(true)}><Icon name="zap" size={14} />片段</button>
-            <button className="settings" onClick={() => { setSettingsOpen(true); void autostartStatus().then(setAutoStart).catch(() => {}) }}><Icon name="gear" size={14} />设置</button>
+            <button className="settings" onClick={() => setSnippetsOpen(true)}><Icon name="zap" size={14} />{t('snippets')}</button>
+            <button className="settings" onClick={() => { setSettingsOpen(true); void autostartStatus().then(setAutoStart).catch(() => {}) }}><Icon name="gear" size={14} />{t('settings')}</button>
           </div>
         </div>
       </aside>
 
       <main className="main">
-        <WorkspaceHeader selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
+        <WorkspaceHeader language={language} selected={selected} address={address} phase={phase} onConnect={onConnectClick} onDisconnect={() => { void onDisconnect() }} onDelete={() => { void deleteSelected() }} onTunnel={() => setTunnelPanelOpen(true)} stateLabel={stateLabel || t('stateDisconnected')} onEdit={() => { if (selected) setDraft(structuredClone(selected)) }} />
 
         <div className="workspace-tabs">
-          <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />终端</button>
-          <button className={activeTab === 'local' ? 'active' : ''} onClick={() => setActiveTab('local')}><Icon name="computer" size={13} />本机</button>
-          <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}><Icon name="folder" size={13} />文件</button>
-          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl}><Icon name="globe" size={13} />预览</button>
-          <button className={activeTab === 'actions' ? 'active' : ''} onClick={() => setActiveTab('actions')}><Icon name="activity" size={13} />活动</button>
+          <button className={activeTab === 'terminal' ? 'active' : ''} onClick={() => setActiveTab('terminal')}><Icon name="terminal" size={13} />{t('terminal')}</button>
+          <button className={activeTab === 'local' ? 'active' : ''} onClick={() => setActiveTab('local')}><Icon name="computer" size={13} />{t('local')}</button>
+          <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}><Icon name="folder" size={13} />{t('files')}</button>
+          <button className={activeTab === 'preview' ? 'active' : ''} onClick={() => setActiveTab('preview')} disabled={listeningTunnels.length === 0 && !previewUrl} title={listeningTunnels.length === 0 && !previewUrl ? t('previewNeedsTunnel') : undefined}><Icon name="globe" size={13} />{t('preview')}</button>
+          <button className={activeTab === 'actions' ? 'active' : ''} onClick={() => setActiveTab('actions')}><Icon name="activity" size={13} />{t('activity')}</button>
           <span className="tmux">
-            {selected?.tailscale?.enabled ? 'Tailscale 已配置' : '地址候选待配置'} · {selected ? selected.default_runtime.toLowerCase() : '未连接'}
+            {selected?.tailscale?.enabled ? t('tailscaleConfigured') : t('addressCandidatesPending')} · {selected ? selected.default_runtime.toLowerCase() : t('notConnected')}
           </span>
         </div>
 
@@ -1007,11 +1019,11 @@ export default function App() {
           {activeTab === 'actions' ? (
             <section className="terminal-card files-card">
               <div className="terminal-head">
-                <span>◷ 项目与动作</span>
+                <span>{t('projectsAndActions')}</span>
                 <span className="terminal-tools">Quick · Interactive · Background</span>
               </div>
               <div className="files-body">
-                {projects.length === 0 && <div className="runtime-empty">还没有项目；点击“新建项目”创建</div>}
+                {projects.length === 0 && <div className="runtime-empty">{t('noProjectsYet')}</div>}
                 {projects.map((project) => (
                   <div key={project.id} style={{ marginBottom: 10 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 4px' }}>
@@ -1019,9 +1031,9 @@ export default function App() {
                       <span style={{ fontWeight: 600, fontSize: 13 }}>{project.name}</span>
                       <span className="tunnel-remote">{project.remote_cwd}</span>
                       <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-                        <button className="mini" onClick={() => setProjectDraft({ ...project })}>编辑</button>
-                        <button className="mini danger" onClick={() => void projectDelete(project.id).then(() => setProjects((items) => items.filter((p) => p.id !== project.id))).catch((e) => setMessage('删除失败：' + String(e)))}>删除</button>
-                        <button className="mini" onClick={() => setActionDraft({ id: crypto.randomUUID(), project_id: project.id, name: '', command: '', mode: 'Quick', cwd: project.remote_cwd, timeout_ms: 60000, danger_level: 'Safe', confirmation: 'Never', env: {} })}>＋动作</button>
+                        <button className="mini" onClick={() => setProjectDraft({ ...project })}>{t('edit')}</button>
+                        <button className="mini danger" onClick={() => void projectDelete(project.id).then(() => setProjects((items) => items.filter((p) => p.id !== project.id))).catch((e) => setMessage(t('deleteFailed', String(e))))}>{t('delete')}</button>
+                        <button className="mini" onClick={() => setActionDraft({ id: crypto.randomUUID(), project_id: project.id, name: '', command: '', mode: 'Quick', cwd: project.remote_cwd, timeout_ms: 60000, danger_level: 'Safe', confirmation: 'OnDangerous', env: {} })}>{t('addAction')}</button>
                       </span>
                     </div>
                     {(actionsByProject[project.id] ?? []).map((action) => (
@@ -1029,33 +1041,33 @@ export default function App() {
                         <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action.name}</span>
                         <span className="tunnel-state" style={action.danger_level === 'Dangerous' ? { color: 'var(--danger)' } : {}}>{action.danger_level}</span>
                         <span className="tunnel-conns">{action.mode}</span>
-                        <button className={'mini' + (action.danger_level === 'Dangerous' ? ' danger' : '')} disabled={actionBusy} onClick={() => void onRunAction(action)}>{actionBusy ? <Icon name="power" size={10} /> : <Icon name="play" size={10} />}{actionBusy ? '运行中' : '运行'}</button>
-                        <button className="mini" onClick={() => setActionDraft({ ...action })}>编辑</button>
-                        <button className="mini danger" onClick={() => void actionDelete(action.id).then(() => refreshActions(project.id)).catch((e) => setMessage('删除失败：' + String(e)))}><Icon name="trash" size={10} />删除</button>
+                        <button className={'mini' + (action.danger_level === 'Dangerous' ? ' danger' : '')} disabled={actionBusy} onClick={() => void onRunAction(action)}>{actionBusy ? <Icon name="power" size={10} /> : <Icon name="play" size={10} />}{actionBusy ? t('runActionInProgress') : t('runAction')}</button>
+                        <button className="mini" onClick={() => setActionDraft({ ...action })}>{t('edit')}</button>
+                        <button className="mini danger" onClick={() => void actionDelete(action.id).then(() => refreshActions(project.id)).catch((e) => setMessage(t('deleteFailed', String(e))))}><Icon name="trash" size={10} />{t('delete')}</button>
                       </div>
                     ))}
                   </div>
                 ))}
                 {runResult && (
                   <div style={{ marginTop: 8, padding: 10, background: 'var(--bg-inset)', border: '1px solid var(--line)', borderRadius: 5, fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' }}>
-                    {runResult.stdout_preview || '(无输出)'}
+                    {runResult.stdout_preview || t('noOutput')}
                     {runResult.stderr_preview && '\n[stderr] ' + runResult.stderr_preview}
                   </div>
                 )}
                 <div style={{ marginTop: 14, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-                  <div className="runtime-title"><span>运行历史</span><small>{runs.length} 条</small></div>
-                  {runs.length === 0 ? <div className="runtime-empty">暂无运行记录</div> : runs.slice(0, 12).map((run) => (
+                  <div className="runtime-title"><span>{t('runHistory')}</span><small>{t('runCount', String(runs.length))}</small></div>
+                  {runs.length === 0 ? <div className="runtime-empty">{t('noRunHistory')}</div> : runs.slice(0, 12).map((run) => (
                     <div className="tunnel-row" key={run.id} style={{ paddingLeft: 4 }}>
                       <span className="tunnel-state">{run.status}</span>
-                      <span className="tunnel-conns">退出 {run.exit_code ?? '—'}</span>
+                      <span className="tunnel-conns">{t('exitLabel', run.exit_code === null || run.exit_code === undefined ? '—' : String(run.exit_code))}</span>
                       <span className="tunnel-remote">{run.remote_session_ref ?? `${run.output_bytes} bytes`}</span>
                     </div>
                   ))}
                 </div>
               </div>
               <div className="files-toolbar" style={{ borderTop: '1px solid var(--line)', borderBottom: 'none' }}>
-                <button className="mini" onClick={() => setProjectDraft({ id: crypto.randomUUID(), host_id: selectedId ?? '', name: '', remote_cwd: '~', preferred_runtime: selected?.default_runtime ?? 'Tmux' })}><Icon name="plus" size={11} />新建项目</button>
-                {runResult && <button className="mini" onClick={() => setRunResult(null)}>清除输出</button>}
+                <button className="mini" onClick={() => setProjectDraft({ id: crypto.randomUUID(), host_id: selectedId ?? '', name: '', remote_cwd: '~', preferred_runtime: selected?.default_runtime ?? 'Tmux' })}><Icon name="plus" size={11} />{t('newProject')}</button>
+                {runResult && <button className="mini" onClick={() => setRunResult(null)}>{t('clearOutput')}</button>}
               </div>
             </section>
           ) : activeTab === 'preview' ? (
@@ -1070,7 +1082,7 @@ export default function App() {
                     value={previewUrl ?? ''}
                     onChange={(event) => setPreviewUrl(event.target.value || null)}
                   >
-                    <option value="">选择隧道…</option>
+                    <option value="">{t('selectTunnel')}</option>
                     {listeningTunnels.map((tunnel) => (
                       <option key={tunnel.id} value={"http://" + tunnel.local_addr}>
                         {tunnel.local_addr} → {tunnel.remote_host}:{tunnel.remote_port}
@@ -1085,7 +1097,7 @@ export default function App() {
                 ) : (
                   <div className="preview-empty">
                     <Icon name="eye" size={34} />
-                    <div>先建立一条隧道，再在这里预览远程 Web 服务</div>
+                    <div>{t('previewEmptyHint')}</div>
                   </div>
                 )}
               </div>
@@ -1094,12 +1106,13 @@ export default function App() {
             <section className="terminal-card">
               <div className="terminal-empty">
                 <div className="empty-symbol"><Icon name="folder" size={40} /></div>
-                <h2>连接后可用</h2>
-                <p>文件面板通过 SFTP 流式访问远程目录。</p>
+                <h2>{t('filesNeedConnection')}</h2>
+                <p>{t('filesSftpHint')}</p>
               </div>
             </section>
           ) : activeTab === 'files' && phase === 'ready' && selected ? (
             <FilesPanel
+              t={t}
               currentPath={filesPath}
               entries={files}
               loading={filesLoading}
@@ -1115,7 +1128,7 @@ export default function App() {
               pinned={selected.default_remote_path === filesPath}
               onPinCurrentPath={() => { void pinCurrentFolder() }}
               onGoPinnedPath={() => { setSelectedRemote(null); setFilesPath(selected.default_remote_path || '/') }}
-              onYazi={() => { void yaziAttach(selected.id).catch((error) => setMessage(`yazi 启动失败：${String(error)}`)) }}
+              onYazi={() => { void yaziAttach(selected.id).catch((error) => setMessage(t('yaziLaunchFailed', String(error)))) }}
               onPauseTransfer={(id) => { void sftpPause(selected.id, id).catch(() => {}) }}
               onResumeTransfer={(id) => { void sftpResume(selected.id, id).catch(() => {}) }}
               onCancelTransfer={(id) => { void sftpCancel(selected.id, id).catch(() => {}) }}
@@ -1123,15 +1136,16 @@ export default function App() {
             />
           ) : null}
           <TerminalWorkspace
-            visible={activeTab === 'terminal'} phase={phase} stateLabel={stateLabel} selected={selected}
+            visible={activeTab === 'terminal'} phase={phase} stateLabel={stateLabel || t('stateDisconnected')} selected={selected}
             panes={panes} splitDir={splitDir} micListening={micListening} runtimeOpen={runtimeOpen}
             focusMode={terminalFocusMode} onMicToggle={onMicToggle} onSplit={(direction) => { void onSplit(direction) }}
             onToggleRuntime={() => setRuntimeOpen((open) => !open)} onToggleFocus={() => setTerminalFocusMode((active) => !active)}
-            onClosePane={onClosePane} onPasteStatus={setMessage}
+            onClosePane={onClosePane} onPasteStatus={setMessage} language={language}
           />
-          <LocalTerminalWorkspace visible={activeTab === 'local'} onStatus={setMessage} />
+          <LocalTerminalWorkspace language={language} visible={activeTab === 'local'} onStatus={setMessage} />
           {phase === 'ready' && selected && activeTab === 'terminal' && runtimeOpen && (
             <RuntimePanel
+              t={t}
               herdrVersion={herdrVersion} herdrMissing={herdrMissing} herdrError={herdrError} agents={agents}
               bridgeInfo={bridgeInfo ? { local: bridgeInfo.local, socket: bridgeInfo.socket } : null}
               tmuxSessions={tmuxSessions} newTmuxName={newTmuxName} onNewTmuxName={setNewTmuxName}
@@ -1142,14 +1156,14 @@ export default function App() {
         </div>
 
         <footer className="statusbar">
-          <span className="status-security"><Icon name="check" size={12} />本地元数据 · 凭据不进入 SQLite</span>
-          <span className={messageIsError ? 'status-message error' : 'status-message'}>{message || '就绪'}</span>
+          <span className="status-security"><Icon name="check" size={12} />{t('localMetadataSafe')}</span>
+          <span className={messageIsError ? 'status-message error' : 'status-message'}>{message || t('ready')}</span>
           <span>{isDesktop() ? 'Desktop' : 'Preview'} · v{__APP_VERSION__}</span>
         </footer>
       </main>
       {draft && (
         <HostEditor
-          draft={draft} tailscaleComponents={tailscaleComponents} tailscaleKeyInputRef={tailscaleKeyInputRef}
+          draft={draft} language={language} tailscaleComponents={tailscaleComponents} tailscaleKeyInputRef={tailscaleKeyInputRef}
           privateKeyPassphraseRef={privateKeyPassphraseRef} updateDraft={updateDraft} onClose={() => setDraft(null)}
           onSave={() => { void saveDraft() }} onMessage={setMessage}
         />
@@ -1167,30 +1181,30 @@ export default function App() {
                   setHosts((items) => items.map((item) => item.id === storedHost.id ? storedHost : item))
                   return runConnect(storedHost)
                 })
-                .catch((error) => setMessage('保存凭据失败：' + String(error)))
+                .catch((error) => setMessage(t('saveCredentialFailed', String(error))))
             } else {
               void runConnect(selected, passwordValue)
             }
           }}>
             <div className="modal-head">
-              <div><div className="eyebrow">AUTHENTICATION</div><h2>连接 {selected.label}</h2></div>
+              <div><div className="eyebrow">AUTHENTICATION</div><h2>{t('connectTo', selected.label)}</h2></div>
               <button type="button" className="ghost" onClick={() => {
                 if (passwordInputRef.current) passwordInputRef.current.value = ''
                 setPromptPassword(false)
                 setRememberPassword(false)
                 setPhase('idle')
-                setStateLabel('未连接')
-              }}>取消</button>
+                setStateLabel(t('stateDisconnected'))
+              }}>{t('cancel')}</button>
             </div>
-            <label>{selected.auth_mode === 'PublicKey' ? '私钥口令（如无可留空）' : '密码'}
+            <label>{selected.auth_mode === 'PublicKey' ? t('passphraseLabel') : t('passwordLabel')}
               <input ref={passwordInputRef} type="password" autoComplete="off" autoFocus />
             </label>
             <label className="toggle-row">
               <input type="checkbox" checked={rememberPassword} onChange={(event) => setRememberPassword(event.target.checked)} />
-              使用当前操作系统的安全密钥环保存{selected.auth_mode === 'PublicKey' ? '口令' : '密码'}
+              {t('saveInKeyring', selected.auth_mode === 'PublicKey' ? t('passphraseWord') : t('passwordWord'))}
             </label>
-            <p className="modal-note">凭据仅经 IPC 传递到本地 Rust 进程，不写入数据库或日志。</p>
-            <button className="primary modal-submit" type="submit">连接</button>
+            <p className="modal-note">{t('credentialIpcNote')}</p>
+            <button className="primary modal-submit" type="submit">{t('connect')}</button>
           </form>
         </div>
       )}
@@ -1199,18 +1213,18 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PROJECT</div><h2>编辑项目</h2></div>
-              <button type="button" className="ghost" onClick={() => setProjectDraft(null)}>关闭</button>
+              <div><div className="eyebrow">PROJECT</div><h2>{t('editProject')}</h2></div>
+              <button type="button" className="ghost" onClick={() => setProjectDraft(null)}>{t('close')}</button>
             </div>
-            <label>名称
+            <label>{t('nameLabel')}
               <input value={projectDraft.name} onChange={(e) => setProjectDraft({ ...projectDraft, name: e.target.value })} autoFocus />
             </label>
-            <label>远程目录
+            <label>{t('remoteDirectory')}
               <input value={projectDraft.remote_cwd} onChange={(e) => setProjectDraft({ ...projectDraft, remote_cwd: e.target.value })} placeholder="~/projects/foo" />
             </label>
             <div className="modal-actions">
-              <button className="ghost" onClick={() => setProjectDraft(null)}>取消</button>
-              <button className="primary" onClick={() => void onProjectSave()}>保存</button>
+              <button className="ghost" onClick={() => setProjectDraft(null)}>{t('cancel')}</button>
+              <button className="primary" onClick={() => void onProjectSave()}>{t('save')}</button>
             </div>
           </div>
         </div>
@@ -1220,13 +1234,13 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">ACTION</div><h2>编辑动作</h2></div>
-              <button type="button" className="ghost" onClick={() => setActionDraft(null)}>关闭</button>
+              <div><div className="eyebrow">ACTION</div><h2>{t('editAction')}</h2></div>
+              <button type="button" className="ghost" onClick={() => setActionDraft(null)}>{t('close')}</button>
             </div>
-            <label>名称
+            <label>{t('nameLabel')}
               <input value={actionDraft.name} onChange={(e) => setActionDraft({ ...actionDraft, name: e.target.value })} autoFocus />
             </label>
-            <label>命令
+            <label>{t('commandLabel')}
               <textarea
                 rows={3}
                 value={actionDraft.command}
@@ -1235,28 +1249,37 @@ export default function App() {
               />
             </label>
             <div className="form-row">
-              <label>模式
-                <select value={actionDraft.mode} onChange={(e) => setActionDraft({ ...actionDraft, mode: e.target.value as Action['mode'] })}>
-                  <option value="Quick">Quick（快速）</option>
-                  <option value="Interactive">Interactive（终端）</option>
-                  <option value="Background">Background（后台）</option>
+              <label>{t('modeLabel')}
+                <select value={actionDraft.mode} onChange={(e) => {
+                  const mode = e.target.value as Action['mode']
+                  setActionDraft({ ...actionDraft, mode, timeout_ms: mode === 'Quick' ? actionDraft.timeout_ms : null })
+                }}>
+                  <option value="Quick">{t('modeQuick')}</option>
+                  <option value="Interactive">{t('modeInteractive')}</option>
+                  <option value="Background">{t('modeBackground')}</option>
                 </select>
               </label>
-              <label>危险级别
+              <label>{t('dangerLevel')}
                 <select value={actionDraft.danger_level} disabled>
-                  <option value="Safe">安全</option>
-                  <option value="Review">需复核</option>
-                  <option value="Dangerous">危险</option>
+                  <option value="Safe">{t('dangerSafe')}</option>
+                  <option value="Review">{t('dangerReview')}</option>
+                  <option value="Dangerous">{t('dangerDangerous')}</option>
                 </select>
-                <span className="modal-note">保存时按命令内容自动判定（服务端强制），不可手动设置。</span>
+                <span className="modal-note">{t('dangerAutoNote')}</span>
               </label>
             </div>
-            <label>超时（毫秒，留空默认 30s）
-              <input type="number" value={actionDraft.timeout_ms ?? ''} onChange={(e) => setActionDraft({ ...actionDraft, timeout_ms: e.target.value ? Number(e.target.value) : null })} />
+            <label>{t('timeoutLabel')}
+              <input
+                type="number"
+                disabled={actionDraft.mode !== 'Quick'}
+                value={actionDraft.mode === 'Quick' ? actionDraft.timeout_ms ?? '' : ''}
+                onChange={(e) => setActionDraft({ ...actionDraft, timeout_ms: e.target.value ? Number(e.target.value) : null })}
+              />
+              {actionDraft.mode !== 'Quick' && <span className="modal-note">{t('noLocalTimeoutNote')}</span>}
             </label>
             <div className="modal-actions">
-              <button className="ghost" onClick={() => setActionDraft(null)}>取消</button>
-              <button className="primary" onClick={() => void onActionSave()}>保存</button>
+              <button className="ghost" onClick={() => setActionDraft(null)}>{t('cancel')}</button>
+              <button className="primary" onClick={() => void onActionSave()}>{t('save')}</button>
             </div>
           </div>
         </div>
@@ -1266,13 +1289,13 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">CONFIRM</div><h2>确认运行危险动作</h2></div>
+              <div><div className="eyebrow">CONFIRM</div><h2>{t('confirmRunAction')}</h2></div>
             </div>
-            <p className="modal-note">动作 <strong>{confirmAction.name}</strong> 被标记为危险，将在远程执行：</p>
+            <p className="modal-note">{t('actionWillRun', confirmAction.name, confirmAction.danger_level)}</p>
             <code className="fingerprint">{confirmAction.command}</code>
             <div className="modal-actions">
-              <button className="ghost" onClick={() => setConfirmAction(null)}>取消</button>
-              <button className="primary" style={{ background: 'var(--danger)' }} onClick={() => { const action = confirmAction; setConfirmAction(null); void executeAction(action, true) }}>确认执行</button>
+              <button className="ghost" onClick={() => setConfirmAction(null)}>{t('cancel')}</button>
+              <button className="primary" style={{ background: 'var(--danger)' }} onClick={() => { const action = confirmAction; setConfirmAction(null); void executeAction(action, true) }}>{t('confirmExecute')}</button>
             </div>
           </div>
         </div>
@@ -1282,15 +1305,15 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">SNIPPETS</div><h2>命令片段</h2></div>
-              <button type="button" className="ghost" onClick={() => setSnippetsOpen(false)}>关闭</button>
+              <div><div className="eyebrow">SNIPPETS</div><h2>{t('commandSnippets')}</h2></div>
+              <button type="button" className="ghost" onClick={() => setSnippetsOpen(false)}>{t('close')}</button>
             </div>
             {snippetDraft ? (
               <>
-              <label>名称
+              <label>{t('nameLabel')}
                 <input value={snippetDraft.name} onChange={(e) => setSnippetDraft({ ...snippetDraft, name: e.target.value })} autoFocus onKeyDown={(e) => { if (e.key === 'Enter') void onSnippetSave() }} />
               </label>
-              <label>命令内容
+              <label>{t('commandContent')}
                 <textarea
                   rows={4}
                   value={snippetDraft.text}
@@ -1299,26 +1322,26 @@ export default function App() {
                 />
               </label>
               <div className="modal-actions">
-                <button className="ghost" onClick={() => setSnippetDraft(null)}>取消</button>
-                <button className="primary" onClick={() => void onSnippetSave()}>保存</button>
+                <button className="ghost" onClick={() => setSnippetDraft(null)}>{t('cancel')}</button>
+                <button className="primary" onClick={() => void onSnippetSave()}>{t('save')}</button>
               </div>
               </>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' }}>
-                {snippets.length === 0 && <div className="runtime-empty">还没有片段；点击下方“新建”添加</div>}
+                {snippets.length === 0 && <div className="runtime-empty">{t('noSnippetsYet')}</div>}
                 {snippets.map((snippet) => (
                   <div className="tunnel-row" key={snippet.id}>
                     <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{snippet.name}</span>
-                    <span className="tunnel-remote">{snippet.text.length} 字符</span>
-                    <button className="mini" onClick={() => onSnippetRun(snippet)}><Icon name="play" size={10} />执行</button>
-                    <button className="mini" onClick={() => setSnippetDraft({ ...snippet })}><Icon name="gear" size={10} />编辑</button>
-                    <button className="mini danger" onClick={() => void onSnippetDelete(snippet.id)}><Icon name="trash" size={10} />删除</button>
+                    <span className="tunnel-remote">{t('charCount', String(snippet.text.length))}</span>
+                    <button className="mini" onClick={() => onSnippetRun(snippet)}><Icon name="play" size={10} />{t('execute')}</button>
+                    <button className="mini" onClick={() => setSnippetDraft({ ...snippet })}><Icon name="gear" size={10} />{t('edit')}</button>
+                    <button className="mini danger" onClick={() => void onSnippetDelete(snippet.id)}><Icon name="trash" size={10} />{t('delete')}</button>
                   </div>
                 ))}
               </div>
             )}
             {!snippetDraft && (
-              <button className="primary modal-submit" onClick={() => setSnippetDraft({ id: crypto.randomUUID(), name: '', text: '', sort_order: 0 })}><Icon name="plus" size={12} />新建片段</button>
+              <button className="primary modal-submit" onClick={() => setSnippetDraft({ id: crypto.randomUUID(), name: '', text: '', sort_order: 0 })}><Icon name="plus" size={12} />{t('newSnippet')}</button>
             )}
           </div>
         </div>
@@ -1328,36 +1351,36 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PORT FORWARDING</div><h2>SSH 隧道</h2></div>
-              <button type="button" className="ghost" onClick={() => setTunnelPanelOpen(false)}>关闭</button>
+              <div><div className="eyebrow">PORT FORWARDING</div><h2>{t('sshTunnels')}</h2></div>
+              <button type="button" className="ghost" onClick={() => setTunnelPanelOpen(false)}>{t('close')}</button>
             </div>
             <div className="tunnel-form">
-              <label>本地端口<span className="modal-note">留空自动分配</span>
+              <label>{t('localPort')}<span className="modal-note">{t('autoAssignWhenEmpty')}</span>
                 <input value={tunnelLocal} onChange={(e) => setTunnelLocal(e.target.value)} placeholder="0" />
               </label>
-              <label>远程主机
+              <label>{t('remoteHost')}
                 <input value={tunnelRemoteHost} onChange={(e) => setTunnelRemoteHost(e.target.value)} placeholder="127.0.0.1" />
               </label>
-              <label>远程端口
+              <label>{t('remotePort')}
                 <input value={tunnelRemotePort} onChange={(e) => setTunnelRemotePort(e.target.value)} placeholder="3000" />
               </label>
-              <button className="primary" onClick={() => void onCreateTunnel()}><Icon name="plus" size={12} />建立</button>
+              <button className="primary" onClick={() => void onCreateTunnel()}><Icon name="plus" size={12} />{t('establish')}</button>
             </div>
             <div className="modal-note" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              仅监听 127.0.0.1，不暴露到局域网；断开连接时隧道自动失效。
+              {t('tunnelLoopbackNote')}
             </div>
             {tunnels.length === 0 ? (
-              <div className="runtime-empty">还没有隧道</div>
+              <div className="runtime-empty">{t('noTunnels')}</div>
             ) : tunnels.map((tunnel) => (
               <div className="tunnel-row" key={tunnel.id}>
                 <span className={"tunnel-state " + tunnel.state.toLowerCase()}>{tunnel.state}</span>
                 <span className="tunnel-local">{tunnel.local_addr}</span>
                 <span className="tunnel-remote">→ {tunnel.remote_host}:{tunnel.remote_port}</span>
-                <span className="tunnel-conns">{tunnel.active_connections} 连接</span>
+                <span className="tunnel-conns">{t('connectionCount', String(tunnel.active_connections))}</span>
                 {tunnel.state === 'Listening' && (
-                  <button className="mini" onClick={() => { setPreviewUrl("http://" + tunnel.local_addr); setActiveTab('preview'); setTunnelPanelOpen(false) }}><Icon name="eye" size={10} />预览</button>
+                  <button className="mini" onClick={() => { setPreviewUrl("http://" + tunnel.local_addr); setActiveTab('preview'); setTunnelPanelOpen(false) }}><Icon name="eye" size={10} />{t('tunnelPreview')}</button>
                 )}
-                <button className="mini danger" onClick={() => void onCloseTunnel(tunnel.id)}><Icon name="close" size={10} />关闭</button>
+                <button className="mini danger" onClick={() => void onCloseTunnel(tunnel.id)}><Icon name="close" size={10} />{t('close')}</button>
               </div>
             ))}
           </div>
@@ -1366,24 +1389,26 @@ export default function App() {
 
       {settingsOpen && (
         <SettingsPanel
-          autoStart={autoStart} updateCheck={updateCheck} updateBusy={updateBusy} version={__APP_VERSION__} theme={theme} onThemeChange={onThemeChange}
+          autoStart={autoStart} updateCheck={updateCheck} updateBusy={updateBusy} version={__APP_VERSION__} theme={theme} onThemeChange={onThemeChange} language={language} onLanguageChange={onLanguageChange}
           onClose={() => setSettingsOpen(false)}
-          onAutoStart={(enabled) => { setAutoStart(enabled); void setAutostart(enabled).then(setAutoStart).catch((error) => setMessage('自启设置失败：' + String(error))) }}
+          onAutoStart={(enabled) => { setAutoStart(enabled); void setAutostart(enabled).then(setAutoStart).catch((error) => setMessage(t('autostartFailed', String(error)))) }}
           onCheck={() => { setUpdateBusy(true); void checkForUpdates().then(setUpdateCheck).catch((error) => setUpdateCheck({ status: 'error', error: String(error) })).finally(() => setUpdateBusy(false)) }}
-          onInstall={() => { setUpdateBusy(true); void installUpdate().then((result) => { if (result.ok) { setUpdateCheck({ status: 'up-to-date' }); setMessage('更新已安装，重启应用后生效。') } else { setUpdateCheck({ status: 'error', error: result.error ?? '安装失败' }) } }).finally(() => setUpdateBusy(false)) }}
+          onInstall={() => { setUpdateBusy(true); void installUpdate().then((result) => { if (result.ok) { setUpdateCheck({ status: 'up-to-date' }); setMessage(t('updateInstalled')) } else { setUpdateCheck({ status: 'error', error: result.error ?? t('installFailed') }) } }).finally(() => setUpdateBusy(false)) }}
         />
       )}
+
+      {needsLanguagePrompt && <LanguagePrompt language={language} onChoose={onLanguageChange} />}
 
 
       {keyboardInteractiveRequest && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <form className="host-modal" onSubmit={(event) => { event.preventDefault(); void onKeyboardInteractiveAnswer() }}>
             <div className="modal-head">
-              <div><div className="eyebrow">KEYBOARD-INTERACTIVE</div><h2>{keyboardInteractiveRequest.name || '服务器认证'}</h2></div>
+              <div><div className="eyebrow">KEYBOARD-INTERACTIVE</div><h2>{keyboardInteractiveRequest.name || t('serverAuth')}</h2></div>
             </div>
             {keyboardInteractiveRequest.instructions && <p className="modal-note">{keyboardInteractiveRequest.instructions}</p>}
             {keyboardInteractiveRequest.prompts.map((prompt, index) => (
-              <label key={`${keyboardInteractiveRequest.request_id}-${index}`}>{prompt.prompt || `响应 ${index + 1}`}
+              <label key={`${keyboardInteractiveRequest.request_id}-${index}`}>{prompt.prompt || t('responseLabel', String(index + 1))}
                 <input
                   ref={(element) => { if (element) keyboardInteractiveInputs.current[index] = element }}
                   type={prompt.echo ? 'text' : 'password'}
@@ -1393,9 +1418,9 @@ export default function App() {
                 />
               </label>
             ))}
-            <p className="modal-note">响应不会写入 SQLite、日志或工作区快照；请求超过两分钟自动失效。</p>
+            <p className="modal-note">{t('keyboardInteractiveNote')}</p>
             <div className="modal-actions">
-              <button className="primary" type="submit">提交认证</button>
+              <button className="primary" type="submit">{t('submitAuth')}</button>
             </div>
           </form>
         </div>
@@ -1405,15 +1430,15 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">HOST KEY VERIFICATION</div><h2>确认主机密钥</h2></div>
+              <div><div className="eyebrow">HOST KEY VERIFICATION</div><h2>{t('confirmHostKey')}</h2></div>
             </div>
-            <p className="fingerprint-label">服务器 {hostKeyRequest.info.hostname}:{hostKeyRequest.info.port} 的主机密钥指纹：</p>
+            <p className="fingerprint-label">{t('hostKeyFingerprint', hostKeyRequest.info.hostname, String(hostKeyRequest.info.port))}</p>
             <code className="fingerprint">{hostKeyRequest.info.fingerprint}</code>
-            <p className="modal-note">算法 {hostKeyRequest.info.algorithm}。请与服务器所有者核对该指纹；密钥变化将被硬性阻止。</p>
+            <p className="modal-note">{t('hostKeyAlgorithmNote', hostKeyRequest.info.algorithm)}</p>
             <div className="modal-actions">
-              <button className="ghost" onClick={() => void onHostKeyDecision('reject')}>拒绝</button>
-              <button className="ghost" onClick={() => void onHostKeyDecision('trust_once')}>本次信任</button>
-              <button className="primary" onClick={() => void onHostKeyDecision('trust_and_save')}>信任并保存</button>
+              <button className="ghost" onClick={() => void onHostKeyDecision('reject')}>{t('rejectKey')}</button>
+              <button className="ghost" onClick={() => void onHostKeyDecision('trust_once')}>{t('trustOnce')}</button>
+              <button className="primary" onClick={() => void onHostKeyDecision('trust_and_save')}>{t('trustAndSave')}</button>
             </div>
           </div>
         </div>

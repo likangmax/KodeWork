@@ -10,7 +10,8 @@ pub mod host_key;
 pub mod keyboard_interactive;
 
 pub use connection::{
-    AuthMethod, CommandOutput, ConnectionOptions, ProxyCommand, SshConnection, SshExec, SshPty,
+    AuthMethod, CommandExecutionError, CommandOutput, ConnectionOptions, ProxyCommand,
+    SshConnection, SshExec, SshPty,
 };
 
 use std::io;
@@ -30,9 +31,18 @@ pub enum SshError {
     /// No host-key decision arrived before the decision deadline.
     #[error("host key decision timed out")]
     HostKeyDecisionTimeout,
+    /// The local trust database could not be read. This is intentionally
+    /// distinct from an absent record so storage failures cannot become an
+    /// unknown-host prompt.
+    #[error("host-key trust store unavailable: {0}")]
+    HostKeyStoreUnavailable(String),
     /// Authentication failed after all configured methods were tried.
     #[error("authentication failed")]
     AuthenticationFailed,
+    /// Authentication cannot proceed without fresh user-provided credential
+    /// material (for example an encrypted private-key passphrase).
+    #[error("authentication credential is required: {0}")]
+    CredentialRequired(String),
     /// A configured authentication method cannot be used in this build.
     #[error("authentication method is unavailable: {0}")]
     AuthMethodUnavailable(&'static str),
@@ -45,6 +55,11 @@ pub enum SshError {
     /// The remote host could not be reached (DNS/network failure).
     #[error("remote host is unreachable")]
     Unreachable,
+    /// The candidate hostname could not be resolved. This is safe to classify
+    /// separately so address fallback can try a later LAN/Tailscale/manual
+    /// candidate without parsing platform-specific resolver text.
+    #[error("host name resolution failed: {0}")]
+    NameResolution(String),
     /// The operation was cancelled by the caller.
     #[error("connection was cancelled")]
     Cancelled,
@@ -101,16 +116,18 @@ impl From<io::Error> for SshError {
     }
 }
 
-/// Marker for errors that must never trigger automatic address fallback.
+/// Returns whether trying another address for the same logical host is safe.
+/// Keep this as an explicit transport-error allowlist: configuration,
+/// authentication, host identity, cancellation and protocol failures require
+/// user action or investigation and must not be hidden by address fallback.
 #[must_use]
-pub fn host_key_error_is_fatal(error: &SshError) -> bool {
+pub fn address_fallback_is_retryable(error: &SshError) -> bool {
     matches!(
         error,
-        SshError::HostKeyChanged
-            | SshError::HostKeyRejected
-            | SshError::HostKeyDecisionTimeout
-            | SshError::AuthenticationFailed
-            | SshError::AuthMethodUnavailable(_)
+        SshError::Timeout
+            | SshError::ConnectionRefused
+            | SshError::Unreachable
+            | SshError::NameResolution(_)
     )
 }
 
@@ -119,12 +136,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_key_and_auth_failures_do_not_fallback() {
-        assert!(host_key_error_is_fatal(&SshError::HostKeyChanged));
-        assert!(host_key_error_is_fatal(&SshError::AuthenticationFailed));
-        assert!(!host_key_error_is_fatal(&SshError::Timeout));
-        assert!(!host_key_error_is_fatal(&SshError::ConnectionRefused));
-        assert!(!host_key_error_is_fatal(&SshError::Cancelled));
+    fn only_address_transport_failures_fallback() {
+        assert!(!address_fallback_is_retryable(&SshError::HostKeyChanged));
+        assert!(!address_fallback_is_retryable(
+            &SshError::AuthenticationFailed
+        ));
+        assert!(!address_fallback_is_retryable(
+            &SshError::InvalidConfiguration("bad key".into())
+        ));
+        assert!(!address_fallback_is_retryable(&SshError::Cancelled));
+        assert!(address_fallback_is_retryable(&SshError::Timeout));
+        assert!(address_fallback_is_retryable(&SshError::ConnectionRefused));
+        assert!(address_fallback_is_retryable(&SshError::Unreachable));
+        assert!(address_fallback_is_retryable(&SshError::NameResolution(
+            "not found".into()
+        )));
     }
 
     #[test]

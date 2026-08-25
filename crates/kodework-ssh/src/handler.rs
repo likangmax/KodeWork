@@ -7,6 +7,7 @@
 
 use crate::host_key::HostKeyBroker;
 use crate::SshError;
+use kodework_domain::HostId;
 use russh::client::{self, DisconnectReason, Session};
 use russh::keys::ssh_key::PublicKey;
 use russh::ChannelId;
@@ -44,6 +45,7 @@ pub enum SessionEvent {
 pub struct SshHandler {
     hostname: String,
     port: u16,
+    logical_host_id: Option<HostId>,
     host_key: Arc<HostKeyBroker>,
     events: mpsc::Sender<SessionEvent>,
     /// Channel numbers owned by non-terminal traffic (SFTP subsystem,
@@ -58,6 +60,7 @@ impl SshHandler {
     pub fn new(
         hostname: String,
         port: u16,
+        logical_host_id: Option<HostId>,
         host_key: Arc<HostKeyBroker>,
         events: mpsc::Sender<SessionEvent>,
         generation: u64,
@@ -66,6 +69,7 @@ impl SshHandler {
         Self {
             hostname,
             port,
+            logical_host_id,
             host_key,
             events,
             generation,
@@ -101,7 +105,12 @@ impl client::Handler for SshHandler {
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         self.host_key
-            .verify(&self.hostname, self.port, server_public_key)
+            .verify_for_host(
+                self.logical_host_id,
+                &self.hostname,
+                self.port,
+                server_public_key,
+            )
             .await
     }
 

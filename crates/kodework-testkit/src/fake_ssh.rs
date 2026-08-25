@@ -49,6 +49,13 @@ pub enum FakeExecBehavior {
         script: Vec<(String, FakeExecResponse)>,
         fallback: FakeExecResponse,
     },
+    /// Like `Scripted`, but matching persistent prefixes acknowledge exec and
+    /// intentionally leave the channel open to model a daemon owned by SSH.
+    ScriptedWithPersistent {
+        script: Vec<(String, FakeExecResponse)>,
+        fallback: FakeExecResponse,
+        persistent_prefixes: Vec<String>,
+    },
     /// Reject the exec request (channel failure).
     Reject,
 }
@@ -387,6 +394,34 @@ impl server::Handler for FakeHandler {
                     .map(|(_, response)| response)
                     .unwrap_or(fallback);
                 session.channel_success(channel)?;
+                if !response.stdout.is_empty() {
+                    session.data(channel, response.stdout.clone())?;
+                }
+                if !response.stderr.is_empty() {
+                    session.extended_data(channel, 1, response.stderr.clone())?;
+                }
+                session.exit_status_request(channel, response.exit_code)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+            FakeExecBehavior::ScriptedWithPersistent {
+                script,
+                fallback,
+                persistent_prefixes,
+            } => {
+                let command = String::from_utf8_lossy(_data);
+                session.channel_success(channel)?;
+                if persistent_prefixes
+                    .iter()
+                    .any(|prefix| command.starts_with(prefix))
+                {
+                    return Ok(());
+                }
+                let response = script
+                    .iter()
+                    .find(|(prefix, _)| command.starts_with(prefix.as_str()))
+                    .map(|(_, response)| response)
+                    .unwrap_or(fallback);
                 if !response.stdout.is_empty() {
                     session.data(channel, response.stdout.clone())?;
                 }

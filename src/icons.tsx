@@ -27,6 +27,7 @@ const PATHS: Record<string, ReactNode> = {
   zap: <path d="M9 1.5 3.5 9h4l-.5 5.5L12.5 7h-4z" />,
   eye: <><path d="M1.5 8S4 3.5 8 3.5 14.5 8 12 12.5 8 12.5 1.5 8z" /><circle cx="8" cy="8" r="2" /></>,
   power: <path d="M8 2v6M4.6 3.9a6 6 0 1 0 6.8 0" />,
+  mic: <><rect x="5" y="2" width="6" height="8" rx="3" /><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2M5.5 14h5" /></>,
   arrow_up: <path d="M8 12V4M4.5 7 8 3.5 11.5 7" />,
   arrow_down: <path d="M8 4v8M4.5 9 8 12.5 11.5 9" />,
   clipboard: <><rect x="3" y="3.5" width="10" height="11" rx="1.5" /><path d="M6 3.5V2h4v1.5M5.5 7h5M5.5 10h5" /></>,
