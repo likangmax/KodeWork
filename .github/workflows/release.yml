@@ -53,7 +53,7 @@ jobs:
               $workspaceVersions.Count -ne 1 -or $workspaceVersions[0] -ne $expected) {
             throw "Version mismatch: tag=$expected package=$packageVersion tauri=$tauriVersion workspace=$($workspaceVersions -join ',')"
           }
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
