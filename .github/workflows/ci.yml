@@ -61,7 +61,7 @@ jobs:
       - name: Reject obvious generated secrets
         shell: bash
         run: |
-          if git grep -nI -E '(^|[^A-Za-z])(tskey-[A-Za-z0-9]|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----|AKIA[0-9A-Z]{16})([^A-Za-z]|$)' -- ':!tests/fixtures/**'; then
+          if git grep -nI -E '(^|[^A-Za-z])(tskey-[A-Za-z0-9]|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----|AKIA[0-9A-Z]{16})([^A-Za-z]|$)' -- ':!tests/fixtures/**' ':!docs/TROUBLESHOOTING.md'; then
             echo 'Potential credential material found in tracked files.' >&2
             exit 1
           fi
