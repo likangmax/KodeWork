@@ -14,7 +14,8 @@ Start here instead of browsing every Markdown file. The documents are grouped by
 
 ## I am an agent or maintainer
 
-- [Codex current handoff (中文)](HANDOFF-CODEX.zh-CN.md) — current `main` snapshot, verified local/GitHub gates, known gaps, and safe continuation order.
+- **[Codex current handoff (中文)](HANDOFF-CODEX.zh-CN.md)** — current `main` snapshot, verified local/GitHub gates, known gaps, and safe continuation order.
+- **[Next steps (中文)](NEXT-STEPS.md)** — prioritized optimization plan with actionable steps.
 - [Claude Code historical handoff (中文)](HANDOFF-CLAUDE-CODE.zh-CN.md) — archived execution snapshot retained for audit/history; not the current checkout state.
 - [Agent and maintainer guide](AGENT-GUIDE.md) — repository orientation, configuration semantics, safety boundaries, validation gates, and release procedure.
 - [中文 Agent 与维护者指南](AGENT-GUIDE.zh-CN.md) — 面向中文 Agent 的可执行配置、测试、隐私和发布流程。
