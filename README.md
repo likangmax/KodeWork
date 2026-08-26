@@ -114,7 +114,7 @@ See the full boundary and data-flow description in [`docs/ARCHITECTURE.md`](docs
 
 - Windows 10/11 x64
 - Rust 1.98.0 with the MSVC toolchain (the repository toolchain pin is in `rust-toolchain.toml`)
-- Node.js 20+ and npm
+- Node.js 24+ and npm
 - Tauri 2 Windows development prerequisites
 
 ### Commands
