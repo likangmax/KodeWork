@@ -1603,10 +1603,14 @@ impl SessionManager {
             .sftp
             .lock()
             .map_err(|_| "sftp lock poisoned".to_string())? = None;
-        *session
+        if let Some(slot) = session
             .transfers
             .lock()
-            .map_err(|_| "transfers lock poisoned".to_string())? = None;
+            .map_err(|_| "transfers lock poisoned".to_string())?
+            .take()
+        {
+            slot.manager.event_pump_stopped();
+        }
         let bridges = session
             .herdr_bridges
             .lock()

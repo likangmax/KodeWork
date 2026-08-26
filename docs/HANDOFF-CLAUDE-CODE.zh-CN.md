@@ -1,4 +1,6 @@
-# KodeWork → Claude Code 完整交接文档
+# KodeWork → Claude Code 完整交接文档（历史快照）
+
+> **重要：本文档已归档，不代表当前 checkout。** 当前仓库已经合并 PR #8/#18，分支是 `main`，请改读 [`HANDOFF-CODEX.zh-CN.md`](HANDOFF-CODEX.zh-CN.md)。本文保留仅用于追溯 Claude Code 当时的执行上下文。
 
 > 快照时间：2026-08-23（Asia/Shanghai）
 > 工作目录：`D:\OneDrive\AAA_KK\MYCODE\redock-windows`

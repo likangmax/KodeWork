@@ -177,8 +177,8 @@ This guide helps you diagnose and resolve common issues with KodeWork.
 
 3. **Verify key format:**
    - KodeWork supports OpenSSH and PEM formats
-   - Newer OpenSSH keys start with `-----BEGIN OPENSSH PRIVATE KEY-----`
-   - Older PEM keys start with `-----BEGIN RSA PRIVATE KEY-----`
+   - Newer OpenSSH keys use an `OPENSSH PRIVATE KEY` PEM header.
+   - Older PEM keys use an `RSA PRIVATE KEY` PEM header.
 
 **Solutions:**
 

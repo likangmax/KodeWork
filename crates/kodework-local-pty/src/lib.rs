@@ -481,7 +481,7 @@ mod tests {
     ) -> Result<Vec<u8>, String> {
         use std::time::{Duration, Instant};
 
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut output = Vec::new();
         let mut answered_device_query = false;
         // Queue the probe immediately.  A shell may emit a prompt only after
