@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/kodework-icon-master.png" width="112" alt="KodeWork icon">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="KodeWork icon">
 </p>
 
 <h1 align="center">KodeWork</h1>
