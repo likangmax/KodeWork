@@ -73,7 +73,7 @@ KodeWork 不是云端控制平面，不替代 SSH 的主机身份认证，也不
 | SSH 身份 | 未知 Host Key 必须显式确认；已知 Host Key 变化时直接失败 |
 | 凭据 | 密码、口令、Auth Key 等保留在原生安全处理边界内，不作为普通前端/SQLite/日志状态 |
 | CI | 前端 lint/test/build、Windows Rust locked 检查与全量测试、依赖/RustSec/secret policy、Linux/macOS portable core |
-| 发布 | 稳定发布会校验 tag 与 main 的关系、版本一致性；缺少必要 updater/AuthentiCode 签名材料时 fail closed |
+| 发布 | 稳定发布会校验 tag 与 main 的关系、版本一致性；缺少必要 updater/Authenticode 签名材料时 fail closed |
 | 项目成熟度 | 仍是持续开发的 `0.x` 项目；未验证项保持明确可见，不会包装成已发布能力 |
 
 这些结论的证据入口见：[项目状态](docs/STATUS.md)、[发布矩阵](docs/RELEASE-MATRIX.md)、[Windows 测试矩阵](docs/TEST-MATRIX-WINDOWS.md)、[架构说明](docs/ARCHITECTURE.md) 和 [安全策略](SECURITY.md)。
