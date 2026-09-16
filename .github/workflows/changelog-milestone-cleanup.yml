@@ -1,0 +1,60 @@
+name: One-shot changelog milestone cleanup
+
+on:
+  push:
+    branches:
+      - docs/changelog-milestone-history
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Relabel duplicate non-release 0.1.0 milestones exactly
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/CHANGELOG.md')
+          text = path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  '## [0.1.0] — 2026-08-14 — M0 工程重构完成',
+                  '## Historical development milestone — 2026-08-14 — M0 工程重构完成',
+              ),
+              (
+                  '## [0.1.0] — 2026-08-15 — M3 完成：语音输入 / Snippets / Yazi / Workspace Controls / kodework-agent / 签名更新器',
+                  '## Historical development milestone — 2026-08-15 — M3 完成：语音输入 / Snippets / Yazi / Workspace Controls / kodework-agent / 签名更新器',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one heading {old!r}, found {count}')
+              text = text.replace(old, new)
+
+          if '\n## [0.1.0]' in text or text.startswith('## [0.1.0]'):
+              raise SystemExit('unexpected [0.1.0] release-style heading remains')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          test "$(git diff --name-only)" = "docs/CHANGELOG.md"
+      - name: Commit verified cleanup and remove this one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm .github/workflows/changelog-milestone-cleanup.yml
+          git add -A
+          actual="$(git diff --cached --name-only | sort)"
+          expected="$(printf '%s\n' '.github/workflows/changelog-milestone-cleanup.yml' 'docs/CHANGELOG.md' | sort)"
+          test "$actual" = "$expected"
+          git commit -m "docs: relabel non-release 0.1.0 development milestones"
+          git push origin HEAD:docs/changelog-milestone-history
