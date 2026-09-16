@@ -30,7 +30,7 @@ jobs:
           from pathlib import Path
 
           path = Path('crates/kodework-local-pty/src/lib.rs')
-          text = path.read_text()
+          text = path.read_text(encoding='utf-8')
 
           def replace_once(source: str, old: str, new: str, label: str) -> str:
               count = source.count(old)
@@ -97,7 +97,7 @@ jobs:
               'resize/session-limit test serialization',
           )
 
-          path.write_text(text)
+          path.write_text(text, encoding='utf-8')
           PY
           cargo fmt --all
           git diff --check
