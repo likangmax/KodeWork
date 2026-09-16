@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to package (for example v0.2.3)
+        description: Existing stable tag to package (vX.Y.Z)
         required: true
         type: string
 
