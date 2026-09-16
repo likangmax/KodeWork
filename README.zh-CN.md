@@ -40,6 +40,22 @@ KodeWork 把一台私有 Linux 机器变成可恢复的远程编码工作区，�
 
 KodeWork 不是云端控制平面，不替代 SSH 的主机身份认证，也不会因为 Rust 核心在 macOS/Linux CI 上通过就声称已经发布原生 macOS/Linux 桌面版。
 
+
+## 产品界面
+
+以下截图由当前 KodeWork 界面直接渲染，并使用仅供文档展示的合成数据。图中的账号、文件名、路径、终端输出以及 `192.0.2.0/24` / `198.51.100.0/24` TEST-NET 地址均为示例，不包含真实主机、tailnet、凭据或私人会话数据。
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/workspace-terminal.png" alt="KodeWork 已连接工作区，显示合成数据的远程终端会话"></td>
+    <td width="50%"><img src="docs/assets/readme/files-transfers.png" alt="KodeWork SFTP 文件界面，显示合成项目文件和正在进行的传输"></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/assets/readme/workstation-config.png" width="620" alt="KodeWork 工作站配置界面，显示合成 testuser 账号和 TEST-NET 地址">
+</p>
+
 ## 快速开始
 
 ### 1. 安装
