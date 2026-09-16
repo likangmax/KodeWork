@@ -23,7 +23,7 @@ The immediate focus is making the existing Windows remote-development loop more 
 
 - complete the evidence needed for the next stable Windows release without weakening updater-signature or Authenticode gates;
 - keep GitHub Releases as the distribution source of truth and avoid source-version/release ambiguity;
-- require the dependency/security policy check through repository branch protection when administration settings are updated;
+- keep the required `rust` status context dependent on both Windows Rust validation and the dependency/security policy gate;
 - keep release/workflow paths explicitly owned and third-party Actions pinned to full commit SHAs;
 - keep ordinary automated dependency updates behind a cooldown while allowing security updates to surface immediately.
 
@@ -36,7 +36,7 @@ The immediate focus is making the existing Windows remote-development loop more 
 
 ### Accessibility and frontend quality
 
-Modal accessible-name coverage now has a regression test. The next focused cleanup is to remove the React lifecycle warnings surfaced by the newer lint rules without mixing that work into release maintenance ([#33](https://github.com/likangmax/KodeWork/issues/33)).
+Modal accessible-name coverage has a regression test, React lifecycle/hook lint warnings are kept at zero, and the document language follows the selected application language. Continue improving keyboard navigation and accessibility semantics as individual workspace surfaces evolve.
 
 ### Connection and recovery
 

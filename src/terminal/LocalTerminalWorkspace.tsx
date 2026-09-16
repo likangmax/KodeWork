@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react'
 import type { LocalTerminalCapabilities, LocalTerminalDescriptor, LocalTerminalKind } from '../api'
 import { localTerminalCapabilities, localTerminalClose, localTerminalOpen } from '../api'
 import { Icon } from '../icons'
@@ -22,8 +22,13 @@ export const LocalTerminalWorkspace = memo(function LocalTerminalWorkspace({ lan
   const [activeId, setActiveId] = useState<number | null>(null)
   const [wslDistribution, setWslDistribution] = useState('')
   const [opening, setOpening] = useState<LocalTerminalKind | null>(null)
-  const terminalsRef = useRef<LocalTerminalDescriptor[]>([])
-  terminalsRef.current = terminals
+
+  const reportCapabilityError = useEffectEvent((error: unknown) => {
+    onStatus(t('localCapabilitiesFailed', String(error)))
+  })
+  const closeOpenTerminals = useEffectEvent(() => {
+    for (const terminal of terminals) void localTerminalClose(terminal.id).catch(() => {})
+  })
 
   const refreshCapabilities = useCallback(async () => {
     try {
@@ -35,7 +40,17 @@ export const LocalTerminalWorkspace = memo(function LocalTerminalWorkspace({ lan
     }
   }, [t, onStatus])
 
-  useEffect(() => { void refreshCapabilities() }, [refreshCapabilities])
+  useEffect(() => {
+    let active = true
+    void localTerminalCapabilities().then((result) => {
+      if (!active) return
+      setCapabilities(result)
+      setWslDistribution((current) => current || result.wsl_distributions[0] || '')
+    }).catch((error) => {
+      if (active) reportCapabilityError(error)
+    })
+    return () => { active = false }
+  }, [])
 
   const openTerminal = useCallback(async (kind: LocalTerminalKind) => {
     if (kind === 'wsl' && !wslDistribution) {
@@ -64,9 +79,7 @@ export const LocalTerminalWorkspace = memo(function LocalTerminalWorkspace({ lan
     })
   }, [t, onStatus])
 
-  useEffect(() => () => {
-    for (const terminal of terminalsRef.current) void localTerminalClose(terminal.id).catch(() => {})
-  }, [])
+  useEffect(() => () => { closeOpenTerminals() }, [])
 
   const available = useMemo(() => capabilities ?? {
     powershell: false, command_prompt: false, wsl: false, wsl_distributions: [],

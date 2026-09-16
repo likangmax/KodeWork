@@ -54,12 +54,12 @@ Herdr 和 tmux 不是建立 SSH 连接的必需品。如果希望 Windows 重启
 
 1. 打开 GitHub 最新 Release。
 2. 在附件中下载 Windows x64 MSI。
-3. Release 提供 SHA-256 时，将下载文件的校验值与之比较。
-4. 运行 MSI。项目取得 Authenticode 证书前，社区构建可能显示“未知发布者”。
+3. Release 提供 SHA-256 校验值/清单时，先核对下载的 MSI。
+4. 对按当前稳定版发布策略生成的安装包，运行前用 `Get-AuthenticodeSignature .\Kode*.msi` 验证 Windows Authenticode。若签名无效、发布者异常，或 SmartScreen 出现不符合预期的信任警告，不要直接选择“仍要运行”，应先核对发布来源和签名。
 5. 第一次启动 KodeWork 时选择 **简体中文** 或 **English**。
 6. 以后可以打开 **设置 / Settings** 修改语言。
 
-语言选择是 KodeWork 首次启动页面；当前 MSI 安装向导本身还没有中英文选择页面。
+语言选择是 KodeWork 首次启动页面；当前 MSI 安装向导本身还没有中英文选择页面。历史版本可能采用过更早的签名策略，具体应以对应 Release 说明和[发布矩阵](RELEASE-MATRIX.md)为准。
 
 用同一应用标识的新 MSI 安装时，会覆盖升级旧版本并保留本地应用数据。除非 Release 明确要求，否则不需要先卸载。
 

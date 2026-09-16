@@ -54,12 +54,12 @@ Start with the simplest working path. Add fallback addresses only after the firs
 
 1. Open the latest GitHub Release.
 2. Download the Windows x64 MSI listed in the release assets.
-3. Compare its SHA-256 with the value in the release notes when one is provided.
-4. Run the MSI. Community builds may show an unknown-publisher warning until the project has an Authenticode certificate.
+3. Verify the MSI SHA-256 against the published release checksum/manifest when one is provided.
+4. For a release produced under the current stable policy, verify Windows Authenticode before running the MSI: `Get-AuthenticodeSignature .\Kode*.msi`. If the signature is invalid/unexpected or SmartScreen presents an unexpected trust warning, stop and verify the artifact instead of bypassing the warning.
 5. Launch KodeWork and choose **简体中文** or **English** at the first-launch prompt.
 6. To change the language later, open **Settings / 设置**, select a language, then close the panel.
 
-The language prompt belongs to KodeWork. The current MSI wizard itself is not localized.
+The language prompt belongs to KodeWork. The current MSI wizard itself is not localized. Historical releases may have been produced under an older signing policy; use the release notes and [release matrix](RELEASE-MATRIX.md) for the evidence that applies to a particular artifact.
 
 Installing a newer MSI with the same application identity upgrades the existing installation and keeps local application data. Do not uninstall first unless the release notes explicitly require it.
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useEffectEvent } from 'react'
 
 /**
  * Browser timers are throttled while Windows sleeps. On resume/focus/network
@@ -6,15 +6,15 @@ import { useEffect, useRef } from 'react'
  * the regular three-second session poll.
  */
 export const useResumeRecovery = (enabled: boolean, recover: () => void) => {
-  const recoverRef = useRef(recover)
-  recoverRef.current = recover
+  const onRecover = useEffectEvent(recover)
+
   useEffect(() => {
     if (!enabled) return
     let timer: number | null = null
     const schedule = () => {
       if (document.visibilityState === 'hidden') return
       if (timer !== null) window.clearTimeout(timer)
-      timer = window.setTimeout(() => recoverRef.current(), 150)
+      timer = window.setTimeout(() => onRecover(), 150)
     }
     window.addEventListener('focus', schedule)
     window.addEventListener('online', schedule)
