@@ -93,9 +93,7 @@ await page.addInitScript(() => {
           case 'connect_host': return 'Connected to Demo Workstation'
           case 'disconnect_host': return null
           case 'session_state': return 'Ready'
-          case 'session_runtime_subscribe':
-            setTimeout(() => emit(args.onEvent, { state: 'Ready', generation: 1 }), 80)
-            return null
+          case 'session_runtime_subscribe': return null
           case 'open_pane': return [1, 1]
           case 'close_pane':
           case 'send_input':
