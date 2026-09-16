@@ -1,0 +1,55 @@
+name: Capture documentation screenshots
+
+on:
+  push:
+    branches: [docs/readme-product-screenshots]
+    paths:
+      - scripts/capture-docs-screenshots.mjs
+      - .github/workflows/capture-docs-screenshots.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install ephemeral browser capture dependency
+        run: |
+          npm install --no-save --package-lock=false playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Start real KodeWork frontend
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 4173 > /tmp/kodework-vite.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4173/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/kodework-vite.log
+          exit 1
+      - name: Capture sanitized product UI
+        run: node scripts/capture-docs-screenshots.mjs
+      - name: Commit generated screenshots
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/assets/readme/*.png
+          git diff --cached --exit-code && exit 0
+          git commit -m 'docs: capture sanitized product screenshots'
+          git push
+      - name: Upload screenshots for visual verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kodework-readme-screenshots
+          path: docs/assets/readme/*.png
+          if-no-files-found: error
