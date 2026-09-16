@@ -98,7 +98,7 @@
 - 真实 auth-key 注册与真实远端 Herdr/剪贴板联调仍需在用户目标机完成；本机 daemon
   控制管道、协议和全量自动化门禁已通过。
 
-## [0.1.0] — 2026-08-14 — M0 工程重构完成
+## Historical development milestone — 2026-08-14 — M0 工程重构完成
 
 ### 新增
 
@@ -142,7 +142,7 @@
 - 无 Tauri Channel 终端流、托盘/自启/单实例、host_keys 持久化。
 - 无集成测试与故障测试（16.2/16.3 矩阵）。
 
-## [0.1.0] — 2026-08-15 — M3 完成：语音输入 / Snippets / Yazi / Workspace Controls / kodework-agent / 签名更新器
+## Historical development milestone — 2026-08-15 — M3 完成：语音输入 / Snippets / Yazi / Workspace Controls / kodework-agent / 签名更新器
 
 ### 新增
 
