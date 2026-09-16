@@ -1,8 +1,8 @@
 # KodeWork roadmap
 
-KodeWork is an actively developed `0.x` project. This roadmap describes the direction of the public project without turning planned work into release promises.
+KodeWork is an actively developed `0.x` project. This roadmap describes public direction without turning planned work into release-date promises.
 
-For the exact capability that is available **today**, use [`docs/STATUS.md`](docs/STATUS.md) and [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) as the source of truth.
+For exact capability **today**, use [`docs/STATUS.md`](docs/STATUS.md) and [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) as the source of truth. For installable binaries, use [GitHub Releases](https://github.com/likangmax/KodeWork/releases); the source tree can be ahead of the latest published installer.
 
 ## Current release scope
 
@@ -13,11 +13,30 @@ For the exact capability that is available **today**, use [`docs/STATUS.md`](doc
 - **Files and assets:** SFTP browsing/transfers plus screenshot/image/PDF paste workflows
 - **Local terminals:** PowerShell, Command Prompt, and WSL on Windows
 
-Passing cross-platform Rust CI does **not** mean that macOS or Linux desktop packages are released. Native packaging, signing, installation, GUI smoke tests, sidecars, and release assets must pass on each platform before support is claimed.
+Passing cross-platform Rust CI does **not** mean macOS or Linux desktop packages are released. Native packaging, signing, installation, GUI smoke tests, sidecars, and release assets must pass on each platform before support is claimed.
 
-## Now — reliability and contributor experience
+## Now — release evidence, trust, and contributor experience
 
-The immediate focus is making the existing Windows remote-development loop easier to trust and easier to contribute to.
+The immediate focus is making the existing Windows remote-development loop easier to trust, easier to verify, and easier to contribute to.
+
+### Release and repository trust
+
+- complete the evidence needed for the next stable Windows release without weakening updater-signature or Authenticode gates;
+- keep GitHub Releases as the distribution source of truth and avoid source-version/release ambiguity;
+- require the dependency/security policy check through repository branch protection when administration settings are updated ([#29](https://github.com/likangmax/KodeWork/issues/29));
+- keep release/workflow paths explicitly owned and keep third-party Actions pinned to full commit SHAs;
+- keep ordinary automated dependency updates behind a cooldown while allowing security updates to surface immediately.
+
+### Public OSS surface
+
+- add real, sanitized product screenshots using synthetic infrastructure only ([#26](https://github.com/likangmax/KodeWork/issues/26));
+- keep README, support, security, contribution, agent, release, and documentation-map pages consistent;
+- keep a small set of well-scoped contributor tasks instead of a speculative backlog;
+- preserve the distinction between configured, tested, verified, supported, and released.
+
+### Accessibility and frontend quality
+
+Modal accessible-name coverage now has a regression test. The next focused cleanup is to remove the React lifecycle warnings surfaced by the newer lint rules without mixing that work into release maintenance ([#33](https://github.com/likangmax/KodeWork/issues/33)).
 
 ### Connection and recovery
 
@@ -33,33 +52,25 @@ The immediate focus is making the existing Windows remote-development loop easie
 - continue hardening pause/resume/retry/cancel and destination-conflict behavior;
 - avoid performance changes that weaken transfer integrity or observability.
 
-### Public OSS surface
-
-- keep issue forms, contribution guidance, agent instructions, and release evidence current;
-- keep dependency/security gates current and remediate actionable advisories rather than suppressing them;
-- add sanitized product screenshots/demo material that contains no real infrastructure or credentials;
-- improve accessibility and keyboard behavior in focused, testable increments;
-- maintain a small set of well-scoped contributor tasks instead of a speculative backlog.
-
-Contribution-ready work is tracked in [GitHub Issues](https://github.com/likangmax/KodeWork/issues). Tasks suitable for a first contribution are labeled `good first issue` when such a label applies.
+Contribution-ready work is tracked in [GitHub Issues](https://github.com/likangmax/KodeWork/issues). Tasks suitable for a first contribution are labeled `good first issue` when appropriate.
 
 ## Next — product polish and verification depth
 
-These items are planned directions, not committed release dates.
+These are directions, not committed release dates.
 
 - expand native Windows acceptance coverage for installer, upgrade/uninstall, sleep/resume, scaling, CJK/IME, clipboard, and long-running sessions;
-- improve keyboard navigation and accessibility semantics across modal and workspace surfaces;
+- improve keyboard navigation and accessibility semantics across workspace surfaces;
 - add targeted regression/integration tests around high-risk state transitions;
 - profile startup, terminal, reconnect, and transfer hot paths before optimizing them;
 - improve troubleshooting output while keeping secrets and private terminal/file content out of durable diagnostics;
-- make release notes and documentation easier to verify against actual code and test evidence.
+- improve release notes and evidence so public claims are easy to trace back to code/tests/artifacts.
 
 ## Later — distribution and additional platforms
 
 ### Windows distribution
 
-- configure a trusted commercial Authenticode signing path for stable public releases;
-- publish and verify an updater manifest/service before claiming automatic updates are available;
+- establish and continuously verify a trusted Authenticode signing path for stable public releases;
+- publish and probe a public updater manifest/service before claiming automatic updates are available;
 - keep updater signing and Authenticode as separate trust layers.
 
 ### macOS and Linux desktop
@@ -73,7 +84,7 @@ KodeWork will only call a desktop platform supported after the native target has
 5. signing/notarization requirements where applicable;
 6. release assets and documentation.
 
-The portable Rust checks are useful groundwork, but are not substitutes for those native acceptance steps. See [`docs/CROSS-PLATFORM-ROADMAP.md`](docs/CROSS-PLATFORM-ROADMAP.md) for the technical exploration.
+Portable Rust checks are useful groundwork, but are not substitutes for native acceptance. See [`docs/CROSS-PLATFORM-ROADMAP.md`](docs/CROSS-PLATFORM-ROADMAP.md) for technical exploration.
 
 ## How roadmap items become releases
 
@@ -82,15 +93,16 @@ A roadmap item is not considered shipped because code exists or a unit test pass
 - automated tests for deterministic logic;
 - native Windows testing for desktop/GUI behavior;
 - protected real-network testing for SSH/Tailscale/jump-host behavior when required;
-- release workflow evidence for packaging/signing/distribution claims.
+- release workflow/artifact evidence for packaging, signing, and distribution claims.
 
-Known gaps should remain visible as `not tested`, `not available`, or `not released` until the corresponding evidence exists.
+Known gaps remain visible as `not tested`, `not available`, or `not released` until the corresponding evidence exists.
 
-## Non-goals for the roadmap
+## Non-goals
 
 - no artificial star/download targets;
 - no platform-support claims based only on compilation;
 - no security guarantees that exceed the documented threat model;
-- no feature dates that the project cannot responsibly commit to.
+- no feature dates the project cannot responsibly commit to;
+- no weakening of trust/signing/CI boundaries for release convenience.
 
-If you want to propose a change, start with the [feature request form](https://github.com/likangmax/KodeWork/issues/new/choose) or a [GitHub Discussion](https://github.com/likangmax/KodeWork/discussions). For vulnerabilities, follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
+To propose a change, use the [feature request form](https://github.com/likangmax/KodeWork/issues/new/choose) or [GitHub Discussions](https://github.com/likangmax/KodeWork/discussions). For help, see [`SUPPORT.md`](SUPPORT.md). For vulnerabilities, follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.

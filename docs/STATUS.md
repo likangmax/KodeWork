@@ -1,6 +1,20 @@
 # KodeWork project status
 
-KodeWork is under active development. The currently distributable desktop product is Windows 10/11 x64. The portable Rust core is checked on Windows, Linux, and macOS, but native macOS and Linux desktop packages are not yet released.
+KodeWork is an actively developed `0.x` project. The currently released desktop target is **Windows 10/11 x64**. Selected portable Rust crates are checked on Windows, Linux, and macOS, but native macOS/Linux desktop packages are not released.
+
+Installable distribution is determined by [GitHub Releases](https://github.com/likangmax/KodeWork/releases), not by the version field in the `main` branch. The source tree may contain unreleased version metadata and changes.
+
+## Status vocabulary
+
+KodeWork documentation uses these terms deliberately:
+
+- **configured** — a code/configuration path exists;
+- **tested** — a relevant automated or manual test was executed;
+- **verified** — the required evidence for the stated environment/claim was observed;
+- **supported** — the project is willing to treat the capability/platform as part of the supported product surface;
+- **released** — an installable artifact was published through the official release channel.
+
+These states are not interchangeable. Compilation or CI success alone does not make a desktop platform released.
 
 ## Current release scope
 
@@ -10,36 +24,66 @@ KodeWork is under active development. The currently distributable desktop produc
 - SFTP browsing and streaming transfers with pause, resume, retry, and cancel
 - Clipboard text, image, and PDF handling for an active remote terminal
 - Herdr and tmux discovery and attach workflows
-- Embedded userspace or system-daemon Tailscale address paths
+- Embedded-userspace or system-daemon Tailscale address paths
 - Local PowerShell, Command Prompt, and WSL terminals through Windows ConPTY
 - Projects, Actions, Runs, SSH tunnels, and loopback Web Preview
-- Tray, autostart, single-instance behavior, themes, and updater signature verification support
+- Tray, autostart, single-instance behavior, themes, and updater-signature verification support
+- English and Simplified Chinese application/user documentation surfaces
 
-## Reliability hardening in progress
+## Reliability and security hardening present in the current source tree
 
 - Background Runs remain `Running` only while their owned tmux session is observable; launcher success is not command success. Started-only evidence is `Unknown`.
 - Quick Actions enforce their configured local observation deadline; a transport timeout is not proof that the remote process was terminated, so unresolved results remain `Unknown` and reconcilable.
-- On startup, queued or running Quick Runs left by a terminated desktop process become `Unknown`, never an invented terminal `Interrupted`; Quick and Background Runs remain reconcilable from remote metadata.
-- Run history snapshots its command and ownership so editing or deleting an Action does not rewrite or erase old records.
-- Run history stores lifecycle metadata and byte counts only; stdout/stderr previews are ephemeral, and migration 11 clears previews persisted by older versions.
-- SFTP resume verifies the existing partial prefix byte-for-byte before seeking; real SFTP `~` paths are expanded through the server API before identity/IO operations.
-- SFTP destination leases reject concurrent writes to the same local or scoped remote target, and transfers verify source metadata again before final commit.
-- Herdr bridges are SSH-channel-owned and stopped by a first-class `BridgeId`; no detached process or pattern-kill cleanup is used.
-- SSH host-key trust is bound to the logical HostId across LAN, Tailscale, and public fallback addresses (schema v10), with legacy address records retained for compatibility.
-- Host-key store read failures block verification instead of being treated as an unknown key; lookups do not mutate trust state.
-- Reconnect attempts are native, typed, single-flight per host, and the renderer observes a native runtime Channel rather than polling lifecycle state.
+- On startup, queued/running Quick Runs left by a terminated desktop process become `Unknown`, never an invented terminal result.
+- Run history snapshots command/ownership lifecycle metadata while keeping terminal output and credentials out of durable history.
+- SFTP resume verifies the existing partial prefix byte-for-byte before seeking, and destination leases reject concurrent writes to the same target.
+- Transfers revalidate source metadata before final commit; real SFTP `~` paths are expanded through the server API before identity/IO operations.
+- Herdr bridges are SSH-channel-owned and stopped by a scoped `BridgeId`; cleanup does not rely on detached pattern-kill behavior.
+- SSH host-key trust is bound to logical HostId across LAN/Tailscale/public fallback addresses, and trust-store read failures block verification.
+- Reconnect attempts are native, typed, and single-flight per host; the renderer observes native runtime state rather than owning connection truth.
 - Unknown Action commands require review confirmation by default; only clearly observational commands are classified Safe.
-- Interactive Actions are dispatched to the PTY and intentionally excluded from terminal Run history because the native layer cannot observe their eventual shell exit.
+- Modal dialogs expose accessible names with a focused regression test.
 
-## Verification policy
+## Verification baseline
 
-Every pull request must pass formatting, locked Clippy with warnings denied, the full locked Rust workspace tests, frontend lint/tests/build, dependency audits, and the tracked-secret pattern gate. The repository pins Rust CI to 1.98.0 so toolchain upgrades happen deliberately. Platform or network behavior is marked verified only when it has been exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for current evidence and explicit gaps.
+The repository CI currently includes five independent job families:
 
-## Known distribution limits
+1. frontend install/lint/tests/production build;
+2. Windows Rust sidecar preparation, formatting, locked Clippy with warnings denied, and full locked workspace tests;
+3. dependency/security policy including production npm audit, RustSec audit, and tracked-secret pattern rejection;
+4. portable Rust checks/tests on Linux;
+5. portable Rust checks/tests on macOS.
 
-- The client contains updater signature verification support, but public updater hosting, a reachable manifest, and release-specific asset/signature probes are not configured as a public service yet. Do not claim automatic updates are available until those probes pass.
-- Stable release workflow now hard-fails unless a trusted commercial Authenticode certificate thumbprint is configured; preview/developer builds remain the place for unsigned installers. Updater signatures and Authenticode are separate trust layers.
-- Native macOS and Linux packaging, signing, and GUI validation remain future work; their core portability checks do not make them released desktop targets.
+Workflow configuration is not the same as repository-settings enforcement. Branch protection/rulesets determine which checks GitHub requires before merge; any enforcement gap should remain tracked explicitly rather than being inferred from a green workflow file.
+
+Platform or network behavior is marked verified only when exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for native evidence expectations.
+
+## Release and distribution boundaries
+
+- Stable Windows release publication validates tag lineage/version consistency and expects immutable MSI, updater signature, and SHA-256 assets.
+- The stable release path fails closed when the required Tauri updater signing key or trusted Authenticode certificate configuration is unavailable.
+- Tauri updater signatures and Windows Authenticode are separate trust layers.
+- Updater signature-verification support in the application is **not** the same as a public automatic-update service. Public updater hosting/manifest reachability must be independently verified before that capability is claimed.
+- Native macOS and Linux packaging, signing/notarization, GUI validation, and release assets remain future work.
 - WSL availability depends on the local Windows installation and installed distributions.
 
-Security issues should be reported using [SECURITY.md](../SECURITY.md), not a public issue.
+## Open public-quality work
+
+Current tracked follow-ups include:
+
+- sanitized real product screenshots for README presentation ([#26](https://github.com/likangmax/KodeWork/issues/26));
+- repository-setting enforcement for the dependency/security policy check ([#29](https://github.com/likangmax/KodeWork/issues/29));
+- cleanup of React hook/lifecycle lint warnings surfaced by newer lint rules ([#33](https://github.com/likangmax/KodeWork/issues/33)).
+
+These items are visible precisely because the project does not treat a planned control or polish task as already completed.
+
+## Where to verify claims
+
+- installable artifacts: [GitHub Releases](https://github.com/likangmax/KodeWork/releases)
+- user-visible history: [CHANGELOG.md](CHANGELOG.md)
+- platform/release contract: [RELEASE-MATRIX.md](RELEASE-MATRIX.md)
+- Windows native evidence: [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md)
+- architecture/security boundaries: [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](../SECURITY.md)
+- public direction: [ROADMAP.md](../ROADMAP.md)
+
+Security issues should be reported privately using [SECURITY.md](../SECURITY.md), not a public issue.
