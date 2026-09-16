@@ -78,7 +78,6 @@ jobs:
           changelog.write_text(text.replace(marker, marker + section, 1), encoding='utf-8')
 
           replace_once('.github/ISSUE_TEMPLATE/bug_report.yml', '      placeholder: "0.2.3"', '      placeholder: "x.y.z"')
-          replace_once('.github/workflows/release.yml', '        description: Existing tag to package (for example v0.2.3)', '        description: Existing stable tag to package (vX.Y.Z)')
           PY
       - name: Verify release version consistency
         shell: bash
