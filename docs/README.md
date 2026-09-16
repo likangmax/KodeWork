@@ -59,7 +59,7 @@ A version field in `main` or a successful compile is not a substitute for publis
 - [Support policy](../SUPPORT.md) — user-support boundaries and public-data hygiene.
 - [Roadmap](../ROADMAP.md) — public project direction and planned areas of work.
 
-Repository history remains available through Git and GitHub. Transient handoff notes, AI-tool-specific instructions, and superseded planning snapshots are intentionally not kept in the current documentation tree.
+Repository history remains available through Git and GitHub; superseded planning notes are not part of the current documentation set.
 
 ## Documentation maintenance rules
 
