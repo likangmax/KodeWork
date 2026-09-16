@@ -22,11 +22,20 @@ body:
   - type: dropdown
     id: windows
     attributes:
-      label: Windows version
+      label: Windows major version
       options:
         - Windows 11
         - Windows 10
         - Other / unknown
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows release / OS build
+      description: Open `winver` and report the release/build shown there. Exact builds help diagnose Windows-specific regressions.
+      placeholder: "Windows 11 24H2, OS Build 26100.x"
     validations:
       required: true
 
