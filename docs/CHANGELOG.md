@@ -48,7 +48,7 @@
 - SFTP 流式块从 64 KiB 提升到 256 KiB，在途写请求 8→16，SSH 接收窗口 2→8 MiB；高吞吐进度更新按时间限流。
 - 断点下载改为远端 seek，不再重新传输已经存在于本地 `.part` 的前缀。
 
-## [Unreleased] — 2026-08-16 — 成品候选收口
+## Historical development snapshot — 2026-08-16 — 成品候选收口
 
 ### 修复与验收
 
@@ -71,7 +71,7 @@
   标志；重新生成 Windows ICO、任务栏/托盘 PNG、Store、iOS 与 Android 尺寸资源。
 - 自动化覆盖范围与仍需真机验证的项目见 [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md)。
 
-## [Unreleased] — 2026-08-15 — Codex 深度审计第一阶段
+## Historical development snapshot — 2026-08-15 — Codex 深度审计第一阶段
 
 ### 安全与正确性
 
