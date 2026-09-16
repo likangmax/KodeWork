@@ -15,7 +15,7 @@ body:
     attributes:
       label: KodeWork version
       description: Use the About dialog or release tag when possible.
-      placeholder: "0.2.3"
+      placeholder: "x.y.z"
     validations:
       required: true
 

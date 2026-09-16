@@ -1170,7 +1170,7 @@ export default function App() {
       )}
 
       {promptPassword && selected && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="password-dialog-title">
           <form className="host-modal" onSubmit={(event) => {
             event.preventDefault()
             const passwordValue = passwordInputRef.current?.value ?? ''
@@ -1187,7 +1187,7 @@ export default function App() {
             }
           }}>
             <div className="modal-head">
-              <div><div className="eyebrow">AUTHENTICATION</div><h2>{t('connectTo', selected.label)}</h2></div>
+              <div><div className="eyebrow">AUTHENTICATION</div><h2 id="password-dialog-title">{t('connectTo', selected.label)}</h2></div>
               <button type="button" className="ghost" onClick={() => {
                 if (passwordInputRef.current) passwordInputRef.current.value = ''
                 setPromptPassword(false)
@@ -1210,10 +1210,10 @@ export default function App() {
       )}
 
       {projectDraft && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PROJECT</div><h2>{t('editProject')}</h2></div>
+              <div><div className="eyebrow">PROJECT</div><h2 id="project-dialog-title">{t('editProject')}</h2></div>
               <button type="button" className="ghost" onClick={() => setProjectDraft(null)}>{t('close')}</button>
             </div>
             <label>{t('nameLabel')}
@@ -1231,10 +1231,10 @@ export default function App() {
       )}
 
       {actionDraft && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="action-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">ACTION</div><h2>{t('editAction')}</h2></div>
+              <div><div className="eyebrow">ACTION</div><h2 id="action-dialog-title">{t('editAction')}</h2></div>
               <button type="button" className="ghost" onClick={() => setActionDraft(null)}>{t('close')}</button>
             </div>
             <label>{t('nameLabel')}
@@ -1286,10 +1286,10 @@ export default function App() {
       )}
 
       {confirmAction && selected && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-action-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">CONFIRM</div><h2>{t('confirmRunAction')}</h2></div>
+              <div><div className="eyebrow">CONFIRM</div><h2 id="confirm-action-dialog-title">{t('confirmRunAction')}</h2></div>
             </div>
             <p className="modal-note">{t('actionWillRun', confirmAction.name, confirmAction.danger_level)}</p>
             <code className="fingerprint">{confirmAction.command}</code>
@@ -1302,10 +1302,10 @@ export default function App() {
       )}
 
       {snippetsOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="snippets-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">SNIPPETS</div><h2>{t('commandSnippets')}</h2></div>
+              <div><div className="eyebrow">SNIPPETS</div><h2 id="snippets-dialog-title">{t('commandSnippets')}</h2></div>
               <button type="button" className="ghost" onClick={() => setSnippetsOpen(false)}>{t('close')}</button>
             </div>
             {snippetDraft ? (
@@ -1348,10 +1348,10 @@ export default function App() {
       )}
 
       {tunnelPanelOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tunnels-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PORT FORWARDING</div><h2>{t('sshTunnels')}</h2></div>
+              <div><div className="eyebrow">PORT FORWARDING</div><h2 id="tunnels-dialog-title">{t('sshTunnels')}</h2></div>
               <button type="button" className="ghost" onClick={() => setTunnelPanelOpen(false)}>{t('close')}</button>
             </div>
             <div className="tunnel-form">
@@ -1401,10 +1401,10 @@ export default function App() {
 
 
       {keyboardInteractiveRequest && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="keyboard-interactive-dialog-title">
           <form className="host-modal" onSubmit={(event) => { event.preventDefault(); void onKeyboardInteractiveAnswer() }}>
             <div className="modal-head">
-              <div><div className="eyebrow">KEYBOARD-INTERACTIVE</div><h2>{keyboardInteractiveRequest.name || t('serverAuth')}</h2></div>
+              <div><div className="eyebrow">KEYBOARD-INTERACTIVE</div><h2 id="keyboard-interactive-dialog-title">{keyboardInteractiveRequest.name || t('serverAuth')}</h2></div>
             </div>
             {keyboardInteractiveRequest.instructions && <p className="modal-note">{keyboardInteractiveRequest.instructions}</p>}
             {keyboardInteractiveRequest.prompts.map((prompt, index) => (
@@ -1427,10 +1427,10 @@ export default function App() {
       )}
 
       {hostKeyRequest && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="host-key-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">HOST KEY VERIFICATION</div><h2>{t('confirmHostKey')}</h2></div>
+              <div><div className="eyebrow">HOST KEY VERIFICATION</div><h2 id="host-key-dialog-title">{t('confirmHostKey')}</h2></div>
             </div>
             <p className="fingerprint-label">{t('hostKeyFingerprint', hostKeyRequest.info.hostname, String(hostKeyRequest.info.port))}</p>
             <code className="fingerprint">{hostKeyRequest.info.fingerprint}</code>
