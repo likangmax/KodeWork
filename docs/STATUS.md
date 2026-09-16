@@ -46,7 +46,7 @@ These states are not interchangeable. Compilation or CI success alone does not m
 
 ## Verification baseline
 
-The repository CI currently includes five independent job families:
+The repository CI has five substantive check families:
 
 1. frontend install/lint/tests/production build;
 2. Windows Rust sidecar preparation, formatting, locked Clippy with warnings denied, and full locked workspace tests;
@@ -54,7 +54,9 @@ The repository CI currently includes five independent job families:
 4. portable Rust checks/tests on Linux;
 5. portable Rust checks/tests on macOS.
 
-Workflow configuration is not the same as repository-settings enforcement. Branch protection/rulesets determine which checks GitHub requires before merge; any enforcement gap should remain tracked explicitly rather than being inferred from a green workflow file.
+The existing required `rust` status context is an aggregate gate: it reports success only when both the Windows Rust job and the dependency/security policy job succeed. This preserves the branch-protection context while ensuring the security policy cannot be skipped by a merge that requires `rust`.
+
+Workflow configuration is not a substitute for all repository settings. Branch protection/rulesets still determine which top-level status contexts and review rules GitHub enforces.
 
 Platform or network behavior is marked verified only when exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for native evidence expectations.
 
@@ -72,8 +74,7 @@ Platform or network behavior is marked verified only when exercised in that envi
 Current tracked follow-ups include:
 
 - sanitized real product screenshots for README presentation ([#26](https://github.com/likangmax/KodeWork/issues/26));
-- repository-setting enforcement for the dependency/security policy check ([#29](https://github.com/likangmax/KodeWork/issues/29));
-- cleanup of React hook/lifecycle lint warnings surfaced by newer lint rules ([#33](https://github.com/likangmax/KodeWork/issues/33)).
+- repository administration/settings work that cannot be completed through ordinary source changes ([#44](https://github.com/likangmax/KodeWork/issues/44)).
 
 Planned work remains listed here until it is completed and verified.
 
