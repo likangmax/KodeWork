@@ -107,6 +107,12 @@ await page.addInitScript(() => {
             }), 180)
             return null
           case 'clipboard_paste': return { kind: 'empty' }
+          case 'local_terminal_capabilities': return {
+            powershell: true,
+            command_prompt: true,
+            wsl: true,
+            wsl_distributions: ['Ubuntu-24.04'],
+          }
           case 'snippet_list': return []
           case 'project_list': return []
           case 'action_list': return []
@@ -156,7 +162,7 @@ page.on('console', message => console.log(`[browser:${message.type()}] ${message
 page.on('pageerror', error => console.error(`[browser:pageerror] ${error.stack || error.message}`))
 
 await page.goto('http://127.0.0.1:4173', { waitUntil: 'networkidle' })
-await page.getByText('Demo Workstation', { exact: true }).first().waitFor()
+await page.getByText('Demo Workstation', { exact: true }).first().waitFor({ timeout: 10000 })
 
 await page.getByRole('button', { name: 'Connect', exact: true }).click()
 await page.getByText('Connected', { exact: true }).first().waitFor({ timeout: 10000 })
