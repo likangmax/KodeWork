@@ -472,6 +472,9 @@ mod tests {
     use super::decode_wsl_distributions;
 
     #[cfg(windows)]
+    static CONPTY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(windows)]
     async fn wait_for_terminal_sentinel(
         manager: &super::LocalTerminalManager,
         id: u32,
@@ -541,6 +544,7 @@ mod tests {
         command: &[u8],
         sentinel: &str,
     ) -> Result<(), String> {
+        let _conpty_guard = CONPTY_TEST_LOCK.lock().await;
         let manager = super::LocalTerminalManager::new();
         let descriptor = manager
             .open_with_options(kind.clone(), None, 80, 24, true)
@@ -643,11 +647,12 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn closed_terminal_rejects_io_and_resize() -> Result<(), super::LocalPtyError> {
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_terminal_rejects_io_and_resize() -> Result<(), super::LocalPtyError> {
         if !super::command_exists("cmd.exe") {
             return Ok(());
         }
+        let _conpty_guard = CONPTY_TEST_LOCK.lock().await;
         let manager = super::LocalTerminalManager::new();
         let terminal = manager.open(super::LocalTerminalKind::CommandPrompt, None, 80, 24)?;
         manager.close(terminal.id)?;
@@ -663,11 +668,13 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn rapid_resize_is_bounded_and_session_limit_is_enforced() -> Result<(), super::LocalPtyError> {
+    #[tokio::test(flavor = "current_thread")]
+    async fn rapid_resize_is_bounded_and_session_limit_is_enforced(
+    ) -> Result<(), super::LocalPtyError> {
         if !super::command_exists("cmd.exe") {
             return Ok(());
         }
+        let _conpty_guard = CONPTY_TEST_LOCK.lock().await;
         let manager = super::LocalTerminalManager::new();
         let mut ids = Vec::new();
         for index in 0..super::MAX_SESSIONS {
