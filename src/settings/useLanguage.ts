@@ -1,9 +1,14 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { detectInitialLanguage, hasSavedLanguage, saveLanguage, type Language } from '../i18n'
 
 export function useLanguage(): [Language, (next: Language) => void, boolean] {
   const [language, setLanguage] = useState<Language>(() => detectInitialLanguage())
   const [needsPrompt, setNeedsPrompt] = useState(() => !hasSavedLanguage())
+
+  useEffect(() => {
+    document.documentElement.lang = language
+  }, [language])
+
   const update = useCallback((next: Language) => {
     setLanguage(next)
     saveLanguage(next)
