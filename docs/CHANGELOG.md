@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.4 — Unreleased — Reliability, security, accessibility, and maintenance
+
+- Hardened Run lifecycle/reconciliation so transport or launcher success is never misreported as remote command success; unresolved outcomes remain explicit and reconcilable.
+- Strengthened SSH host-key trust ownership across direct, Tailscale, public-fallback, and jump-host paths, with fail-closed trust-store reads and native reconnect state propagation.
+- Hardened SFTP resume and transfer identity with prefix verification, destination leases, source revalidation, safe `~` expansion, and more reliable pause/resume/retry/cancel behavior.
+- Improved Windows ConPTY/native recovery and expanded locked full-workspace plus portable Linux/macOS core verification without claiming native macOS/Linux desktop releases.
+- Remediated `RUSTSEC-2026-0285` by updating rustls, and tightened dependency-audit, tracked-secret, release-lineage, updater-signature, and Authenticode publication gates.
+- Updated maintained tooling/dependencies including uuid 1.26.1, @vitejs/plugin-react 6.1.1, Vite 8.3.0, and oxlint 1.82.0; Node 26 type definitions and TypeScript 7 remain deferred to dedicated major migrations.
+- Added accessible names to every current modal dialog plus a regression test that prevents unnamed dialogs from returning.
+- Stable `v0.2.4` publication remains gated by the configured Tauri updater signing key and trusted Authenticode certificate; public updater hosting and native macOS/Linux bundles are still not claimed as released.
+
 ## 0.2.3 — 2026-08-18 — Guided setup, bilingual UI, and reproducible release
 
 - Added bilingual first-run/settings/editor/terminal/local-terminal/workspace UI labels and a language switch without changing saved connection secrets.

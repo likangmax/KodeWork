@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-agent"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "kodework-domain",
@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-domain"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-herdr"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "serde",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-local-pty"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "portable-pty",
  "serde",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-network"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "kodework-domain",
@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-platform-win"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "clipboard-rs",
  "serde",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-secrets"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "kodework-domain",
  "thiserror 2.0.20",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-secrets-native"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "keyring",
  "kodework-domain",
@@ -2917,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-secrets-win"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "kodework-domain",
  "kodework-secrets",
@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-sftp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-ssh"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "kodework-domain",
  "kodework-testkit",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-storage"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "kodework-domain",
  "rusqlite",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-tailscale"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "kodework-domain",
@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-tauri"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "dirs 6.0.0",
  "kodework-core",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "kodework-testkit"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "bytes",
