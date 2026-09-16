@@ -64,7 +64,7 @@ On the first SSH connection, verify the server host-key fingerprint before trust
 
 The [English user guide](docs/USER-GUIDE.md) and [中文使用指南](docs/USER-GUIDE.zh-CN.md) cover Linux preparation, connection modes, files, asset paste, local PowerShell/CMD/WSL terminals, durable sessions, upgrades, and troubleshooting.
 
-## Trust and review at a glance
+## Trust and release status
 
 | Area | Current evidence / boundary |
 | --- | --- |
@@ -137,9 +137,9 @@ Rust owns connection truth, authentication boundaries, reconnect generations, tr
 
 See [Architecture](docs/ARCHITECTURE.md) and the numbered [ADRs](docs/adr/).
 
-## Reviewer's map
+## Project documentation
 
-If you are evaluating the project rather than just installing it, these are the fastest paths to the source of truth:
+Key technical and maintenance references:
 
 - [Project status](docs/STATUS.md) — what is available, verified, released, and still limited;
 - [Architecture](docs/ARCHITECTURE.md) — trust boundaries, data flow, state ownership, and performance rules;
@@ -147,7 +147,8 @@ If you are evaluating the project rather than just installing it, these are the 
 - [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md) — automated vs. native acceptance evidence;
 - [Release matrix](docs/RELEASE-MATRIX.md) — packaging/signing/platform evidence contract;
 - [Changelog](docs/CHANGELOG.md) — user-visible history and unreleased changes;
-- [Contributing](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) — contribution, verification, and coding-agent rules.
+- [Contributing](CONTRIBUTING.md) — development workflow, verification, and pull-request expectations;
+- [Documentation map](docs/README.md) — user, contributor, maintainer, and project-reference entry points.
 
 The project deliberately distinguishes **configured**, **tested**, **verified**, **supported**, and **released**. Documentation should not upgrade one of those states into another without evidence.
 
@@ -175,7 +176,7 @@ cargo test --locked --workspace --all-features
 npm audit --omit=dev --audit-level=high
 ```
 
-For repository rules, testing expectations, and PR guidance, read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents should start with [AGENTS.md](AGENTS.md).
+For repository rules, testing expectations, and PR guidance, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [documentation map](docs/README.md).
 
 ## Repository layout
 

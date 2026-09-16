@@ -67,7 +67,7 @@ Platform or network behavior is marked verified only when exercised in that envi
 - Native macOS and Linux packaging, signing/notarization, GUI validation, and release assets remain future work.
 - WSL availability depends on the local Windows installation and installed distributions.
 
-## Open public-quality work
+## Known follow-up work
 
 Current tracked follow-ups include:
 
@@ -75,9 +75,9 @@ Current tracked follow-ups include:
 - repository-setting enforcement for the dependency/security policy check ([#29](https://github.com/likangmax/KodeWork/issues/29));
 - cleanup of React hook/lifecycle lint warnings surfaced by newer lint rules ([#33](https://github.com/likangmax/KodeWork/issues/33)).
 
-These items are visible precisely because the project does not treat a planned control or polish task as already completed.
+Planned work remains listed here until it is completed and verified.
 
-## Where to verify claims
+## Reference documents
 
 - installable artifacts: [GitHub Releases](https://github.com/likangmax/KodeWork/releases)
 - user-visible history: [CHANGELOG.md](CHANGELOG.md)

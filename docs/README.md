@@ -1,6 +1,6 @@
 # KodeWork documentation
 
-This page is the documentation map for users, contributors, maintainers, and reviewers. It also defines which documents are current sources of truth and which are retained only for historical traceability.
+This page is the documentation map for users, contributors, and maintainers. It also defines the current sources of truth for support, release, architecture, testing, and project direction.
 
 ## Start here by goal
 
@@ -8,10 +8,10 @@ This page is the documentation map for users, contributors, maintainers, and rev
 | --- | --- |
 | Install and use KodeWork | [English user guide](USER-GUIDE.md) / [中文使用指南](USER-GUIDE.zh-CN.md) |
 | Troubleshoot a problem | [Troubleshooting](TROUBLESHOOTING.md) and [Support](../SUPPORT.md) |
-| Understand what is actually supported/released | [Project status](STATUS.md) and [Release matrix](RELEASE-MATRIX.md) |
-| Review architecture/security boundaries | [Architecture](ARCHITECTURE.md), [ADRs](adr/), and [Security policy](../SECURITY.md) |
-| Contribute code/docs | [Contributing](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md) |
-| Maintain/release the project | [Agent & maintainer guide](AGENT-GUIDE.md), [Release matrix](RELEASE-MATRIX.md), and [Windows test matrix](TEST-MATRIX-WINDOWS.md) |
+| Understand what is supported/released | [Project status](STATUS.md) and [Release matrix](RELEASE-MATRIX.md) |
+| Understand architecture/security boundaries | [Architecture](ARCHITECTURE.md), [ADRs](adr/), and [Security policy](../SECURITY.md) |
+| Contribute code or documentation | [Contributing](../CONTRIBUTING.md) |
+| Maintain or release the project | [Release matrix](RELEASE-MATRIX.md), [Windows test matrix](TEST-MATRIX-WINDOWS.md), and [Project status](STATUS.md) |
 | See project direction | [Public roadmap](../ROADMAP.md) |
 | See release history | [Changelog](CHANGELOG.md) |
 
@@ -22,16 +22,16 @@ Project home:
 
 ## Source-of-truth hierarchy
 
-When two documents appear to disagree, use the more specific current source below rather than a historical handoff:
+When two documents appear to disagree, use the more specific current source below:
 
 1. **Installable distribution:** [GitHub Releases](https://github.com/likangmax/KodeWork/releases)
-2. **Current capability / known limits:** [STATUS.md](STATUS.md)
+2. **Current capability and known limits:** [STATUS.md](STATUS.md)
 3. **Platform and release evidence contract:** [RELEASE-MATRIX.md](RELEASE-MATRIX.md)
-4. **Architecture/security invariants:** [ARCHITECTURE.md](ARCHITECTURE.md), current ADRs, and [SECURITY.md](../SECURITY.md)
+4. **Architecture and security invariants:** [ARCHITECTURE.md](ARCHITECTURE.md), current ADRs, and [SECURITY.md](../SECURITY.md)
 5. **Current public direction:** [ROADMAP.md](../ROADMAP.md)
-6. **Historical release/development record:** [CHANGELOG.md](CHANGELOG.md)
+6. **Release history:** [CHANGELOG.md](CHANGELOG.md)
 
-A version field in `main`, a successful compile, or a historical test note is not a substitute for published release evidence.
+A version field in `main` or a successful compile is not a substitute for published release evidence.
 
 ## User documentation
 
@@ -41,36 +41,25 @@ A version field in `main`, a successful compile, or a historical test note is no
 - [Support policy](../SUPPORT.md) — where to ask questions, what is supported, and what information is safe to share.
 - [Third-party notices](THIRD-PARTY-NOTICES.md) — bundled components and licenses.
 
-## Current project and review evidence
+## Engineering references
 
-- [Project status](STATUS.md) — what is implemented/usable and which claims remain limited.
+- [Project status](STATUS.md) — what is implemented, usable, verified, released, and still limited.
 - [Release matrix](RELEASE-MATRIX.md) — packaging, signing, installation, and platform evidence requirements.
 - [Windows test matrix](TEST-MATRIX-WINDOWS.md) — automated/native evidence and explicit gaps.
 - [Architecture](ARCHITECTURE.md) — runtime boundaries, data planes, security invariants, and performance rules.
 - [Architecture decisions](adr/) — canonical ADRs for significant design decisions.
 - [Cross-platform roadmap](CROSS-PLATFORM-ROADMAP.md) — technical exploration for macOS/Linux and longer-term platform work; not a release claim.
-- [Changelog](CHANGELOG.md) — user-visible changes by release and current unreleased work.
+- [Changelog](CHANGELOG.md) — versioned user-visible changes and current unreleased work.
 
 ## Contribution and maintenance
 
 - [Contributing](../CONTRIBUTING.md) — setup, workflow, supply-chain rules, verification, and PR expectations.
-- [AGENTS.md](../AGENTS.md) — durable repository-wide rules for coding agents and contributors.
-- [Agent and maintainer guide](AGENT-GUIDE.md) — detailed operational, security, testing, and release procedures.
-- [中文 Agent 与维护者指南](AGENT-GUIDE.zh-CN.md) — 中文执行指南。
 - [Security policy](../SECURITY.md) — supported versions, private vulnerability reporting, and security-sensitive contribution rules.
 - [Code of conduct](../CODE_OF_CONDUCT.md) — participation and enforcement expectations.
 - [Support policy](../SUPPORT.md) — user-support boundaries and public-data hygiene.
+- [Roadmap](../ROADMAP.md) — public project direction and planned areas of work.
 
-## Historical planning and handoffs
-
-The following files are retained for traceability. They may intentionally contain old commit SHAs, test counts, dependency versions, local-machine facts, completed tasks, or plans that have since changed. Do **not** use them as current project state unless a task explicitly asks for historical reconstruction.
-
-- [Codex handoff snapshot (中文)](HANDOFF-CODEX.zh-CN.md)
-- [Claude Code historical handoff (中文)](HANDOFF-CLAUDE-CODE.zh-CN.md)
-- [Legacy next-steps plan (中文)](NEXT-STEPS.md)
-- [Legacy improvement roadmap](IMPROVEMENT-ROADMAP.md)
-
-For new planning, use [`../ROADMAP.md`](../ROADMAP.md) and GitHub Issues instead.
+Repository history remains available through Git and GitHub. Transient handoff notes, AI-tool-specific instructions, and superseded planning snapshots are intentionally not kept in the current documentation tree.
 
 ## Documentation maintenance rules
 
@@ -79,6 +68,6 @@ For new planning, use [`../ROADMAP.md`](../ROADMAP.md) and GitHub Issues instead
 - Keep English and Chinese user-facing documentation aligned when behavior changes.
 - Distinguish `configured`, `tested`, `verified`, `supported`, and `released`; do not silently strengthen a claim.
 - Avoid transient local state, branch-specific commit SHAs, and time-sensitive test counts in durable instructions.
-- Preserve historical dates in ADRs/Changelog; update only documents that claim to describe current state.
+- Preserve historical dates in ADRs and versioned changelog entries; update only documents that claim to describe current state.
 
 Files remain at the repository root when GitHub, Cargo, npm, Vite, Tauri, or community-health conventions expect them there.

@@ -64,7 +64,7 @@ KodeWork 不是云端控制平面，不替代 SSH 的主机身份认证，也不
 
 [中文使用指南](docs/USER-GUIDE.zh-CN.md) 与 [English user guide](docs/USER-GUIDE.md) 覆盖 Linux 准备、连接方式、文件传输、图片/PDF 粘贴、本机 PowerShell/CMD/WSL、持久会话、升级和故障排查。
 
-## 可信度与审查信息一览
+## 可信度与发布状态
 
 | 领域 | 当前证据 / 边界 |
 | --- | --- |
@@ -76,7 +76,7 @@ KodeWork 不是云端控制平面，不替代 SSH 的主机身份认证，也不
 | 发布 | 稳定发布会校验 tag 与 main 的关系、版本一致性；缺少必要 updater/Authenticode 签名材料时 fail closed |
 | 项目成熟度 | 仍是持续开发的 `0.x` 项目；未验证项保持明确可见，不会包装成已发布能力 |
 
-这些结论的证据入口见：[项目状态](docs/STATUS.md)、[发布矩阵](docs/RELEASE-MATRIX.md)、[Windows 测试矩阵](docs/TEST-MATRIX-WINDOWS.md)、[架构说明](docs/ARCHITECTURE.md) 和 [安全策略](SECURITY.md)。
+这些结论的依据见：[项目状态](docs/STATUS.md)、[发布矩阵](docs/RELEASE-MATRIX.md)、[Windows 测试矩阵](docs/TEST-MATRIX-WINDOWS.md)、[架构说明](docs/ARCHITECTURE.md) 和 [安全策略](SECURITY.md)。
 
 ## 为什么做 KodeWork
 
@@ -137,17 +137,18 @@ Rust 负责连接真相、认证边界、重连代数、传输状态和远程会
 
 进一步阅读：[架构说明](docs/ARCHITECTURE.md) 和编号 [ADR](docs/adr/)。
 
-## 审查者快速入口
+## 项目文档
 
-如果你是在评估项目，而不是单纯安装，建议直接看这些“源事实”文档：
+核心技术与维护文档：
 
-- [项目状态](docs/STATUS.md) — 哪些能力是可用、已验证、已发布，以及已知限制；
+- [项目状态](docs/STATUS.md) — 哪些能力可用、已验证、已发布，以及已知限制；
 - [架构说明](docs/ARCHITECTURE.md) — 信任边界、数据流、状态归属与性能规则；
 - [安全策略](SECURITY.md) — 支持版本、私下漏洞报告方式与运行时安全不变量；
 - [Windows 测试矩阵](docs/TEST-MATRIX-WINDOWS.md) — 自动化证据与真机验收证据的区别；
 - [发布矩阵](docs/RELEASE-MATRIX.md) — 打包、签名和平台声明的证据门槛；
 - [更新日志](docs/CHANGELOG.md) — 已发布历史与未发布变更；
-- [贡献指南](CONTRIBUTING.md) 与 [AGENTS.md](AGENTS.md) — 贡献、验证与 Coding Agent 规则。
+- [贡献指南](CONTRIBUTING.md) — 开发流程、验证要求与 Pull Request 规范；
+- [文档中心](docs/README.md) — 用户、贡献者、维护者与项目参考文档入口。
 
 项目会严格区分 **configured（已配置）**、**tested（已测试）**、**verified（已验证）**、**supported（受支持）** 和 **released（已发布）**，没有对应证据时不会把其中一种状态写成更强的结论。
 
@@ -175,7 +176,7 @@ cargo test --locked --workspace --all-features
 npm audit --omit=dev --audit-level=high
 ```
 
-仓库开发规则、测试证据和 PR 要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。Coding Agent 应先读 [AGENTS.md](AGENTS.md)。
+仓库开发规则、测试要求和 PR 规范见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [文档中心](docs/README.md)。
 
 ## 仓库结构
 

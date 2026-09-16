@@ -8,13 +8,13 @@ The project handles SSH credentials, host identity, remote execution, file trans
 
 Please read:
 
-1. [`AGENTS.md`](AGENTS.md) — repository-wide instructions for coding agents and contributors;
-2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system boundaries and data flow;
-3. [`docs/STATUS.md`](docs/STATUS.md) — current release scope and known gaps;
-4. [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) — what counts as verified/released on each platform;
-5. the relevant ADR under [`docs/adr/`](docs/adr/) for the subsystem you are changing.
+1. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system boundaries and data flow;
+2. [`docs/STATUS.md`](docs/STATUS.md) — current release scope and known gaps;
+3. [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) — what counts as verified/released on each platform;
+4. the relevant ADR under [`docs/adr/`](docs/adr/) for the subsystem you are changing;
+5. [`SECURITY.md`](SECURITY.md) when the change touches authentication, credentials, host identity, remote execution, CI, dependencies, signing, or update delivery.
 
-The detailed operational guide is [`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md). Historical handoff documents listed in [`docs/README.md`](docs/README.md) are traceability records, not current checkout truth.
+The [documentation map](docs/README.md) links the maintained user, engineering, support, testing, and release references. Repository history remains available through Git rather than transient handoff files in the current documentation tree.
 
 For user support rather than code contribution, start with [`SUPPORT.md`](SUPPORT.md).
 
@@ -99,13 +99,13 @@ The most important invariants are:
 - Large transfers stay streamed/staged; convenience changes must not silently weaken integrity or atomicity.
 - Product claims must follow evidence. A unit test is not proof of real-network, installer, GUI, sleep/resume, or platform-release behavior.
 
-See [`AGENTS.md`](AGENTS.md) and [`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md) for the complete rules.
+Use [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`SECURITY.md`](SECURITY.md), and [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) as the maintained references for these boundaries.
 
 ## Supply-chain, CI, and publishing rules
 
 Treat dependency, workflow, and publishing changes as security-sensitive maintenance.
 
-- Use synthetic fixtures and obvious placeholder credentials; never add real secrets, private prompts/terminal content, or infrastructure details to tests or docs.
+- Use synthetic fixtures and obvious placeholder credentials; never add real secrets, private terminal content, or infrastructure details to tests or docs.
 - Justify new direct dependencies and review provenance, maintenance history, install/build hooks, transitive changes, and lockfile diffs.
 - Keep `package-lock.json` and `Cargo.lock` reproducible; use `npm ci` and Cargo `--locked` in verification/release paths.
 - Pin third-party GitHub Actions to reviewed full commit SHAs, not floating tags.
