@@ -1,36 +1,54 @@
-# Documentation map
+# KodeWork documentation map
 
-Start here instead of browsing every Markdown file. The documents are grouped by audience and purpose.
+Use this page to find the right document without treating historical handoffs as current project state.
 
-## I want to use KodeWork
+## Use KodeWork
 
-- [English user guide](USER-GUIDE.md) — installation, first-run language, Linux preparation, every connection mode, daily use, verification, and troubleshooting.
-- [中文零基础使用指南](USER-GUIDE.zh-CN.md) — 安装、首次语言选择、Linux 准备、全部连接方式、日常操作、验收和故障排查。
-- [Troubleshooting guide](TROUBLESHOOTING.md) — diagnosis and fixes for connection, authentication, transfer, terminal, and installation issues.
-- [English product overview](../README.md) — features, platform status, downloads, and development quick start.
-- [中文项目首页](../README.zh-CN.md) — 功能定位、平台状态、下载与开发入口。
+- [English user guide](USER-GUIDE.md) — installation, Linux preparation, connection modes, daily workflows, verification, and troubleshooting.
+- [中文零基础使用指南](USER-GUIDE.zh-CN.md) — 安装、Linux 准备、连接方式、日常使用、验收与排障。
+- [Troubleshooting](TROUBLESHOOTING.md) — connection, authentication, terminal, transfer, and installation problems.
 - [Changelog](CHANGELOG.md) — user-visible changes by release.
-- [Third-party notices](THIRD-PARTY-NOTICES.md) — bundled components and license notices.
+- [Third-party notices](THIRD-PARTY-NOTICES.md) — bundled components and licenses.
 
-## I am an agent or maintainer
+Project home:
 
-- **[Codex current handoff (中文)](HANDOFF-CODEX.zh-CN.md)** — current `main` snapshot, verified local/GitHub gates, known gaps, and safe continuation order.
-- **[Next steps (中文)](NEXT-STEPS.md)** — prioritized optimization plan with actionable steps.
-- [Claude Code historical handoff (中文)](HANDOFF-CLAUDE-CODE.zh-CN.md) — archived execution snapshot retained for audit/history; not the current checkout state.
-- [Agent and maintainer guide](AGENT-GUIDE.md) — repository orientation, configuration semantics, safety boundaries, validation gates, and release procedure.
-- [中文 Agent 与维护者指南](AGENT-GUIDE.zh-CN.md) — 面向中文 Agent 的可执行配置、测试、隐私和发布流程。
+- [README (English)](../README.md)
+- [README（简体中文）](../README.zh-CN.md)
+
+## Understand the current project
+
+These files are the durable sources of truth for current capability and project direction:
+
+- [Project status](STATUS.md) — what is implemented/usable today and known distribution limits.
+- [Release matrix](RELEASE-MATRIX.md) — packaging, signing, installation, and platform evidence requirements.
+- [Public roadmap](../ROADMAP.md) — current/next/later direction without release-date promises.
+- [Windows test matrix](TEST-MATRIX-WINDOWS.md) — automated/native evidence and explicit gaps.
 - [Architecture](ARCHITECTURE.md) — runtime boundaries, data planes, security invariants, and performance rules.
-- [Architecture decisions](adr/) — numbered ADRs; each decision has one canonical file.
-- [Windows test matrix](TEST-MATRIX-WINDOWS.md) — automated, native-machine, and explicitly unverified scenarios.
-- [Project status](STATUS.md) — current release scope and known distribution limits.
-- [Release matrix](RELEASE-MATRIX.md) — packaging, signing, and trust requirements per platform.
-- [Cross-platform roadmap](CROSS-PLATFORM-ROADMAP.md) — Windows hardening, macOS/Linux desktop, and iOS/Android strategy.
-- [Brand and icon](BRAND-ICON.md) — icon semantics and source assets.
-- [Improvement roadmap](IMPROVEMENT-ROADMAP.md) — phased plan for hardening, docs, UX, and distribution.
-- [Contributing](../CONTRIBUTING.md) — setup, workflow, coding standards, and PR checklist.
+- [Architecture decisions](adr/) — canonical ADRs for significant design decisions.
+- [Cross-platform roadmap](CROSS-PLATFORM-ROADMAP.md) — technical exploration for macOS/Linux and longer-term platform work.
+
+## Contribute or maintain
+
+Start with:
+
+- [Contributing](../CONTRIBUTING.md) — setup, workflow, verification, and PR expectations.
+- [AGENTS.md](../AGENTS.md) — durable repository-wide instructions for coding agents and contributors.
+- [Agent and maintainer guide](AGENT-GUIDE.md) — detailed operational, security, testing, and release procedures.
+- [中文 Agent 与维护者指南](AGENT-GUIDE.zh-CN.md) — 中文执行指南。
+- [Security policy](../SECURITY.md) — vulnerability reporting and security boundaries.
+- [Code of conduct](../CODE_OF_CONDUCT.md) — participation expectations.
+
+## Historical planning and handoffs
+
+The following files are retained for traceability. They may contain old commit SHAs, test counts, completed tasks, local-machine facts, or plans that have since changed. Do **not** use them as the source of truth for the current checkout.
+
+- [Codex handoff snapshot (中文)](HANDOFF-CODEX.zh-CN.md)
+- [Claude Code historical handoff (中文)](HANDOFF-CLAUDE-CODE.zh-CN.md)
+- [Legacy next-steps plan (中文)](NEXT-STEPS.md)
+- [Legacy improvement roadmap](IMPROVEMENT-ROADMAP.md)
+
+For new planning, use [`../ROADMAP.md`](../ROADMAP.md) and open GitHub issues instead.
 
 ## Repository policy
 
-The repository root contains only files that GitHub, Cargo, npm, Vite, Tauri, or community-health features expect there. Build manifests are not documentation and should not be moved just to shorten the file list. GitHub-recognized files such as `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, and both language READMEs also remain at the root.
-
-Generated output, dependency directories, local upstream research, secrets, signing keys, real infrastructure details, and machine-specific fixtures are ignored and must never be included in the public source tree.
+Files remain at the repository root when GitHub, Cargo, npm, Vite, Tauri, or community-health conventions expect them there. Generated output, dependency directories, local research caches, credentials, signing keys, real infrastructure details, and machine-specific fixtures must not be committed.
