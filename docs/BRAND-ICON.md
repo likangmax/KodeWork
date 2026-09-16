@@ -1,21 +1,27 @@
-# Kodework 应用图标
+# KodeWork application icon
 
-## 设计语义
+## Design language
 
-- 深石墨色圆角底：Windows 开发工作台与终端环境。
-- 珊瑚橙轮廓：将终端窗口、远程连接链路和原有 R 形识别合并成一个符号。
-- `>_`：SSH/PTY 命令工作流。
-- 薄荷绿节点：远端节点在线、Tailscale/Herdr 状态与连接成功。
+- Dark graphite rounded background: Windows development workbench and terminal environment.
+- Coral-orange outline: combines a terminal window, remote connection path, and the original KodeWork visual identity.
+- `>_`: SSH/PTY command workflow.
+- Mint-green node: remote-node availability and Tailscale/Herdr connection state.
 
-图形避免文字、细线和复杂纹理，确保在 16–32 px 的任务栏、托盘和快捷方式中
-仍能保持清晰轮廓。
+The icon avoids text, fine lines, and complex textures so the silhouette remains legible at 16–32 px in the taskbar, tray, shortcuts, and installer surfaces.
 
-## 资产
+## Assets
 
-- 设计母版：`assets/branding/kodework-icon-master.png`
-- Windows ICO：`src-tauri/icons/icon.ico`
-- Tauri PNG：`32x32.png`、`64x64.png`、`128x128.png`、`128x128@2x.png`
-- Windows Store 与平台扩展尺寸：由 `npx tauri icon` 从母版统一生成。
+- Source artwork: `assets/branding/kodework-icon-master.png`
+- Windows ICO: `src-tauri/icons/icon.ico`
+- Tauri PNG assets: `32x32.png`, `64x64.png`, `128x128.png`, `128x128@2x.png`
+- Windows Store and additional platform sizes are generated from the source artwork.
 
-生成提示：使用内置 image generation，以原有橙色 R + 绿色节点为参考，重新设计为
-终端/远程连接组合标志；最终版采用全幅深色底，避免透明棋盘格伪影。
+## Regenerating platform icons
+
+From the repository root, regenerate the Tauri icon set from the committed source artwork:
+
+```powershell
+npx tauri icon assets/branding/kodework-icon-master.png
+```
+
+Review generated binary diffs before committing them and verify the Windows taskbar, tray, shortcut, and installer rendering at their native sizes. Do not replace the source artwork as part of an unrelated code or documentation change.
