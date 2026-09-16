@@ -47,12 +47,10 @@ jobs:
 
           lock = Path('package-lock.json')
           text = lock.read_text(encoding='utf-8')
-          old_top = '  "version": "0.2.3",'
-          old_root = '      "version": "0.2.3",'
-          if text.count(old_top) != 1 or text.count(old_root) != 1:
-              raise SystemExit('package-lock.json: unexpected root version layout')
-          text = text.replace(old_top, '  "version": "0.2.4",', 1)
-          text = text.replace(old_root, '      "version": "0.2.4",', 1)
+          text, top_count = re.subn(r'(?m)^  "version": "0\.2\.3",$', '  "version": "0.2.4",', text)
+          text, root_count = re.subn(r'(?m)^      "version": "0\.2\.3",$', '      "version": "0.2.4",', text)
+          if top_count != 1 or root_count != 1:
+              raise SystemExit(f'package-lock.json: expected one top/root version, got top={top_count} root={root_count}')
           lock.write_text(text, encoding='utf-8')
 
           cargo_lock = Path('Cargo.lock')
