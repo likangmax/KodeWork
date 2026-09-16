@@ -36,6 +36,7 @@ The immediate focus is making the existing Windows remote-development loop easie
 ### Public OSS surface
 
 - keep issue forms, contribution guidance, agent instructions, and release evidence current;
+- keep dependency/security gates current and remediate actionable advisories rather than suppressing them;
 - add sanitized product screenshots/demo material that contains no real infrastructure or credentials;
 - improve accessibility and keyboard behavior in focused, testable increments;
 - maintain a small set of well-scoped contributor tasks instead of a speculative backlog.
