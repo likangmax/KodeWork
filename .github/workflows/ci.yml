@@ -22,7 +22,8 @@ jobs:
       - run: npm run test:frontend
       - run: npm run build
 
-  rust:
+  windows-rust:
+    name: Windows Rust
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,8 +67,32 @@ jobs:
             exit 1
           fi
 
+  # `rust` is already a required status context on main. Keep that stable while
+  # making it an aggregate gate so Windows Rust and dependency/security policy
+  # must both succeed even when repository-admin settings cannot be changed.
+  rust:
+    name: rust
+    needs: [windows-rust, dependency-security]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce Rust and security gates
+        shell: bash
+        env:
+          WINDOWS_RUST_RESULT: ${{ needs.windows-rust.result }}
+          DEPENDENCY_SECURITY_RESULT: ${{ needs.dependency-security.result }}
+        run: |
+          if [ "$WINDOWS_RUST_RESULT" != "success" ]; then
+            echo "Windows Rust result: $WINDOWS_RUST_RESULT" >&2
+            exit 1
+          fi
+          if [ "$DEPENDENCY_SECURITY_RESULT" != "success" ]; then
+            echo "Dependency/security result: $DEPENDENCY_SECURITY_RESULT" >&2
+            exit 1
+          fi
+
   # This job intentionally checks the portable Rust graph without claiming
-  # that a Windows shell build proves a macOS/Linux desktop release.  Native
+  # that a Windows shell build proves a macOS/Linux desktop release. Native
   # bundle/signing jobs belong in the release workflow and run on the target
   # operating system.
   portable-rust:
