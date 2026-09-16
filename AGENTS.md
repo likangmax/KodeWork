@@ -15,12 +15,15 @@ Never turn an implementation detail, green unit test, or saved configuration int
 Use this order when orienting yourself:
 
 1. `README.md` (or `README.zh-CN.md`)
-2. `docs/AGENT-GUIDE.md`
-3. `docs/ARCHITECTURE.md` and relevant files under `docs/adr/`
-4. `docs/STATUS.md`, `docs/TEST-MATRIX-WINDOWS.md`, and `docs/RELEASE-MATRIX.md`
-5. The owning crate/component and its tests
+2. `docs/README.md` for the current documentation map and source-of-truth boundaries
+3. `docs/AGENT-GUIDE.md`
+4. `docs/ARCHITECTURE.md` and relevant files under `docs/adr/`
+5. `docs/STATUS.md`, `docs/TEST-MATRIX-WINDOWS.md`, and `docs/RELEASE-MATRIX.md`
+6. The owning crate/component and its tests
 
 `docs/AGENT-GUIDE.md` is the detailed operational contract. This file intentionally stays shorter and more durable.
+
+Files listed under **Historical planning and handoffs** in `docs/README.md` are traceability records only. They can contain old commit SHAs, dependency versions, test counts, paths, and plans. Do not use them as the current checkout truth unless the task explicitly asks you to reconstruct historical state.
 
 ## Repository boundaries
 
