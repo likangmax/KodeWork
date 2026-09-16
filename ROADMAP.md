@@ -15,24 +15,24 @@ For exact capability **today**, use [`docs/STATUS.md`](docs/STATUS.md) and [`doc
 
 Passing cross-platform Rust CI does **not** mean macOS or Linux desktop packages are released. Native packaging, signing, installation, GUI smoke tests, sidecars, and release assets must pass on each platform before support is claimed.
 
-## Now — release evidence, trust, and contributor experience
+## Now — reliability, release readiness, and contributor experience
 
-The immediate focus is making the existing Windows remote-development loop easier to trust, easier to verify, and easier to contribute to.
+The immediate focus is making the existing Windows remote-development loop more reliable, easier to verify, and easier to contribute to.
 
-### Release and repository trust
+### Release and repository maintenance
 
 - complete the evidence needed for the next stable Windows release without weakening updater-signature or Authenticode gates;
 - keep GitHub Releases as the distribution source of truth and avoid source-version/release ambiguity;
-- require the dependency/security policy check through repository branch protection when administration settings are updated ([#29](https://github.com/likangmax/KodeWork/issues/29));
-- keep release/workflow paths explicitly owned and keep third-party Actions pinned to full commit SHAs;
+- require the dependency/security policy check through repository branch protection when administration settings are updated;
+- keep release/workflow paths explicitly owned and third-party Actions pinned to full commit SHAs;
 - keep ordinary automated dependency updates behind a cooldown while allowing security updates to surface immediately.
 
-### Public OSS surface
+### Open-source project presentation
 
 - add real, sanitized product screenshots using synthetic infrastructure only ([#26](https://github.com/likangmax/KodeWork/issues/26));
-- keep README, support, security, contribution, agent, release, and documentation-map pages consistent;
+- keep README, support, security, contribution, release, and documentation pages consistent;
 - keep a small set of well-scoped contributor tasks instead of a speculative backlog;
-- preserve the distinction between configured, tested, verified, supported, and released.
+- document current limitations alongside shipped capabilities.
 
 ### Accessibility and frontend quality
 
@@ -42,7 +42,7 @@ Modal accessible-name coverage now has a regression test. The next focused clean
 
 - reduce time-to-first-useful connection feedback;
 - keep reconnect behavior deterministic after transient network loss;
-- improve recovery evidence around sleep/resume and application restart;
+- improve recovery coverage around sleep/resume and application restart;
 - preserve fail-closed SSH host-key and credential behavior while improving diagnostics.
 
 ### Terminal and transfer performance
@@ -63,7 +63,7 @@ These are directions, not committed release dates.
 - add targeted regression/integration tests around high-risk state transitions;
 - profile startup, terminal, reconnect, and transfer hot paths before optimizing them;
 - improve troubleshooting output while keeping secrets and private terminal/file content out of durable diagnostics;
-- improve release notes and evidence so public claims are easy to trace back to code/tests/artifacts.
+- improve release notes and evidence so public claims are easy to trace back to code, tests, and artifacts.
 
 ## Later — distribution and additional platforms
 
@@ -99,10 +99,10 @@ Known gaps remain visible as `not tested`, `not available`, or `not released` un
 
 ## Non-goals
 
-- no artificial star/download targets;
-- no platform-support claims based only on compilation;
-- no security guarantees that exceed the documented threat model;
-- no feature dates the project cannot responsibly commit to;
-- no weakening of trust/signing/CI boundaries for release convenience.
+- KodeWork is not a hosted control plane or account service;
+- platform support is not inferred from compilation alone;
+- security guarantees do not extend beyond the documented threat model;
+- release dates are not promised before the required engineering and release evidence exists;
+- trust, signing, and CI boundaries are not weakened for release convenience.
 
 To propose a change, use the [feature request form](https://github.com/likangmax/KodeWork/issues/new/choose) or [GitHub Discussions](https://github.com/likangmax/KodeWork/discussions). For help, see [`SUPPORT.md`](SUPPORT.md). For vulnerabilities, follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
