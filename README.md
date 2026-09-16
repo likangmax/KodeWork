@@ -40,6 +40,22 @@ KodeWork turns a private Linux machine into a recoverable remote coding workspac
 
 KodeWork is not a hosted control plane, does not replace SSH host authentication, and does not claim native macOS/Linux desktop releases from cross-platform Rust compilation alone.
 
+
+## Product tour
+
+These captures are rendered from the current KodeWork UI using documentation-only synthetic data. The visible account, file names, paths, terminal output, and `192.0.2.0/24` / `198.51.100.0/24` TEST-NET addresses are examples only; no real host, tailnet, credential, or private session data is shown.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/workspace-terminal.png" alt="KodeWork connected workspace showing a synthetic remote terminal session"></td>
+    <td width="50%"><img src="docs/assets/readme/files-transfers.png" alt="KodeWork SFTP files view showing synthetic project files and an in-progress transfer"></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/assets/readme/workstation-config.png" width="620" alt="KodeWork workstation configuration showing a synthetic testuser account and TEST-NET addresses">
+</p>
+
 ## Quick start
 
 ### 1. Install
