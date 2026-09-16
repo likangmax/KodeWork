@@ -1,368 +1,129 @@
-# KodeWork Cross-Platform Roadmap
-
-## Vision
-
-KodeWork aims to be a universal SSH workspace manager available on all major platforms: **Windows, macOS, Linux, iOS, and Android**. Users should have a consistent, high-quality experience regardless of their device.
-
-## Current Status (v0.2.3)
-
-- ✅ **Windows 10/11 x64**: Production-ready with full feature set
-- ⚠️ **macOS**: Partial — Tauri desktop foundation exists, but:
-  - Credential storage needs macOS Keychain integration
-  - Local terminal needs PTY adapter for Darwin
-  - Build/release pipeline not yet configured
-- ⚠️ **Linux**: Partial — Tauri supports Linux, but:
-  - Credential storage needs Secret Service / libsecret integration
-  - Package formats (deb, rpm, AppImage) not configured
-  - Desktop integration and system tray needs testing
-- ❌ **iOS**: Not started
-- ❌ **Android**: Not started
-
-## Platform Architecture Strategy
-
-### Desktop Platforms (Windows, macOS, Linux)
-
-**Current Foundation:** Tauri 2.x with Rust core + React UI
-
-**Advantages:**
-- Single Rust codebase for business logic
-- Native performance
-- Small binary size (~15 MB)
-- Native OS integration
-
-**Platform-Specific Work Required:**
-
-#### macOS
-1. **Credential Storage** (Priority 1)
-   - Implement `kodework-secrets-mac` crate using macOS Keychain API
-   - Match Windows `kodework-secrets-win` API surface
-   - Estimated effort: 1-2 weeks
-
-2. **Local PTY** (Priority 1)
-   - Implement `kodework-local-pty-unix` using `libc::forkpty`
-   - Support zsh, bash, iTerm2 integration
-   - Estimated effort: 1 week
-
-3. **Build Pipeline** (Priority 2)
-   - Configure Tauri bundler for `.dmg` and `.app`
-   - Notarization for App Store and direct distribution
-   - GitHub Actions runner on macOS
-   - Estimated effort: 3-5 days
-
-4. **System Integration** (Priority 2)
-   - Menu bar integration (native status bar item)
-   - Dock icon and notifications
-   - macOS specific keyboard shortcuts
-   - Estimated effort: 3-5 days
-
-#### Linux
-1. **Credential Storage** (Priority 1)
-   - Implement `kodework-secrets-linux` using `libsecret` (GNOME Keyring)
-   - Fallback to encrypted file store for headless systems
-   - Support for KWallet (KDE) as secondary option
-   - Estimated effort: 1-2 weeks
-
-2. **Local PTY** (Priority 1)
-   - Reuse macOS `kodework-local-pty-unix` implementation
-   - Test with bash, zsh, fish shells
-   - Estimated effort: 2-3 days (mostly testing)
-
-3. **Build Pipeline** (Priority 2)
-   - `.deb` packages for Debian/Ubuntu
-   - `.rpm` packages for Fedora/RHEL
-   - AppImage for universal Linux compatibility
-   - Flatpak for sandboxed distribution
-   - Estimated effort: 1 week
-
-4. **System Integration** (Priority 2)
-   - System tray using `libappindicator` (Ubuntu) or `StatusNotifierItem` (KDE)
-   - `.desktop` file and XDG autostart integration
-   - Wayland and X11 compatibility testing
-   - Estimated effort: 3-5 days
-
-### Mobile Platforms (iOS, Android)
-
-**Challenge:** Tauri does not support mobile. A different architecture is required.
-
-**Strategic Options:**
-
-#### Option A: React Native (Recommended)
-- **Pros:**
-  - Reuse existing React UI components (~80% code reuse)
-  - Mature SSH libraries available (`react-native-ssh-sftp`, or native modules)
-  - Native performance for UI
-  - Large community and ecosystem
-  - Single codebase for iOS and Android
-
-- **Cons:**
-  - Cannot reuse Rust core directly (different FFI model)
-  - Need to reimplement business logic in TypeScript or write native modules
-  - Larger app size than Tauri desktop (~30-50 MB)
-
-- **Architecture:**
-  ```
-  React Native UI (shared)
-  ├── TypeScript business logic (ported from Rust core)
-  ├── Native SSH module (C++/Objective-C for iOS, C++/Java for Android)
-  ├── Secure storage (Keychain on iOS, Keystore on Android)
-  └── SQLite (same schema as desktop)
-  ```
-
-- **Estimated Effort:** 3-4 months for initial release
-
-#### Option B: Flutter
-- **Pros:**
-  - Excellent cross-platform UI consistency
-  - Good SSH packages available (`dartssh2`)
-  - Rust FFI possible via `flutter_rust_bridge`
-  - Single codebase for mobile and potentially desktop
-
-- **Cons:**
-  - Complete UI rewrite (no React reuse)
-  - Different programming model (Dart)
-  - Larger app size (~30-50 MB)
-  - Smaller community than React Native
-
-- **Estimated Effort:** 4-5 months for initial release
-
-#### Option C: Native (Swift + Kotlin)
-- **Pros:**
-  - Best native performance and OS integration
-  - Direct access to platform APIs
-  - Smallest possible app size
-
-- **Cons:**
-  - Two completely separate codebases
-  - No code reuse with desktop
-  - 2x development and maintenance effort
-  - Slowest time to market
-
-- **Estimated Effort:** 6-8 months for both platforms
-
-**Recommendation: React Native (Option A)**
-- Fastest path to mobile presence
-- Maximal code reuse with desktop UI
-- Proven technology for SSH clients (e.g., Termius uses React Native)
-- Can incrementally port Rust business logic if needed
-
-### Mobile-Specific Features
-
-Both iOS and Android will require:
-
-1. **Biometric Authentication**
-   - Touch ID / Face ID (iOS)
-   - Fingerprint / Face Unlock (Android)
-   - For unlocking credential vault
-
-2. **Background Session Persistence**
-   - iOS background task limitations
-   - Android foreground service for persistent connections
-   - Reconnect on app resume
-
-3. **Mobile-Optimized UI**
-   - Touch-first interface (no hover states)
-   - Bottom sheet modals
-   - Swipe gestures for navigation
-   - Larger tap targets (44pt minimum)
-   - Responsive terminal font sizes
-
-4. **Clipboard Integration**
-   - Share extension for quick file transfers
-   - Copy/paste between terminal and other apps
-
-5. **Notifications**
-   - Transfer completion alerts
-   - Connection status changes
-   - Action run completion
-
-6. **Reduced Feature Set (v1)**
-   - No local terminals (mobile shells are limited)
-   - Simplified file browser (mobile storage model)
-   - Focus on remote SSH sessions and SFTP
-
-## Implementation Phases
-
-### Phase 1: Complete Windows Hardening (Current - Q4 2025)
-**Status:** 95% complete
-- ✅ Core architecture solid
-- ✅ SSH, SFTP, PTY working reliably
-- ✅ Herdr/Tmux integration
-- ⏳ Final polish and documentation
-- ⏳ Public release readiness
-
-**Timeline:** Complete by end of August 2025
-
-### Phase 2: macOS Support (Q4 2025 - Q1 2026)
-**Priority:** High — desktop developers need macOS
-- Credential storage adapter
-- Unix PTY implementation
-- Build pipeline and notarization
-- Testing on multiple macOS versions (12+)
-- Beta release to community
-
-**Timeline:** 3-4 weeks after Windows release
-**Target:** October 2025
-
-### Phase 3: Linux Support (Q1 2026)
-**Priority:** High — open-source community expects Linux support
-- Credential storage with multiple backend support
-- Comprehensive distro testing (Ubuntu, Fedora, Arch, Debian)
-- Package formats for major distros
-- Desktop environment integration testing
-
-**Timeline:** 4-6 weeks
-**Target:** December 2025
-
-### Phase 4: iOS Initial Release (Q1-Q2 2026)
-**Priority:** Medium — mobile is strategic but requires significant work
-- React Native foundation
-- Core SSH functionality (connection, terminal, basic SFTP)
-- iOS-specific credential storage
-- App Store submission process
-
-**Timeline:** 3-4 months
-**Target:** March 2026
-
-### Phase 5: Android Initial Release (Q2 2026)
-**Priority:** Medium — follows iOS architecture
-- Reuse React Native codebase from iOS
-- Android-specific adaptations (storage, notifications, background)
-- Google Play submission
-
-**Timeline:** 2-3 months (after iOS)
-**Target:** May 2026
-
-### Phase 6: Mobile Feature Parity (Q2-Q3 2026)
-- Advanced SFTP features (resume, multi-file)
-- Run Actions on mobile
-- Herdr session management
-- Cross-device session sync (optional cloud backend)
-
-**Timeline:** 2-3 months
-**Target:** August 2026
-
-## Technical Decisions
-
-### Credential Sync (Cross-Device)
-**Question:** Should credentials sync across devices?
-
-**Options:**
-1. **No Sync (Current)** — each device has independent credential vault
-   - Pros: Simplest, most secure, no cloud backend needed
-   - Cons: Manual credential entry on each device
-
-2. **Optional Cloud Sync** — encrypted credential vault stored in user's cloud
-   - Pros: Seamless experience, user controls backend (iCloud, Google Drive, Dropbox)
-   - Cons: Complexity, sync conflicts, trust model
-
-3. **Self-Hosted Sync** — user runs their own sync server
-   - Pros: Complete user control, open-source
-   - Cons: Most complex, barrier to entry
-
-**Decision (Phase 1-5):** No sync — each device is independent. Revisit in Phase 6 based on user demand.
-
-### UI Consistency vs. Native Feel
-**Question:** Should mobile UI match desktop exactly?
-
-**Decision:** Prioritize **native mobile patterns** over pixel-perfect desktop match:
-- Desktop: Dense information, hover, right-click menus, keyboard shortcuts
-- Mobile: Touch-first, bottom sheets, swipe gestures, simplified views
-- Share design language (colors, typography, iconography)
-- Accept that layouts will differ significantly
-
-### Database Schema Compatibility
-**Decision:** All platforms use the **same SQLite schema** (from `kodework-storage`):
-- Enables future export/import across devices
-- Simplifies testing and debugging
-- Mobile ports can reference desktop implementation
-
-### Feature Flags
-**Decision:** Use compile-time feature flags for platform-specific capabilities:
-```rust
-#[cfg(feature = "local-terminal")]
-// Desktop-only: local PTY
-
-#[cfg(feature = "system-tray")]
-// Desktop-only: system tray icon
-
-#[cfg(target_os = "ios")]
-// iOS-specific code
-
-#[cfg(target_os = "android")]
-// Android-specific code
-```
-
-## Success Metrics
-
-### Phase 2 (macOS) — Success Criteria:
-- [ ] 10+ beta testers using daily for 1 week
-- [ ] No P0/P1 bugs reported in core SSH/SFTP
-- [ ] Keychain integration working across reboots
-- [ ] Build size < 20 MB
-- [ ] First-launch to first-connection < 2 minutes
-
-### Phase 3 (Linux) — Success Criteria:
-- [ ] Working on Ubuntu, Fedora, Arch (minimum)
-- [ ] Both GNOME and KDE tested
-- [ ] Wayland and X11 confirmed working
-- [ ] AppImage works on distros without native packages
-- [ ] Community feedback positive (>80% of reported issues addressed)
-
-### Phase 4 (iOS) — Success Criteria:
-- [ ] App Store approval achieved
-- [ ] Core workflows (connect, terminal, SFTP) working smoothly
-- [ ] No crashes or data loss in 1 week of testing
-- [ ] Touch interface feels native (no desktop UI patterns)
-- [ ] Background reconnection working reliably
-
-### Phase 5 (Android) — Success Criteria:
-- [ ] Google Play approval achieved
-- [ ] Working across Samsung, Pixel, OnePlus devices
-- [ ] Battery drain acceptable (< 5% per hour with active connection)
-- [ ] Foreground service keeps connection alive
-- [ ] Material Design guidelines followed
-
-## Open Questions
-
-1. **Should we support ChromeOS?**
-   - ChromeOS can run Linux apps (Crostini) — might work automatically
-   - Native Chrome app would require different architecture
-   - Decision: Test Linux build on ChromeOS; if it works well, document it. No dedicated port initially.
-
-2. **Should we support iPad-specific features?**
-   - Split-view multitasking
-   - External keyboard shortcuts
-   - Mouse/trackpad support
-   - Decision: Yes, but in Phase 6 (after core iOS release)
-
-3. **Should we have a web version?**
-   - Browser-based SSH client (no installation)
-   - Use WebAssembly for Rust core
-   - Limitations: browser security model restricts local file access
-   - Decision: Not initially — native apps provide better experience and security. Revisit if user demand emerges.
-
-4. **How to handle platform-specific bugs?**
-   - Use GitHub issue labels: `platform:windows`, `platform:macos`, `platform:linux`, `platform:ios`, `platform:android`
-   - Prioritize bugs that affect multiple platforms
-   - Each platform has a designated testing lead
-
-## Community and Contributions
-
-As we expand to multiple platforms, we need:
-- **Platform maintainers**: Contributors who own testing and bug triage for specific platforms
-- **Beta testing programs**: Structured feedback collection per platform
-- **Platform-specific documentation**: Installation, troubleshooting per OS
-- **CI/CD per platform**: Automated builds and tests
-
-**Call for contributors**: We welcome platform maintainers for macOS and Linux. See [CONTRIBUTING.md](../CONTRIBUTING.md).
-
-## Conclusion
-
-KodeWork's cross-platform journey is ambitious but achievable:
-1. **Windows** is production-ready (Q4 2025)
-2. **macOS** and **Linux** follow quickly with shared Rust core (Q4 2025 - Q1 2026)
-3. **iOS** and **Android** require new architecture but leverage React ecosystem (Q1-Q2 2026)
-
-By mid-2026, KodeWork will be a truly universal SSH workspace manager, providing a premium experience on every platform users work on.
-
-**Status:** This roadmap will be updated quarterly as we make progress.
+# KodeWork cross-platform roadmap
+
+> This document describes the technical path toward additional native desktop platforms. It is not a release schedule. For current product availability, use [`STATUS.md`](STATUS.md) and [`RELEASE-MATRIX.md`](RELEASE-MATRIX.md). For project-wide priorities, use [`../ROADMAP.md`](../ROADMAP.md).
+
+## Current evidence
+
+KodeWork currently distributes a **Windows 10/11 x64 MSI**. That is the only native desktop release the project claims today.
+
+The repository also checks a selected portable Rust crate graph on Linux and macOS in CI. Those jobs are useful portability evidence for shared domain, storage, network, SSH/SFTP, Tailscale, Herdr, and related core code, but they do **not** prove that a native macOS or Linux desktop application is packaged, installable, signed, or usable.
+
+No iOS or Android client is currently released or promised on a schedule.
+
+## What “supported” means
+
+A platform is not considered supported because the Rust graph compiles or because the application framework can target that operating system. Before KodeWork claims a new native desktop platform, the target must have evidence for all relevant layers:
+
+1. **Portable core** — the shared Rust graph builds and its relevant tests pass on the target architecture.
+2. **Credential storage** — secrets use an appropriate OS-backed secure store with reboot/relaunch and failure-path tests; renderer persistence is not used as a credential vault.
+3. **Local terminal** — a native PTY implementation supports shell startup, resize, I/O, close/exit behavior, and resource limits without weakening current safety boundaries.
+4. **Desktop shell** — the native Tauri application launches correctly and platform-specific lifecycle, tray/menu, clipboard, dialogs, notifications, and keyboard behavior are exercised where applicable.
+5. **Remote-development workflows** — SSH host-key policy, authentication modes, SFTP, tmux/Herdr, Tailscale paths, jump hosts, and reconnect behavior are verified on the native client rather than inferred from shared-core tests.
+6. **Packaging** — install, launch, upgrade, and uninstall smoke tests pass for the actual package format distributed to users.
+7. **Release trust** — signing, notarization, checksums, updater metadata, and other trust layers required for the chosen distribution path are configured and verified separately.
+8. **Documentation** — the user guide, troubleshooting guidance, status page, and release matrix describe the platform without relying on Windows-only instructions or unverified claims.
+
+Until those gates are satisfied, documentation should say `portable core checked`, `under development`, or `not released` rather than `supported` or `production-ready`.
+
+## macOS path
+
+The portable Rust checks are groundwork, not a desktop beta. Native macOS work should proceed in small, reviewable layers:
+
+### Native adapters
+
+- provide an OS-backed credential-store implementation appropriate for macOS;
+- implement or adopt a Unix PTY path behind the existing local-terminal boundary;
+- audit filesystem, shell, clipboard, process-launch, tray/menu, and path assumptions that currently depend on Windows behavior;
+- keep SSH host-key verification and credential policy fail-closed while adapting platform APIs.
+
+### Native acceptance
+
+Before publishing a macOS artifact, verify at minimum:
+
+- clean build on the target architecture;
+- application bundle creation and launch on a clean test machine;
+- credential persistence/retrieval through the native secure store;
+- local shell startup, resize, Unicode/CJK input, clipboard behavior, and clean close/exit;
+- real SSH/SFTP plus the supported private-network/jump-host paths;
+- sleep/resume and network-change recovery;
+- install/update/uninstall behavior for the selected distribution route;
+- code signing and notarization requirements for that route.
+
+The project should decide Intel support separately from Apple Silicon support based on test capacity and user demand; CI architecture coverage must not be silently generalized to untested hardware.
+
+## Linux path
+
+Linux support has a wider environment matrix, so the first native target should be deliberately narrow instead of claiming every distribution or desktop environment.
+
+### Native adapters
+
+- use an OS-appropriate secure credential backend with an explicit failure policy when a secure store is unavailable;
+- share a Unix PTY implementation where the platform behavior is genuinely compatible, while retaining target-specific tests;
+- audit desktop integration across the chosen display/session environment rather than assuming Windows tray/lifecycle semantics;
+- keep packaging choices limited to formats the project can build, install, upgrade, uninstall, and support reproducibly.
+
+### Native acceptance
+
+For every Linux distribution/package combination that is advertised, collect evidence for:
+
+- package installation, launch, upgrade, and removal;
+- secure credential storage in the documented desktop/session environment;
+- local terminal behavior and common shell startup;
+- SSH/SFTP, Tailscale/jump-host, Herdr/tmux, clipboard/file, and reconnect workflows;
+- Wayland/X11 or desktop-environment behavior only where those combinations were actually tested;
+- bundled sidecars, runtime libraries, desktop entries, tray integration, and permissions required by the package.
+
+A successful CI build on Ubuntu does not imply support for Fedora, Arch, Debian, GNOME, KDE, Wayland, X11, Flatpak, AppImage, RPM, or any other environment that has not passed its own acceptance path.
+
+## Mobile and web
+
+iOS, Android, ChromeOS-specific, and browser clients are **exploratory topics, not committed roadmap items**. The project does not currently commit to React Native, Flutter, a native rewrite, Tauri mobile, WebAssembly, cloud credential sync, or any delivery date for those targets.
+
+If mobile or web demand becomes material, architecture selection should begin with a written threat model and a small proof of concept covering the hard constraints first:
+
+- SSH transport and host-key verification;
+- platform credential storage;
+- terminal rendering/input and background/resume limits;
+- filesystem and SFTP interaction within the platform sandbox;
+- lifecycle/reconnect behavior;
+- whether enough of the existing Rust core can be reused without duplicating security-sensitive business logic.
+
+Only after those constraints are measured should the project choose a client framework or publish a delivery plan.
+
+## Sequencing
+
+There are no committed platform dates. A responsible sequence is:
+
+1. keep the portable Rust graph green on target operating systems;
+2. isolate remaining Windows-specific code behind explicit platform boundaries;
+3. implement one native adapter at a time with focused tests;
+4. create native packages in CI without calling them releases;
+5. run native GUI, secure-storage, real-network, lifecycle, and packaging acceptance;
+6. publish a preview only when its limitations are explicit;
+7. promote a platform to supported/released only after the release matrix contains the corresponding evidence.
+
+This order may change when testing capacity, contributor ownership, or user demand changes. A roadmap change should update the repository documents rather than inventing percentage-complete values or calendar promises.
+
+## Contribution areas
+
+Useful cross-platform contributions are intentionally smaller than “port KodeWork to an OS”:
+
+- reduce Windows-only assumptions in shared crates without changing behavior;
+- add deterministic platform-boundary tests;
+- improve portable CI coverage for shared crates;
+- prototype secure-store or PTY adapters behind existing interfaces;
+- document a reproducible native build/acceptance result with sanitized evidence;
+- identify code that compiles cross-platform but still depends on Windows semantics at runtime.
+
+Open a focused issue before undertaking a broad platform port so scope, evidence, and support claims remain reviewable. See [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+
+## Non-goals
+
+- no support claims based on compilation alone;
+- no percentage-complete estimates without an auditable definition;
+- no speculative release dates;
+- no framework recommendation presented as a settled architecture decision before a proof of concept;
+- no insecure credential fallback added merely to make another platform launch;
+- no attempt to support every package format, desktop environment, architecture, or mobile platform at once.
+
+The durable rule is simple: **portable code is groundwork; native support requires native evidence.**
