@@ -1,19 +1,15 @@
-# Claude Code project entry point
+# Claude Code entry point
 
-Read the current handoff at [`docs/HANDOFF-CODEX.zh-CN.md`](docs/HANDOFF-CODEX.zh-CN.md) 
-before changing, committing, or publishing anything.
+Read [`AGENTS.md`](AGENTS.md) first. It is the repository-wide, durable instruction file for Codex, Claude Code, and other coding agents.
 
-Current checkout facts (verify again before mutation):
+Then use the audience-specific documentation as needed:
 
-1. Branch: `main`; current local `HEAD` and `origin/main`: `aba95e5`.
-2. Working tree has **one uncommitted fix**: `disconnect()` now calls 
-   `event_pump_stopped()` to properly signal SFTP workers on teardown.
-3. The only untracked item is `.claude/` (local settings, never commit).
-4. Do not reset, clean, force-push, rewrite history, create releases, or mutate
-   GitHub assets without explicit authorization in the current conversation.
-5. Local code and fresh test evidence take priority over stale handoffs.
-6. Never put credentials, private host details, signing keys, secret-bearing
-   logs, or real infrastructure data into source, tests, issues, or PR text.
+1. [`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md) — detailed operational and security rules;
+2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system boundaries and data flow;
+3. [`docs/STATUS.md`](docs/STATUS.md) — current release scope and known limits;
+4. [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) — platform/release evidence requirements;
+5. [`ROADMAP.md`](ROADMAP.md) — public project direction.
 
-The handoff records the verified implementation inventory, exact local and 
-GitHub CI evidence, known gaps, and the safe next sequence.
+Do not rely on old handoff documents for current branch state, current commit SHAs, local working-tree facts, or test counts. Those files are historical snapshots retained for traceability.
+
+Never publish credentials, real host details, signing keys, secret-bearing logs, private files, or machine-specific infrastructure data.

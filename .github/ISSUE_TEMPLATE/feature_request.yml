@@ -1,17 +1,71 @@
 name: Feature request
-description: Suggest a focused improvement.
+description: Suggest a focused improvement to KodeWork.
 title: "[Feature]: "
 labels: [enhancement]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please describe the problem before proposing the implementation so maintainers can evaluate the underlying use case.
+
+        Do not include credentials, private host details, or sensitive files in examples or screenshots.
+
   - type: textarea
     id: problem
     attributes:
       label: Problem and use case
+      description: What workflow is difficult today, and who would benefit?
+      placeholder: "When I ..., I need ... because ..."
     validations:
       required: true
+
   - type: textarea
     id: proposal
     attributes:
       label: Proposed behavior
+      description: Describe the smallest useful behavior change rather than prescribing internal implementation details when possible.
     validations:
       required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. What workarounds or alternative approaches have you tried?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - SSH / authentication / host verification
+        - Tailscale / networking / jump hosts
+        - Terminal / PTY / reconnect
+        - Files / SFTP / transfers
+        - Herdr / tmux / durable sessions
+        - Actions / automation / runs
+        - Web Preview / port forwarding
+        - Windows desktop / UX / accessibility
+        - Build / release / CI
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Would you be willing to help?
+      options:
+        - Yes, I can work on a pull request
+        - I can help test a proposed change
+        - I can provide more requirements or reproduction details
+        - Not at this time
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Optional screenshots, mockups, links, or related issues. Redact sensitive information first.

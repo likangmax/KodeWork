@@ -1,41 +1,70 @@
-## What does this PR do?
+## Problem / user need
 
-A clear and concise description of what this pull request changes.
+What observable problem or maintainer need does this PR address?
+
+## What changed
+
+Describe the smallest relevant implementation or documentation change.
 
 ## Related issue(s)
 
-Closes #(issue number)
-Fixes #(issue number)
-Related to #(issue number)
+Closes #
+Related to #
 
-## Testing
+## Verification
 
-Describe how you tested this change:
+List the checks you actually ran and their results. Do not mark native or real-network behavior as verified from unit tests alone.
 
-- [ ] All tests pass (`cargo test --workspace --all-features`)
-- [ ] Frontend tests pass (`npm run test:frontend`)
-- [ ] Clippy passes (`cargo clippy --workspace --all-targets --all-features -- -D warnings`)
-- [ ] Code is formatted (`cargo fmt --all -- --check` and `npm run lint`)
-- [ ] Manual testing completed (describe what you tested)
+- [ ] Focused tests for the changed area
+- [ ] `npm run lint`
+- [ ] `npm run test:frontend`
+- [ ] `npm run build`
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+- [ ] `cargo test --locked --workspace --all-features`
+- [ ] `npm audit --omit=dev --audit-level=high`
+- [ ] `git diff --check`
 
-## Screenshots / Demo
+### Evidence category
 
-If applicable, add screenshots or screen recordings to demonstrate the change.
+Check only what was actually exercised:
 
-## Checklist
+- [ ] Automated tests/build/lint
+- [ ] Native Windows desktop behavior
+- [ ] Protected real-network SSH/Tailscale/jump-host behavior
+- [ ] Installer/upgrade/uninstall behavior
+- [ ] Not applicable
 
-- [ ] Code follows the project's coding standards
-- [ ] Documentation has been updated (if applicable)
-- [ ] CHANGELOG.md updated (for user-facing changes)
-- [ ] No credentials, keys, or sensitive data committed
-- [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/)
+**Not tested / blocked:**
+
+Describe any evidence that was unavailable.
+
+## Security and privacy
+
+- [ ] No passwords, private keys/passphrases, Tailscale auth keys, signing keys, real hostnames, private files, or sensitive terminal output are included
+- [ ] SSH host-key / identity behavior remains fail-closed where applicable
+- [ ] Renderer/UI code does not become a credential store or the final authority for dangerous actions
+- [ ] Security-sensitive behavior has regression coverage or an explicit reason why it cannot be automated
+
+Describe security/privacy impact, or write `None`:
+
+## Documentation / product claims
+
+- [ ] User-facing docs were updated if behavior changed
+- [ ] English/Chinese docs remain consistent where applicable
+- [ ] No new platform/release capability is claimed without the required evidence
+- [ ] `docs/STATUS.md`, `docs/RELEASE-MATRIX.md`, or `ROADMAP.md` were updated if their source-of-truth scope changed
+
+## Screenshots / demo
+
+For UI work, add sanitized screenshots or recordings when useful. Remove usernames, hostnames, file paths, terminal contents, credentials, and private infrastructure details.
 
 ## Breaking changes
 
-- [ ] This PR introduces breaking changes (describe below)
+- [ ] This PR introduces a breaking change
 
-If yes, describe the breaking changes and migration path:
+If checked, describe the migration path.
 
 ## Additional notes
 
-Any additional information or context for reviewers.
+Anything reviewers should know that is not covered above.

@@ -5,23 +5,83 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: "请勿填写密码、Tailscale auth key、SSH 私钥、真实主机名或私人文件内容。"
+      value: |
+        Thanks for helping improve KodeWork.
+
+        **Do not include passwords, SSH private keys/passphrases, Tailscale auth keys, signing keys, real hostnames/IPs, or private file contents.** Redact sensitive infrastructure details from logs and screenshots before attaching them.
+
   - type: input
     id: version
     attributes:
-      label: Kodework version
+      label: KodeWork version
+      description: Use the About dialog or release tag when possible.
       placeholder: "0.2.3"
     validations:
       required: true
+
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows version
+      options:
+        - Windows 11
+        - Windows 10
+        - Other / unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection path
+      options:
+        - Direct SSH
+        - Tailscale (system daemon)
+        - Tailscale (embedded userspace)
+        - SSH jump host
+        - Local terminal (PowerShell / CMD / WSL)
+        - Not applicable / unknown
+    validations:
+      required: true
+
   - type: textarea
     id: reproduce
     attributes:
       label: Reproduction steps
+      description: Include the smallest sequence that reliably reproduces the problem.
+      placeholder: |
+        1. Open ...
+        2. Configure ...
+        3. Click ...
+        4. Observe ...
     validations:
       required: true
+
   - type: textarea
     id: expected
     attributes:
-      label: Expected and actual behavior
+      label: Expected behavior
     validations:
       required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots, or additional context
+      description: Redact secrets, private host details, usernames, file paths, and sensitive payloads before posting.
+      placeholder: "Sanitized error output, screenshot, or other context (optional)"
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I have checked this report and removed credentials, private keys, auth tokens, signing material, and private infrastructure details.
+          required: true

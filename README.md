@@ -4,8 +4,7 @@
 
 <h1 align="center">KodeWork</h1>
 
-<p align="center"><strong>A local-first workbench for durable coding sessions on private Linux hosts.
-Windows desktop available today · Portable Rust core checked on Windows, macOS, and Linux</strong></p>
+<p align="center"><strong>A local-first Windows workbench for durable coding sessions on private Linux hosts.</strong></p>
 
 <p align="center">
   <a href="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml/badge.svg"></a>
@@ -14,152 +13,167 @@ Windows desktop available today · Portable Rust core checked on Windows, macOS,
   <img alt="Windows 10/11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
 </p>
 
-<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-KodeWork is a fast, local-first Windows workbench for connecting to Linux machines that are not directly exposed to the public internet. It combines Tailscale or an SSH jump host, SSH/PTY, Herdr/tmux session continuity, SFTP, clipboard asset upload, port-forwarded previews, and a native Windows desktop workflow.
+<p align="center">
+  <a href="https://github.com/likangmax/KodeWork/releases/latest">Download</a> ·
+  <a href="docs/USER-GUIDE.md">User guide</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
 
-It is not another generic terminal tab manager. The product is built around one promise:
+KodeWork turns a private Linux machine into a recoverable remote coding workspace without requiring that machine to have a public IP. It combines SSH/PTY, SFTP, Tailscale or jump-host routing, tmux/Herdr session continuity, file and asset transfer, SSH port forwarding, and a native Windows desktop workflow.
 
-> Start a coding workspace on a remote Linux host, disconnect whenever you want, and come back to the same work without giving the host a public IP.
+> Start work on a remote Linux host, disconnect when you need to, and return to the same durable remote session later.
 
-## Start here
+## Get started
 
-### I only want to use KodeWork
+### 1. Install
 
-1. Download the **Windows x64 MSI** from [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest).
-2. Run the installer, then launch KodeWork and choose **English** or **简体中文**. This is a first-launch app prompt; the MSI wizard itself is not localized yet.
-3. Select **+** beside Workstations, enter your Linux host, choose a network path and authentication method, then connect.
-4. Verify the SSH host-key fingerprint before trusting a new host.
+Download the latest **Windows x64 MSI** from [GitHub Releases](https://github.com/likangmax/KodeWork/releases/latest), install it, and launch KodeWork.
 
-New to SSH, Tailscale, Herdr, or jump hosts? Follow the complete [zero-to-connected user guide](docs/USER-GUIDE.md). It explains every field, all connection modes, upgrades, clipboard upload, files, WSL, durable sessions, and common failures.
+The first launch asks for **English** or **简体中文**. The MSI wizard itself is not localized yet.
 
-### I am an AI agent or maintainer
+### 2. Add a workstation
 
-Read the [agent and maintainer guide](docs/AGENT-GUIDE.md) or the [中文 Agent 指南](docs/AGENT-GUIDE.zh-CN.md) before changing code. They define repository boundaries, security rules, required tests, release evidence, privacy checks, and the safe pull-request workflow.
+Select **+** beside Workstations and provide:
 
-Current community builds are not Authenticode-signed because the project does not yet have a commercial Windows certificate. Windows SmartScreen may therefore show an unknown-publisher warning. Release checksums and the exact distribution limits are listed in each release and in [Project status](docs/STATUS.md).
+- Linux username and address;
+- SSH authentication method;
+- remote working directory;
+- optional Tailscale or SSH jump-host route;
+- optional tmux or Herdr runtime for durable sessions.
 
-## Platform availability
+On the first SSH connection, verify the server host-key fingerprint before trusting it.
 
-| Capability | Windows x64 | macOS | Linux desktop |
-| --- | --- | --- | --- |
-| Installable KodeWork desktop release | **Available (MSI)** | Not published | Not published |
-| Native GUI/install/signing smoke tests | **Release baseline** | Not completed | Not completed |
-| Portable Rust crates in CI | Checked | Checked | Checked |
+### 3. Learn the workflow
 
-Cross-platform core CI is not a macOS or Linux desktop release. Those platforms become supported only after native bundles, signing, installation, GUI smoke tests, sidecars, and release assets pass. See the [release matrix](docs/RELEASE-MATRIX.md).
+The [user guide](docs/USER-GUIDE.md) walks through Linux preparation, all connection modes, files, asset paste, WSL/local terminals, durable sessions, upgrades, and troubleshooting.
 
 ## Why KodeWork
 
-Most SSH clients stop at “open a shell”. KodeWork treats the remote machine as a durable coding workspace:
+Most SSH clients focus on opening a shell. KodeWork treats the remote machine as a persistent development workspace.
 
-1. **Reach private hosts** — discover Tailscale addresses, use fallback addresses, or chain through a jump host.
-2. **Attach to durable work** — use Herdr or tmux on the remote host so a Windows restart or network flap does not destroy the task.
-3. **Work from one surface** — terminal panes, actions, Herdr runtime state, files, transfers, screenshots/PDFs, and web previews share one project context.
-4. **Keep control local** — credentials stay behind the Windows secure-storage boundary; the renderer does not receive private key material or passwords.
+| Need | KodeWork approach |
+| --- | --- |
+| Reach a private host | Direct/LAN addresses, Tailscale discovery, fallback routes, or an SSH jump host |
+| Keep remote work alive | Reattach to tmux or Herdr after local disconnects/restarts |
+| Work from one desktop surface | Terminal panes, files, transfers, actions, runtime state, and web previews share project context |
+| Avoid credential leakage into UI state | Password/private-key material stays behind native secret-handling boundaries |
+| Move large files safely | SFTP streaming with pause/resume/retry/cancel and staged completion |
+| Preview remote web services | SSH local port forwarding to loopback-only Web Preview |
+
+## Current capability
+
+The currently distributed desktop target is **Windows 10/11 x64**.
+
+| Capability | Windows x64 | macOS desktop | Linux desktop |
+| --- | --- | --- | --- |
+| Installable KodeWork desktop release | **Available (MSI)** | Not released | Not released |
+| Native GUI/install/signing acceptance | Windows release baseline | Not completed | Not completed |
+| Portable Rust core CI | Checked | Checked | Checked |
+
+Cross-platform Rust CI is not a desktop-release claim. KodeWork will only call a new desktop platform supported after native packaging, installation, GUI behavior, sidecars, signing/notarization requirements, and release assets are verified. See [Project status](docs/STATUS.md), [Release matrix](docs/RELEASE-MATRIX.md), and the [Roadmap](ROADMAP.md).
 
 ## Feature map
 
-| Area | What KodeWork provides |
+| Area | Current functionality |
 | --- | --- |
-| Network | Embedded userspace Tailscale, system-daemon discovery, address fallback, SSH jump-host chains |
-| Terminal | Rust SSH/PTY core, xterm.js renderer, split panes, CJK/IME support, reconnect state |
-| Durable sessions | Herdr and tmux attach/reconnect workflow |
-| Clipboard | Mouse selection copy, Herdr/tmux/Vim OSC 52 writes to the Windows clipboard, clipboard reads disabled |
-| Files | Virtualized large directories, SFTP streaming, resume/pause/retry/cancel, per-host pinned folders |
-| Assets | Paste screenshots, images, and PDFs; validate and upload them into the active remote workspace |
-| Automation | Interactive, quick, and background Actions with server-side danger classification; Quick and Background runs have durable history |
-| Preview | SSH local port forwarding and loopback Web Preview |
-| Desktop | English/Chinese UI preference, themes, tray, single instance, autostart, local PowerShell/CMD/WSL terminals, signed updater verification |
+| Network | Direct/fallback addresses, embedded or system Tailscale discovery, SSH jump hosts |
+| Remote terminal | Rust SSH/PTY core, xterm.js, split panes, CJK/IME support, reconnect state |
+| Durable sessions | tmux and Herdr discovery/attach workflows |
+| Authentication | Password, public key, SSH Agent/Pageant, keyboard-interactive/MFA |
+| Files | SFTP browsing, streaming transfer, pause/resume/retry/cancel, pinned remote folders |
+| Clipboard/assets | Text copy plus explicit screenshot/image/PDF upload into the active remote workspace |
+| Local terminals | PowerShell, Command Prompt, and WSL through Windows ConPTY |
+| Automation | Interactive, Quick, and Background Actions with Rust-side danger classification |
+| Preview | SSH local forwarding and loopback Web Preview |
+| Desktop | English/Chinese UI, themes, tray, single instance, autostart, updater-signature verification support |
+
+## Security model
+
+KodeWork handles security-sensitive boundaries explicitly:
+
+- unknown SSH host keys require a fingerprint decision;
+- changed known host keys are hard failures;
+- passwords, private-key passphrases, and Tailscale auth keys are not ordinary renderer/SQLite/log data;
+- dangerous Actions are classified again by Rust, not trusted solely to the UI;
+- remote OSC 52 clipboard writes are bounded, while remote clipboard reads are intentionally ignored;
+- SFTP uploads remain streamed and staged rather than loading entire files into memory;
+- Web Preview is limited to explicit loopback SSH forwarding.
+
+Do not report suspected vulnerabilities in a public issue. Follow [SECURITY.md](SECURITY.md).
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-  UI[React + xterm.js workspace UI] --> IPC[Typed Tauri commands + bounded Channels]
+  UI[React + xterm.js] --> IPC[Typed Tauri commands + bounded channels]
   Shell[Tauri 2 desktop shell] --> IPC
   IPC --> Core[kodework-core\nsessions · runs · tunnels · transfers]
   Core --> Domain[kodework-domain\nmodels · validation · danger policy]
   Core --> Adapters[SSH · SFTP · Tailscale · Herdr · local PTY · storage]
-  Adapters --> Host[Private Linux host\nSSH / SFTP / Herdr / tmux]
+  Adapters --> Host[Private Linux host\nSSH / SFTP / tmux / Herdr]
 ```
 
-The desktop shell is intentionally thin. Rust owns connection truth, reconnect generations, authentication boundaries, transfer state, and remote-session continuity; React owns presentation and renderer lifecycle. Tailscale provides a network path, while SSH still performs authentication and host-key verification.
+Rust owns connection truth, authentication boundaries, reconnect generations, transfer state, and remote-session continuity. React owns presentation and renderer lifecycle. Tailscale can provide the network path; SSH still performs target authentication and host-key verification.
 
-See the full boundary and data-flow description in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the numbered decisions in [`docs/adr/`](docs/adr/).
-
-
-## Documentation
-
-- [User guide](docs/USER-GUIDE.md) · [中文用户指南](docs/USER-GUIDE.zh-CN.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Agent/maintainer guide](docs/AGENT-GUIDE.md)
-- [Documentation map](docs/README.md)
-- [Project status](docs/STATUS.md) · [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md)
-- [Architecture](docs/ARCHITECTURE.md) · [Release matrix](docs/RELEASE-MATRIX.md) · [Changelog](docs/CHANGELOG.md)
-- [Cross-platform roadmap](docs/CROSS-PLATFORM-ROADMAP.md)
-
-## Security principles
-
-- Unknown SSH host keys require an explicit fingerprint decision; changed keys are hard failures.
-- Passwords, private-key passphrases, and Tailscale auth keys never enter ordinary renderer persistence, command-line arguments, or logs.
-- Destructive Actions are classified again by Rust; the UI cannot mark a dangerous command as safe.
-- OSC 52 accepts only bounded UTF-8 clipboard writes. Remote clipboard reads are intentionally ignored.
-- SFTP uploads are streamed and staged atomically instead of reading entire files into memory.
-- Production CSP is restrictive; loopback frames are allowed only for the explicit SSH Web Preview feature.
+See [Architecture](docs/ARCHITECTURE.md) and the numbered [ADRs](docs/adr/).
 
 ## Development
 
 ### Prerequisites
 
-- Windows 10/11 x64
-- Rust 1.98.0 with the MSVC toolchain (the repository toolchain pin is in `rust-toolchain.toml`)
+- Windows 10/11 x64 for native desktop development
+- Rust 1.98.0 with the MSVC toolchain (`rust-toolchain.toml`)
 - Node.js 24+ and npm
 - Tauri 2 Windows development prerequisites
 
-### Commands
+### Common commands
 
 ```powershell
 npm ci
-npm run dev              # browser-only preview; no native SSH or credentials
-npm run desktop          # Tauri desktop development
+npm run dev              # browser-only UI preview; no native SSH/credentials
+npm run desktop          # native Tauri development
 npm run lint
 npm run test:frontend
 npm run build
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 ```
 
-For a release build, use `scripts/build-release.ps1`. It prepares pinned Tailscale sidecars and produces the MSI plus Tauri updater signature. Commercial Authenticode signing is intentionally supplied by the distributor rather than committed to the repository.
+For repository rules, testing expectations, and PR guidance, read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents should start with [AGENTS.md](AGENTS.md).
 
 ## Repository layout
 
 ```text
-crates/                    Rust domain, core, transport, storage and platform adapters
-src-tauri/                 Thin Tauri shell, typed IPC, plugins and native resources
-src/                       React workspace, terminal, files, runtime and settings UI
-docs/                      Architecture, ADRs, quality evidence, release and license notes
-scripts/                   Reproducible build, sidecar and verification helpers
-.github/                   CI, release automation, issue forms and contribution templates
+crates/        Rust domain, core, transport, storage, and platform adapters
+src-tauri/     Thin Tauri shell, typed IPC, plugins, native resources
+src/           React workspace, terminal, files, runtime, settings UI
+docs/          User guides, architecture, ADRs, test/release evidence
+scripts/       Reproducible build, sidecar, and verification helpers
+.github/       CI, release automation, issue forms, PR templates
 ```
 
-Build manifests and community-health files intentionally remain at the repository root so Cargo, npm, Vite, Tauri, and GitHub can discover them without custom configuration. The ignored `references/`, `target/`, `dist/`, and `node_modules/` directories are local/generated data and are not redistributed.
+## Project status and roadmap
 
+KodeWork is usable today but remains an actively developed `0.x` project. Near-term work focuses on connection/recovery reliability, terminal and transfer performance, Windows acceptance evidence, accessibility, and contributor experience.
 
-## Project status
+- [Current project status](docs/STATUS.md)
+- [Public roadmap](ROADMAP.md)
+- [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md)
+- [Release matrix](docs/RELEASE-MATRIX.md)
+- [Changelog](docs/CHANGELOG.md)
 
-KodeWork is usable today, but it remains an actively developed `0.x` project. The near-term focus is making the remote coding loop faster and more dependable:
+## Contributing
 
-- faster first-byte connection feedback and address selection;
-- smooth terminal rendering under large output and many panes;
-- high-throughput, resumable transfers;
-- clear recovery after sleep, network loss, or application restart;
-- a compact, keyboard-first Windows UI instead of a generic admin dashboard.
+Focused issues and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use the structured issue forms, and keep real credentials, hostnames, private files, and signing material out of public reports.
 
-## Contributing and security
-
-This repository uses the MIT License and accepts focused issues and pull requests. Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code and report vulnerabilities through [SECURITY.md](SECURITY.md). Never publish passwords, SSH private keys, Tailscale auth keys, updater signing keys, real hostnames, or private files.
+Questions and ideas can go to [GitHub Discussions](https://github.com/likangmax/KodeWork/discussions).
 
 ## License
 
