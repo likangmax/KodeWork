@@ -1,399 +1,175 @@
 # Contributing to KodeWork
 
-Thank you for your interest in contributing to KodeWork! This guide will help you understand our development process and how to submit quality contributions.
+Thanks for considering a contribution. KodeWork welcomes focused bug fixes, tests, documentation improvements, accessibility work, and well-scoped product changes.
 
-## Table of Contents
+The project handles SSH credentials, host identity, remote execution, file transfer, and updater trust, so contributions are expected to preserve the documented security boundaries and to be precise about what was actually tested.
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Workflow](#development-workflow)
-- [Pull Request Process](#pull-request-process)
-- [Coding Standards](#coding-standards)
-- [Testing Requirements](#testing-requirements)
-- [Security Considerations](#security-considerations)
-- [Documentation Guidelines](#documentation-guidelines)
+## Before you start
 
-## Code of Conduct
+Please read:
 
-We are committed to providing a welcoming and inclusive environment. Please be respectful, constructive, and professional in all interactions.
+1. [`AGENTS.md`](AGENTS.md) — concise repository-wide instructions for coding agents and contributors;
+2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system boundaries and data flow;
+3. [`docs/STATUS.md`](docs/STATUS.md) — current release scope and known gaps;
+4. [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) — what counts as verified/released on each platform;
+5. the relevant ADR under [`docs/adr/`](docs/adr/) for the subsystem you are changing.
 
-## Getting Started
+The detailed operational guide is [`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md). Historical handoff documents under `docs/` are snapshots for traceability and are **not** the source of truth for the current checkout.
 
-### Prerequisites
+## Development environment
 
-- **Windows 10/11 x64** (primary development platform)
-- **Rust 1.98.0+** with MSVC toolchain (see `rust-toolchain.toml`)
-- **Node.js 20+** and npm
-- **Git** for version control
-- **Visual Studio Build Tools** (for Rust MSVC toolchain)
+The current desktop development baseline is:
 
-### First-Time Setup
+- Windows 10/11 x64 for native desktop work;
+- Rust **1.98.0**, pinned by [`rust-toolchain.toml`](rust-toolchain.toml), with the MSVC toolchain on Windows;
+- Node.js **24+** and npm;
+- Tauri 2 Windows prerequisites;
+- Git.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/likangmax/KodeWork.git
-   cd KodeWork
-   ```
+Portable Rust crates are also checked in CI on Linux and macOS. That does not make those operating systems released desktop targets.
 
-2. **Install dependencies:**
-   ```bash
-   npm ci
-   cargo build
-   ```
+### First-time setup
 
-3. **Verify your environment:**
-   ```bash
-   npm run test:frontend
-   cargo test --workspace --all-features
-   npm run lint
-   cargo clippy --workspace --all-targets --all-features -- -D warnings
-   ```
-
-4. **Run the development build:**
-   ```bash
-   npm run desktop
-   ```
-
-### Understanding the Architecture
-
-Read these documents before making changes:
-
-1. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - System boundaries and data flows
-2. [`docs/HANDOFF-CLAUDE-CODE.zh-CN.md`](docs/HANDOFF-CLAUDE-CODE.zh-CN.md) - Detailed implementation guide
-3. [`docs/STATUS.md`](docs/STATUS.md) - Current project status and gaps
-4. [`docs/adr/`](docs/adr/) - Architecture decision records
-
-**Key architectural principles:**
-- Rust owns connection truth, credentials, and lifecycle
-- React owns presentation and renderer lifecycle only
-- One-way dependency: UI → Tauri → Core → Domain → Adapters
-- Bounded channels for high-frequency data (terminal, transfers)
-- Fail-closed security boundaries (host keys, credentials)
-
-## Development Workflow
-
-### Branch Strategy
-
-- `main` - stable release branch
-- `feature/*` - new features
-- `fix/*` - bug fixes
-- `docs/*` - documentation improvements
-- `refactor/*` - code improvements without behavior changes
-
-### Making Changes
-
-1. **Create a feature branch:**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Make atomic commits with clear messages:**
-   ```bash
-   git commit -m "feat: add SSH connection pooling"
-   git commit -m "fix: prevent race in reconnect supervisor"
-   git commit -m "docs: update ARCHITECTURE.md with new flow"
-   ```
-
-   Use conventional commit prefixes:
-   - `feat:` - new feature
-   - `fix:` - bug fix
-   - `docs:` - documentation only
-   - `test:` - add or update tests
-   - `refactor:` - code change without behavior change
-   - `perf:` - performance improvement
-   - `chore:` - maintenance tasks
-   - `security:` - security fix
-
-3. **Keep commits focused:**
-   - One logical change per commit
-   - Don't mix refactoring with behavior changes
-   - Don't mix formatting changes with logic changes
-
-## Pull Request Process
-
-### Before Submitting
-
-1. **Ensure all tests pass:**
-   ```powershell
-   cargo fmt --all -- --check
-   cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-   cargo test --locked --workspace --all-features
-   npm run lint
-   npm run test:frontend
-   npm run build
-   ```
-
-2. **Run security audits:**
-   ```powershell
-   cargo audit --no-fetch
-   npm audit --omit=dev --audit-level=high
-   ```
-
-3. **Check for secrets:**
-   ```powershell
-   git diff --check
-   # Manually verify no credentials, keys, or sensitive data
-   ```
-
-4. **Update documentation:**
-   - Add/update inline code documentation
-   - Update relevant markdown files
-   - Add tests for new functionality
-   - Update CHANGELOG.md if applicable
-
-### Submitting the PR
-
-1. **Push your branch:**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-2. **Create a Pull Request with:**
-   - **Clear title** describing the change
-   - **Description** explaining:
-     - What problem does this solve?
-     - How does it solve it?
-     - What was tested?
-     - Any breaking changes?
-     - Related issues (if any)
-
-3. **PR Checklist:**
-   - [ ] All tests pass locally
-   - [ ] No new Clippy warnings
-   - [ ] Code is formatted (rustfmt, prettier)
-   - [ ] Documentation is updated
-   - [ ] Security considerations addressed
-   - [ ] No credentials or sensitive data committed
-   - [ ] Commits are atomic and well-described
-
-### Review Process
-
-- Maintainers will review within 48 hours (typically)
-- Address review feedback promptly
-- Keep discussion focused and constructive
-- Be open to alternative approaches
-
-## Coding Standards
-
-### Rust Code
-
-1. **Follow Rust API Guidelines:**
-   - Use `#[must_use]` for constructors and fallible operations
-   - Prefer `Result` over panicking
-   - Use `thiserror` for domain errors
-   - Avoid `unwrap()` in production code
-
-2. **Use explicit error types:**
-   ```rust
-   // Good
-   fn connect(host: &str) -> Result<Connection, SshError>
-
-   // Bad
-   fn connect(host: &str) -> Result<Connection, Box<dyn Error>>
-   ```
-
-3. **Document public APIs:**
-   ```rust
-   /// Establishes an SSH connection to the specified host.
-   ///
-   /// # Arguments
-   ///
-   /// * `host` - Target hostname or IP address
-   /// * `port` - SSH port (typically 22)
-   ///
-   /// # Errors
-   ///
-   /// Returns `SshError::Network` if the host is unreachable.
-   /// Returns `SshError::Authentication` if credentials are invalid.
-   ///
-   /// # Example
-   ///
-   /// ```
-   /// let conn = connect("example.com", 22)?;
-   /// ```
-   pub fn connect(host: &str, port: u16) -> Result<Connection, SshError>
-   ```
-
-4. **Prefer explicit lifetimes and ownership:**
-   - Avoid unnecessary cloning
-   - Use `Arc` for shared ownership, `Rc` sparingly
-   - Document lifetime relationships
-
-5. **Safety boundaries:**
-   - Keep `#![forbid(unsafe_code)]` where possible
-   - Document any `unsafe` with safety invariants
-   - Use safe abstractions over raw FFI
-
-### TypeScript/React Code
-
-1. **Use TypeScript strictly:**
-   ```typescript
-   // Good
-   interface Connection {
-     hostId: string;
-     state: ConnectionState;
-   }
-
-   // Bad - avoid 'any'
-   function connect(opts: any): Promise<any>
-   ```
-
-2. **Component best practices:**
-   - Keep components focused and small
-   - Extract complex logic into hooks
-   - Use `useCallback` and `useMemo` appropriately
-   - Include all dependencies in hook arrays
-
-3. **Naming conventions:**
-   - `PascalCase` for components
-   - `camelCase` for functions and variables
-   - `UPPER_CASE` for constants
-   - Prefix boolean props with `is`, `has`, `should`
-
-### Project Structure
-
-```
-crates/
-  kodework-domain/       # Core models, validation, no I/O
-  kodework-core/         # Session orchestration, lifecycle
-  kodework-ssh/          # SSH/PTY adapter
-  kodework-sftp/         # SFTP streaming adapter
-  kodework-storage/      # SQLite persistence
-  kodework-secrets*/     # Credential management
-  ...
-
-src-tauri/               # Thin Tauri shell, IPC translation
-src/                     # React UI, xterm.js terminals
-docs/                    # Architecture, guides, evidence
-scripts/                 # Build and verification helpers
+```powershell
+git clone https://github.com/likangmax/KodeWork.git
+cd KodeWork
+npm ci
+cargo build --workspace
 ```
 
-## Testing Requirements
+For the native desktop app:
 
-### Test Coverage Goals
+```powershell
+npm run desktop
+```
 
-- **Core domain logic**: 90%+ coverage
-- **Connection handling**: Edge cases, timeouts, failures
-- **SFTP transfers**: Resume, cancellation, source changes
-- **Run lifecycle**: All state transitions, reconciliation
-- **Security boundaries**: Host key verification, credentials
+For the browser-only UI preview, which does not provide native SSH/credential behavior:
 
-### Writing Good Tests
+```powershell
+npm run dev
+```
 
-1. **Test behavior, not implementation:**
-   ```rust
-   #[test]
-   fn reconnect_preserves_session_identity() {
-       // Test observable behavior
-   }
-   ```
+## Choose a contribution
 
-2. **Use descriptive test names:**
-   ```rust
-   #[test]
-   fn host_key_store_error_blocks_connection()
+Good contributions start with a concrete observable problem.
 
-   #[test]
-   fn quick_timeout_after_dispatch_becomes_unknown()
-   ```
+- Check [open issues](https://github.com/likangmax/KodeWork/issues) first.
+- For a new bug, use the structured bug-report form and remove secrets/private infrastructure from logs and screenshots.
+- For a feature, describe the user problem before proposing an implementation.
+- For security vulnerabilities, **do not open a public issue**; follow [`SECURITY.md`](SECURITY.md).
 
-3. **Avoid flaky tests:**
-   - Use bounded timeouts
-   - Don't depend on fixed sleep durations
-   - Use fake clocks for time-dependent logic
-   - Avoid filesystem races
+If an issue is small enough for a first contribution, maintainers may label it `good first issue`. A label is an invitation to work on that issue, not a promise that every proposed implementation will be merged.
 
-4. **Test edge cases:**
-   - Network failures mid-operation
-   - Credential errors
-   - Concurrent access
-   - Large inputs
-   - Empty inputs
-   - Invalid states
+## Branch and commit style
 
-## Security Considerations
+Create a focused branch from current `main`:
 
-### Critical Rules
+```powershell
+git switch main
+git pull --ff-only
+git switch -c fix/short-description
+```
 
-1. **Never commit secrets:**
-   - No passwords, private keys, API tokens
-   - No real hostnames or infrastructure details
-   - Use placeholder values in tests
+Common prefixes are:
 
-2. **Fail closed on security boundaries:**
-   - Host key store unavailable → block connection
-   - Credential store unavailable → block connection
-   - Trust verification failure → hard stop
+- `feat:` user-visible feature;
+- `fix:` bug fix;
+- `docs:` documentation only;
+- `test:` tests only;
+- `refactor:` behavior-preserving code change;
+- `perf:` measured performance change;
+- `chore:` maintenance;
+- `security:` security-sensitive fix.
 
-3. **Credential handling:**
-   - Credentials stay in OS secure storage
-   - Use opaque references, never plaintext
-   - Don't log credential material
-   - Don't pass credentials through renderer
+Keep unrelated refactors out of focused fixes. Avoid committing generated output, caches, machine-specific fixtures, real hostnames, credentials, signing keys, or private files.
 
-4. **Input validation:**
-   - Validate remote paths before SFTP ops
-   - Classify Action danger in Rust, not UI
-   - Sanitize shell inputs
-   - Bound all buffers and queues
+## Architecture and safety rules
 
-5. **Audit trail:**
-   - Document security-relevant changes
-   - Add tests for security boundaries
-   - Update SECURITY.md if changing threat model
+The most important invariants are:
 
-### Reporting Security Issues
+- Rust owns connection truth, reconnect generations, authentication boundaries, transfer state, and remote-session continuity.
+- React owns presentation and renderer lifecycle; it must not become a credential store or the final authority for dangerous actions.
+- Unknown SSH host keys require an explicit trust decision; changed keys remain hard failures.
+- Fail closed when identity/trust stores cannot be read.
+- Passwords, private-key material/passphrases, Tailscale auth keys, updater private keys, and private clipboard/file contents must not enter normal logs or committed fixtures.
+- Terminal and transfer streams must remain bounded/batched instead of emitting one IPC event per byte/character.
+- Large transfers stay streamed/staged; convenience changes must not silently weaken integrity or atomicity.
+- Product claims must follow evidence. A unit test is not proof of real-network, installer, GUI, sleep/resume, or platform-release behavior.
 
-**Do not open public issues for security vulnerabilities.**
+See [`AGENTS.md`](AGENTS.md) and [`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md) for the complete rules.
 
-Report security issues privately through [SECURITY.md](SECURITY.md).
+## Testing a change
 
-## Documentation Guidelines
+Start with the smallest relevant test, then make a best effort to run the full gates before opening a PR.
 
-### Code Documentation
+```powershell
+npm ci
+npm run lint
+npm run test:frontend
+npm run build
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+npm audit --omit=dev --audit-level=high
+```
 
-1. **Document all public APIs:**
-   - Purpose and behavior
-   - Parameters and return values
-   - Error conditions
-   - Examples
-   - Thread safety / concurrency considerations
+CI also performs dependency/security checks and portable Rust checks. When available, run the repository secret scan and:
 
-2. **Module-level documentation:**
-   ```rust
-   //! # kodework-ssh
-   //!
-   //! SSH/PTY connection adapter with host key verification,
-   //! multi-address fallback, and jump host support.
-   //!
-   //! ## Architecture
-   //!
-   //! ...
-   ```
+```powershell
+git diff --check
+```
 
-3. **Inline comments for non-obvious code:**
-   - Why, not what
-   - Explain invariants and assumptions
-   - Reference related code or issues
+### Evidence categories
 
-### User Documentation
+Be explicit about what kind of verification you performed:
 
-- **User guides**: Step-by-step workflows
-- **Troubleshooting**: Common issues and solutions
-- **Architecture docs**: High-level system design
-- **ADRs**: Significant design decisions
+- **automated** — unit/integration/build/lint checks;
+- **native Windows** — packaged or development desktop behavior on Windows;
+- **protected real-network** — SSH/Tailscale/jump-host testing against non-public test infrastructure, with sensitive details removed;
+- **not tested / blocked** — required evidence was unavailable.
 
-### Keeping Docs Current
+Do not convert `not tested` into `passed`.
 
-- Update docs in the same PR as code changes
-- Flag outdated docs when you find them
-- Verify code examples actually compile/run
+## Pull requests
 
-## Questions?
+A good PR should explain:
 
-- **General questions**: Open a GitHub Discussion
-- **Bug reports**: Open an issue with repro steps
-- **Security**: See [SECURITY.md](SECURITY.md)
-- **Feature requests**: Open an issue describing the use case
+- the observable problem or user need;
+- the smallest implementation change that addresses it;
+- tests/checks run and their results;
+- native or real-network checks, if relevant;
+- security/privacy implications;
+- what remains unverified;
+- related issue(s), when applicable.
 
-Thank you for contributing to KodeWork!
+Use the repository PR template. Screenshots and recordings are welcome for UI work, but sanitize hostnames, usernames, file paths, terminal output, credentials, and private infrastructure first.
+
+Maintainer response times vary with scope and availability; the repository does not guarantee a fixed review SLA. Small, reproducible, well-tested PRs are easier to review.
+
+## Documentation changes
+
+Documentation should describe verified behavior, not intended behavior.
+
+When changing user-visible behavior:
+
+- update the relevant English and Chinese guide when practical;
+- update [`docs/STATUS.md`](docs/STATUS.md) only when release scope actually changes;
+- update [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) for packaging/support evidence changes;
+- update [`ROADMAP.md`](ROADMAP.md) when a public roadmap item meaningfully changes;
+- avoid copying transient commit SHAs, local working-tree state, or time-sensitive test counts into durable contributor instructions.
+
+## Release changes
+
+Do not publish releases, overwrite release assets, change signing material, or claim new platform support as part of an ordinary contribution.
+
+Stable release work must follow [`docs/RELEASE-MATRIX.md`](docs/RELEASE-MATRIX.md) and the existing release workflow. Tauri updater signatures and Windows Authenticode are separate trust layers.
+
+## Security reporting
+
+Never put suspected vulnerabilities, passwords, SSH private keys, Tailscale auth keys, signing material, or private host details into a public issue or PR.
+
+Follow [`SECURITY.md`](SECURITY.md) for private reporting.
+
+## Code of conduct
+
+Participation is governed by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Be respectful, specific, and constructive when reviewing or discussing contributions.
