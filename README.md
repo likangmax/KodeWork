@@ -73,7 +73,7 @@ The [English user guide](docs/USER-GUIDE.md) and [中文使用指南](docs/USER-
 | SSH identity | Unknown host keys require an explicit trust decision; changed known keys are hard failures |
 | Credentials | Password/passphrase/auth-key material is kept behind native secret-handling boundaries rather than ordinary renderer/SQLite/log state |
 | CI | Frontend lint/tests/build, locked Windows Rust checks/tests, dependency/RustSec/secret policy, and portable Linux/macOS core checks |
-| Release | Stable publication validates release lineage/version consistency and fails closed when required updater/AuthentiCode signing material is unavailable |
+| Release | Stable publication validates release lineage/version consistency and fails closed when required updater/Authenticode signing material is unavailable |
 | Project maturity | Active `0.x` project; verified gaps remain documented instead of being presented as shipped capability |
 
 For the evidence behind these statements, see [Project status](docs/STATUS.md), [Release matrix](docs/RELEASE-MATRIX.md), [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md), [Architecture](docs/ARCHITECTURE.md), and [Security policy](SECURITY.md).
