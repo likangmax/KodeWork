@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/kodework-icon-master.png" width="112" alt="KodeWork icon">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="KodeWork icon">
 </p>
 
 <h1 align="center">KodeWork</h1>
@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/likangmax/KodeWork/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/likangmax/KodeWork/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/likangmax/KodeWork?display_name=tag"></a>
+  <a href="https://github.com/likangmax/KodeWork/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/likangmax/KodeWork?display_name=tag"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-  <img alt="Windows 10/11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+  <img alt="Windows 10/11 x64" src="https://img.shields.io/badge/desktop-Windows%2010%2F11%20x64-0078D4">
 </p>
 
 <p align="center">
@@ -20,16 +20,27 @@
 <p align="center">
   <a href="https://github.com/likangmax/KodeWork/releases/latest">Download</a> ·
   <a href="docs/USER-GUIDE.md">User guide</a> ·
+  <a href="docs/README.md">Documentation</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="SECURITY.md">Security</a>
+  <a href="SECURITY.md">Security</a> ·
+  <a href="SUPPORT.md">Support</a>
 </p>
 
-KodeWork turns a private Linux machine into a recoverable remote coding workspace without requiring that machine to have a public IP. It combines SSH/PTY, SFTP, Tailscale or jump-host routing, tmux/Herdr session continuity, file and asset transfer, SSH port forwarding, and a native Windows desktop workflow.
+KodeWork turns a private Linux machine into a recoverable remote coding workspace without requiring that machine to expose a public IP. It combines SSH/PTY, SFTP, Tailscale or jump-host routing, tmux/Herdr session continuity, file and asset transfer, SSH port forwarding, and a native Windows desktop workflow.
 
 > Start work on a remote Linux host, disconnect when you need to, and return to the same durable remote session later.
 
-## Get started
+**Distribution truth:** installable binaries are published only through [GitHub Releases](https://github.com/likangmax/KodeWork/releases). The source tree can be ahead of the latest published installer; source version metadata alone is not a release claim.
+
+## What KodeWork is
+
+- **A local-first desktop client.** Connection state, credentials, files, terminals, and remote-session control stay on the user's machine and chosen infrastructure.
+- **A private-host workbench.** Direct SSH, Tailscale paths, fallback addresses, and SSH jump hosts can reach Linux machines that are not publicly exposed.
+- **A durable-session workflow.** tmux and Herdr can preserve work on the remote host while the Windows client disconnects or restarts.
+
+KodeWork is not a hosted control plane, does not replace SSH host authentication, and does not claim native macOS/Linux desktop releases from cross-platform Rust compilation alone.
+
+## Quick start
 
 ### 1. Install
 
@@ -49,9 +60,23 @@ Select **+** beside Workstations and provide:
 
 On the first SSH connection, verify the server host-key fingerprint before trusting it.
 
-### 3. Learn the workflow
+### 3. Follow the user guide
 
-The [user guide](docs/USER-GUIDE.md) walks through Linux preparation, all connection modes, files, asset paste, WSL/local terminals, durable sessions, upgrades, and troubleshooting.
+The [English user guide](docs/USER-GUIDE.md) and [中文使用指南](docs/USER-GUIDE.zh-CN.md) cover Linux preparation, connection modes, files, asset paste, local PowerShell/CMD/WSL terminals, durable sessions, upgrades, and troubleshooting.
+
+## Trust and review at a glance
+
+| Area | Current evidence / boundary |
+| --- | --- |
+| Desktop distribution | Windows 10/11 x64 MSI is the only released desktop target |
+| Portable core | Selected Rust crates are continuously checked on Windows, Linux, and macOS; this is not a native desktop-release claim |
+| SSH identity | Unknown host keys require an explicit trust decision; changed known keys are hard failures |
+| Credentials | Password/passphrase/auth-key material is kept behind native secret-handling boundaries rather than ordinary renderer/SQLite/log state |
+| CI | Frontend lint/tests/build, locked Windows Rust checks/tests, dependency/RustSec/secret policy, and portable Linux/macOS core checks |
+| Release | Stable publication validates release lineage/version consistency and fails closed when required updater/Authenticode signing material is unavailable |
+| Project maturity | Active `0.x` project; verified gaps remain documented instead of being presented as shipped capability |
+
+For the evidence behind these statements, see [Project status](docs/STATUS.md), [Release matrix](docs/RELEASE-MATRIX.md), [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md), [Architecture](docs/ARCHITECTURE.md), and [Security policy](SECURITY.md).
 
 ## Why KodeWork
 
@@ -65,18 +90,6 @@ Most SSH clients focus on opening a shell. KodeWork treats the remote machine as
 | Avoid credential leakage into UI state | Password/private-key material stays behind native secret-handling boundaries |
 | Move large files safely | SFTP streaming with pause/resume/retry/cancel and staged completion |
 | Preview remote web services | SSH local port forwarding to loopback-only Web Preview |
-
-## Current capability
-
-The currently distributed desktop target is **Windows 10/11 x64**.
-
-| Capability | Windows x64 | macOS desktop | Linux desktop |
-| --- | --- | --- | --- |
-| Installable KodeWork desktop release | **Available (MSI)** | Not released | Not released |
-| Native GUI/install/signing acceptance | Windows release baseline | Not completed | Not completed |
-| Portable Rust core CI | Checked | Checked | Checked |
-
-Cross-platform Rust CI is not a desktop-release claim. KodeWork will only call a new desktop platform supported after native packaging, installation, GUI behavior, sidecars, signing/notarization requirements, and release assets are verified. See [Project status](docs/STATUS.md), [Release matrix](docs/RELEASE-MATRIX.md), and the [Roadmap](ROADMAP.md).
 
 ## Feature map
 
@@ -99,6 +112,7 @@ KodeWork handles security-sensitive boundaries explicitly:
 
 - unknown SSH host keys require a fingerprint decision;
 - changed known host keys are hard failures;
+- trust-store read failures block verification instead of silently downgrading trust;
 - passwords, private-key passphrases, and Tailscale auth keys are not ordinary renderer/SQLite/log data;
 - dangerous Actions are classified again by Rust, not trusted solely to the UI;
 - remote OSC 52 clipboard writes are bounded, while remote clipboard reads are intentionally ignored;
@@ -123,6 +137,20 @@ Rust owns connection truth, authentication boundaries, reconnect generations, tr
 
 See [Architecture](docs/ARCHITECTURE.md) and the numbered [ADRs](docs/adr/).
 
+## Reviewer's map
+
+If you are evaluating the project rather than just installing it, these are the fastest paths to the source of truth:
+
+- [Project status](docs/STATUS.md) — what is available, verified, released, and still limited;
+- [Architecture](docs/ARCHITECTURE.md) — trust boundaries, data flow, state ownership, and performance rules;
+- [Security policy](SECURITY.md) — supported versions, private reporting, and runtime security invariants;
+- [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md) — automated vs. native acceptance evidence;
+- [Release matrix](docs/RELEASE-MATRIX.md) — packaging/signing/platform evidence contract;
+- [Changelog](docs/CHANGELOG.md) — user-visible history and unreleased changes;
+- [Contributing](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) — contribution, verification, and coding-agent rules.
+
+The project deliberately distinguishes **configured**, **tested**, **verified**, **supported**, and **released**. Documentation should not upgrade one of those states into another without evidence.
+
 ## Development
 
 ### Prerequisites
@@ -144,6 +172,7 @@ npm run build
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+npm audit --omit=dev --audit-level=high
 ```
 
 For repository rules, testing expectations, and PR guidance, read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents should start with [AGENTS.md](AGENTS.md).
@@ -156,24 +185,26 @@ src-tauri/     Thin Tauri shell, typed IPC, plugins, native resources
 src/           React workspace, terminal, files, runtime, settings UI
 docs/          User guides, architecture, ADRs, test/release evidence
 scripts/       Reproducible build, sidecar, and verification helpers
-.github/       CI, release automation, issue forms, PR templates
+.github/       CI, release automation, issue forms, PR/review ownership
 ```
 
 ## Project status and roadmap
 
-KodeWork is usable today but remains an actively developed `0.x` project. Near-term work focuses on connection/recovery reliability, terminal and transfer performance, Windows acceptance evidence, accessibility, and contributor experience.
+KodeWork is usable today but remains an actively developed `0.x` project. Near-term work focuses on release evidence, connection/recovery reliability, terminal and transfer performance, Windows acceptance, accessibility, and contributor experience.
 
 - [Current project status](docs/STATUS.md)
 - [Public roadmap](ROADMAP.md)
-- [Windows test matrix](docs/TEST-MATRIX-WINDOWS.md)
-- [Release matrix](docs/RELEASE-MATRIX.md)
-- [Changelog](docs/CHANGELOG.md)
+- [Support policy](SUPPORT.md)
+- [Documentation map](docs/README.md)
 
-## Contributing
+## Contributing and support
 
 Focused issues and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), use the structured issue forms, and keep real credentials, hostnames, private files, and signing material out of public reports.
 
-Questions and ideas can go to [GitHub Discussions](https://github.com/likangmax/KodeWork/discussions).
+- Usage questions and workflow discussion: [GitHub Discussions](https://github.com/likangmax/KodeWork/discussions)
+- Reproducible bugs and feature requests: [GitHub Issues](https://github.com/likangmax/KodeWork/issues/new/choose)
+- Support boundaries and what to include: [SUPPORT.md](SUPPORT.md)
+- Suspected vulnerabilities: [SECURITY.md](SECURITY.md), never a public issue
 
 ## License
 

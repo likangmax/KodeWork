@@ -1,0 +1,15 @@
+# Default review ownership for the public repository.
+* @likangmax
+
+# Security-, CI-, and release-sensitive surfaces. CODEOWNERS declares ownership;
+# repository branch-protection/ruleset settings must separately enforce reviews.
+/.github/workflows/ @likangmax
+/.github/dependabot.yml @likangmax
+/SECURITY.md @likangmax
+/Cargo.lock @likangmax
+/package-lock.json @likangmax
+/src-tauri/tauri.conf.json @likangmax
+/scripts/build-release.ps1 @likangmax
+/scripts/build-release.sh @likangmax
+/scripts/publish-update.ps1 @likangmax
+/scripts/verify-release.ps1 @likangmax

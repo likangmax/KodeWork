@@ -1,54 +1,84 @@
-# KodeWork documentation map
+# KodeWork documentation
 
-Use this page to find the right document without treating historical handoffs as current project state.
+This page is the documentation map for users, contributors, maintainers, and reviewers. It also defines which documents are current sources of truth and which are retained only for historical traceability.
 
-## Use KodeWork
+## Start here by goal
 
-- [English user guide](USER-GUIDE.md) — installation, Linux preparation, connection modes, daily workflows, verification, and troubleshooting.
-- [中文零基础使用指南](USER-GUIDE.zh-CN.md) — 安装、Linux 准备、连接方式、日常使用、验收与排障。
-- [Troubleshooting](TROUBLESHOOTING.md) — connection, authentication, terminal, transfer, and installation problems.
-- [Changelog](CHANGELOG.md) — user-visible changes by release.
-- [Third-party notices](THIRD-PARTY-NOTICES.md) — bundled components and licenses.
+| Goal | Start with |
+| --- | --- |
+| Install and use KodeWork | [English user guide](USER-GUIDE.md) / [中文使用指南](USER-GUIDE.zh-CN.md) |
+| Troubleshoot a problem | [Troubleshooting](TROUBLESHOOTING.md) and [Support](../SUPPORT.md) |
+| Understand what is actually supported/released | [Project status](STATUS.md) and [Release matrix](RELEASE-MATRIX.md) |
+| Review architecture/security boundaries | [Architecture](ARCHITECTURE.md), [ADRs](adr/), and [Security policy](../SECURITY.md) |
+| Contribute code/docs | [Contributing](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md) |
+| Maintain/release the project | [Agent & maintainer guide](AGENT-GUIDE.md), [Release matrix](RELEASE-MATRIX.md), and [Windows test matrix](TEST-MATRIX-WINDOWS.md) |
+| See project direction | [Public roadmap](../ROADMAP.md) |
+| See release history | [Changelog](CHANGELOG.md) |
 
 Project home:
 
 - [README (English)](../README.md)
 - [README（简体中文）](../README.zh-CN.md)
 
-## Understand the current project
+## Source-of-truth hierarchy
 
-These files are the durable sources of truth for current capability and project direction:
+When two documents appear to disagree, use the more specific current source below rather than a historical handoff:
 
-- [Project status](STATUS.md) — what is implemented/usable today and known distribution limits.
+1. **Installable distribution:** [GitHub Releases](https://github.com/likangmax/KodeWork/releases)
+2. **Current capability / known limits:** [STATUS.md](STATUS.md)
+3. **Platform and release evidence contract:** [RELEASE-MATRIX.md](RELEASE-MATRIX.md)
+4. **Architecture/security invariants:** [ARCHITECTURE.md](ARCHITECTURE.md), current ADRs, and [SECURITY.md](../SECURITY.md)
+5. **Current public direction:** [ROADMAP.md](../ROADMAP.md)
+6. **Historical release/development record:** [CHANGELOG.md](CHANGELOG.md)
+
+A version field in `main`, a successful compile, or a historical test note is not a substitute for published release evidence.
+
+## User documentation
+
+- [English user guide](USER-GUIDE.md) — installation, Linux preparation, connection modes, daily workflows, verification, and troubleshooting.
+- [中文使用指南](USER-GUIDE.zh-CN.md) — 安装、Linux 准备、连接方式、日常使用、验收与排障。
+- [Troubleshooting](TROUBLESHOOTING.md) — connection, authentication, terminal, transfer, and installation problems.
+- [Support policy](../SUPPORT.md) — where to ask questions, what is supported, and what information is safe to share.
+- [Third-party notices](THIRD-PARTY-NOTICES.md) — bundled components and licenses.
+
+## Current project and review evidence
+
+- [Project status](STATUS.md) — what is implemented/usable and which claims remain limited.
 - [Release matrix](RELEASE-MATRIX.md) — packaging, signing, installation, and platform evidence requirements.
-- [Public roadmap](../ROADMAP.md) — current/next/later direction without release-date promises.
 - [Windows test matrix](TEST-MATRIX-WINDOWS.md) — automated/native evidence and explicit gaps.
 - [Architecture](ARCHITECTURE.md) — runtime boundaries, data planes, security invariants, and performance rules.
 - [Architecture decisions](adr/) — canonical ADRs for significant design decisions.
-- [Cross-platform roadmap](CROSS-PLATFORM-ROADMAP.md) — technical exploration for macOS/Linux and longer-term platform work.
+- [Cross-platform roadmap](CROSS-PLATFORM-ROADMAP.md) — technical exploration for macOS/Linux and longer-term platform work; not a release claim.
+- [Changelog](CHANGELOG.md) — user-visible changes by release and current unreleased work.
 
-## Contribute or maintain
+## Contribution and maintenance
 
-Start with:
-
-- [Contributing](../CONTRIBUTING.md) — setup, workflow, verification, and PR expectations.
-- [AGENTS.md](../AGENTS.md) — durable repository-wide instructions for coding agents and contributors.
+- [Contributing](../CONTRIBUTING.md) — setup, workflow, supply-chain rules, verification, and PR expectations.
+- [AGENTS.md](../AGENTS.md) — durable repository-wide rules for coding agents and contributors.
 - [Agent and maintainer guide](AGENT-GUIDE.md) — detailed operational, security, testing, and release procedures.
 - [中文 Agent 与维护者指南](AGENT-GUIDE.zh-CN.md) — 中文执行指南。
-- [Security policy](../SECURITY.md) — vulnerability reporting and security boundaries.
-- [Code of conduct](../CODE_OF_CONDUCT.md) — participation expectations.
+- [Security policy](../SECURITY.md) — supported versions, private vulnerability reporting, and security-sensitive contribution rules.
+- [Code of conduct](../CODE_OF_CONDUCT.md) — participation and enforcement expectations.
+- [Support policy](../SUPPORT.md) — user-support boundaries and public-data hygiene.
 
 ## Historical planning and handoffs
 
-The following files are retained for traceability. They may contain old commit SHAs, test counts, completed tasks, local-machine facts, or plans that have since changed. Do **not** use them as the source of truth for the current checkout.
+The following files are retained for traceability. They may intentionally contain old commit SHAs, test counts, dependency versions, local-machine facts, completed tasks, or plans that have since changed. Do **not** use them as current project state unless a task explicitly asks for historical reconstruction.
 
 - [Codex handoff snapshot (中文)](HANDOFF-CODEX.zh-CN.md)
 - [Claude Code historical handoff (中文)](HANDOFF-CLAUDE-CODE.zh-CN.md)
 - [Legacy next-steps plan (中文)](NEXT-STEPS.md)
 - [Legacy improvement roadmap](IMPROVEMENT-ROADMAP.md)
 
-For new planning, use [`../ROADMAP.md`](../ROADMAP.md) and open GitHub issues instead.
+For new planning, use [`../ROADMAP.md`](../ROADMAP.md) and GitHub Issues instead.
 
-## Repository policy
+## Documentation maintenance rules
 
-Files remain at the repository root when GitHub, Cargo, npm, Vite, Tauri, or community-health conventions expect them there. Generated output, dependency directories, local research caches, credentials, signing keys, real infrastructure details, and machine-specific fixtures must not be committed.
+- Use synthetic users, documentation-range IPs, and fake paths/credentials in public examples.
+- Never add real infrastructure, secret-bearing logs, private terminal output, or signing material.
+- Keep English and Chinese user-facing documentation aligned when behavior changes.
+- Distinguish `configured`, `tested`, `verified`, `supported`, and `released`; do not silently strengthen a claim.
+- Avoid transient local state, branch-specific commit SHAs, and time-sensitive test counts in durable instructions.
+- Preserve historical dates in ADRs/Changelog; update only documents that claim to describe current state.
+
+Files remain at the repository root when GitHub, Cargo, npm, Vite, Tauri, or community-health conventions expect them there.

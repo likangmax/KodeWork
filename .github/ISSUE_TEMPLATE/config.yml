@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Support and troubleshooting
+    url: https://github.com/likangmax/KodeWork/blob/main/SUPPORT.md
+    about: Check supported platforms, safe diagnostic information, and the right channel before opening an issue.
   - name: Questions and community discussion
     url: https://github.com/likangmax/KodeWork/discussions
     about: Ask usage questions, share workflows, and discuss ideas that are not yet actionable bug reports or feature requests.
   - name: Security vulnerability
     url: https://github.com/likangmax/KodeWork/security
-    about: Please do not report suspected vulnerabilities in a public issue. Read SECURITY.md and use a private GitHub security channel when available.
+    about: Do not report suspected vulnerabilities publicly. Read SECURITY.md and use GitHub's private reporting flow when available.
