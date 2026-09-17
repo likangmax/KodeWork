@@ -9,6 +9,7 @@
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
     "build": "tsc -b && vite build",
+    "check:docs": "node scripts/check-doc-links.mjs",
     "lint": "oxlint --ignore-pattern references --ignore-pattern target",
     "preview": "vite preview",
     "test:frontend": "vitest run"
