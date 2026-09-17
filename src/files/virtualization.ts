@@ -16,7 +16,11 @@ export const calculateVirtualWindow = (
     return { start: 0, end: 0, offsetTop: 0, totalHeight: 0 }
   }
   const safeViewport = Math.max(0, viewportHeight)
-  const firstVisible = Math.max(0, Math.floor(Math.max(0, scrollTop) / rowHeight))
+  const lastIndex = itemCount - 1
+  const firstVisible = Math.min(
+    lastIndex,
+    Math.max(0, Math.floor(Math.max(0, scrollTop) / rowHeight)),
+  )
   const visibleCount = Math.max(1, Math.ceil(safeViewport / rowHeight))
   const start = Math.max(0, firstVisible - Math.max(0, overscan))
   const end = Math.min(itemCount, firstVisible + visibleCount + Math.max(0, overscan))
