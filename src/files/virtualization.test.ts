@@ -20,11 +20,11 @@ describe('calculateVirtualWindow', () => {
     })
   })
 
-  it('clamps a stale scroll position after the list shrinks', () => {
+  it('clamps a stale scroll position to the last full viewport after the list shrinks', () => {
     expect(calculateVirtualWindow(3, 10_000, 68, 34, 0)).toEqual({
-      start: 2,
+      start: 1,
       end: 3,
-      offsetTop: 68,
+      offsetTop: 34,
       totalHeight: 102,
     })
   })
