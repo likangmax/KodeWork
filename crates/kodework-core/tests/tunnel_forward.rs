@@ -242,10 +242,8 @@ async fn closing_tunnel_with_live_connection_resets_active_count() {
 
     // Exercise the idempotence guarantee with two close operations racing for
     // the same accept task and proxy registry rather than only sequentially.
-    let (first_close, second_close) = tokio::join!(
-        manager.close_tunnel(info.id),
-        manager.close_tunnel(info.id)
-    );
+    let (first_close, second_close) =
+        tokio::join!(manager.close_tunnel(info.id), manager.close_tunnel(info.id));
     first_close.unwrap_or_else(|error| unreachable!("first close: {error}"));
     second_close.unwrap_or_else(|error| unreachable!("second close: {error}"));
 
