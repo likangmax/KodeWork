@@ -29,7 +29,7 @@ The immediate focus is making the existing Windows remote-development loop more 
 
 ### Open-source project presentation
 
-- add real, sanitized product screenshots using synthetic infrastructure only ([#26](https://github.com/likangmax/KodeWork/issues/26));
+- keep the README product tour current, sanitized, and based on synthetic infrastructure only;
 - keep README, support, security, contribution, release, and documentation pages consistent;
 - keep a small set of well-scoped contributor tasks instead of a speculative backlog;
 - document current limitations alongside shipped capabilities.
