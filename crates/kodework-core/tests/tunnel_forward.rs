@@ -197,6 +197,84 @@ async fn tunnel_handles_concurrent_connections() {
 }
 
 #[tokio::test]
+async fn closing_tunnel_with_live_connection_resets_active_count() {
+    let (_server, manager, host) = connect_manager().await;
+    let info = manager
+        .open_tunnel(host.id, 0, "127.0.0.1", 8080)
+        .await
+        .unwrap_or_else(|error| unreachable!("open_tunnel: {error}"));
+    let mut stream = tokio::net::TcpStream::connect(&info.local_addr)
+        .await
+        .unwrap_or_else(|error| unreachable!("connect local: {error}"));
+
+    // Complete one round trip so the SSH forwarding proxy is definitely
+    // established, then deliberately keep the local socket open while the
+    // tunnel is closed.
+    let payload = b"keep proxy alive";
+    stream
+        .write_all(payload)
+        .await
+        .unwrap_or_else(|error| unreachable!("write: {error}"));
+    let mut echoed = vec![0u8; payload.len()];
+    stream
+        .read_exact(&mut echoed)
+        .await
+        .unwrap_or_else(|error| unreachable!("read echo: {error}"));
+    assert_eq!(echoed, payload);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let active = manager
+            .list_tunnels()
+            .into_iter()
+            .find(|tunnel| tunnel.id == info.id)
+            .map(|tunnel| tunnel.active_connections)
+            .unwrap_or(0);
+        if active == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "live proxy was never reflected in the tunnel snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Exercise the idempotence guarantee with two close operations racing for
+    // the same accept task and proxy registry rather than only sequentially.
+    let (first_close, second_close) =
+        tokio::join!(manager.close_tunnel(info.id), manager.close_tunnel(info.id));
+    first_close.unwrap_or_else(|error| unreachable!("first close: {error}"));
+    second_close.unwrap_or_else(|error| unreachable!("second close: {error}"));
+
+    // close() waits for the cancellation-aware proxy to finish, so the local
+    // peer must observe EOF (or a socket error) rather than a still-live proxy.
+    let mut probe = [0u8; 1];
+    let local_closed = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut probe)).await;
+    assert!(
+        local_closed.is_ok(),
+        "local tunnel socket stayed open after close returned"
+    );
+    if let Ok(Ok(bytes)) = local_closed {
+        assert_eq!(
+            bytes, 0,
+            "closed tunnel returned unexpected bytes after close"
+        );
+    }
+
+    let closed = manager
+        .list_tunnels()
+        .into_iter()
+        .find(|tunnel| tunnel.id == info.id)
+        .unwrap_or_else(|| unreachable!("closed tunnel must stay listed"));
+    assert_eq!(closed.state, TunnelState::Closed);
+    assert_eq!(
+        closed.active_connections, 0,
+        "forced close must clear the live connection count"
+    );
+}
+
+#[tokio::test]
 async fn tunnel_fails_without_connection() {
     let host_key = broker();
     let resolver = CandidateResolver::new(Vec::new(), ResolverPolicy::default());
