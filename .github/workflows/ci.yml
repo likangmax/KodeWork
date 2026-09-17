@@ -8,9 +8,16 @@ on:
 permissions:
   contents: read
 
+# A new commit on the same PR supersedes the older CI result. Keep main push
+# runs independent so every merged commit still receives its own validation.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   frontend:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -26,12 +33,32 @@ jobs:
   windows-rust:
     name: Windows Rust
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
           toolchain: 1.98.0-x86_64-pc-windows-msvc
           components: rustfmt, clippy
+      - name: Resolve Go cache locations
+        id: go-cache
+        shell: pwsh
+        run: |
+          "version=$((& go env GOVERSION).Trim())" >> $env:GITHUB_OUTPUT
+          "mod=$((& go env GOMODCACHE).Trim())" >> $env:GITHUB_OUTPUT
+          "build=$((& go env GOCACHE).Trim())" >> $env:GITHUB_OUTPUT
+      # Cache only Go's content-addressed module/build data. The generated
+      # sidecars themselves are never cached: the preparation script still
+      # verifies the pinned upstream revision, rebuilds, and smoke-tests them.
+      - name: Restore Go module and build caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.mod }}
+            ${{ steps.go-cache.outputs.build }}
+          key: tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('scripts/prepare-tailscale.ps1') }}
+          restore-keys: |
+            tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-
       - name: Prepare bundled Tailscale sidecars
         shell: pwsh
         run: ./scripts/prepare-tailscale.ps1
@@ -42,6 +69,7 @@ jobs:
   dependency-security:
     name: Dependency and secret policy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -76,6 +104,7 @@ jobs:
     needs: [windows-rust, dependency-security]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Enforce Rust and security gates
         shell: bash
@@ -107,6 +136,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux keyring build dependencies
