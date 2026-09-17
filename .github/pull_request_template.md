@@ -18,6 +18,7 @@ List the checks you actually ran and their results. Do not mark native, real-net
 - [ ] Focused tests for the changed area
 - [ ] `npm ci`
 - [ ] `npm run lint`
+- [ ] `npm run check:docs`
 - [ ] `npm run test:frontend`
 - [ ] `npm run build`
 - [ ] `cargo fmt --all -- --check`
