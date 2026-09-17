@@ -40,9 +40,27 @@ pub struct TunnelInfo {
 struct TunnelRuntime {
     info: Arc<Mutex<TunnelInfo>>,
     token: CancellationToken,
+    close_lock: tokio::sync::Mutex<()>,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     connections: Arc<Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>>,
     active_connections: Arc<AtomicU32>,
+}
+
+/// Owns the two pieces of bookkeeping attached to one forwarding proxy.
+/// Keeping them in `Drop` makes cleanup cancellation-safe: whether the proxy
+/// returns normally, is cancelled, or unwinds, its live count and SSH event
+/// filter entry are released together exactly once.
+struct ForwardProxyGuard {
+    connection: Arc<SshConnection>,
+    channel_id: u32,
+    active_connections: Arc<AtomicU32>,
+}
+
+impl Drop for ForwardProxyGuard {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+        self.connection.release_filtered_channel(self.channel_id);
+    }
 }
 
 /// Clone-safe tunnel registry for one SessionManager.
@@ -103,6 +121,7 @@ impl TunnelManager {
         let runtime = Arc::new(TunnelRuntime {
             info: Arc::new(Mutex::new(info.clone())),
             token: token.clone(),
+            close_lock: tokio::sync::Mutex::new(()),
             accept_task: Mutex::new(None),
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::clone(&active_connections),
@@ -123,7 +142,7 @@ impl TunnelManager {
     }
 
     /// Cancels the tunnel: stops accepting, closes the listener and all
-    /// active connection tasks. Idempotent.
+    /// active connection tasks. Idempotent, including concurrent calls.
     pub async fn close(&self, tunnel_id: TunnelId) -> Result<(), String> {
         let runtime = {
             let guard = self
@@ -135,6 +154,11 @@ impl TunnelManager {
         let Some(runtime) = runtime else {
             return Ok(());
         };
+        // Only one close operation may own accept/proxy teardown at a time.
+        // Without this guard, concurrent close calls can split ownership of
+        // the accept task and connection registry and return before another
+        // close has finished draining a proxy created during that handoff.
+        let _close_guard = runtime.close_lock.lock().await;
         runtime.token.cancel();
         let task = runtime
             .accept_task
@@ -144,14 +168,23 @@ impl TunnelManager {
         if let Some(task) = task {
             let _ = task.await;
         }
-        let mut conn_guard = runtime
-            .connections
-            .lock()
-            .map_err(|_| "connection registry poisoned".to_string())?;
-        for (_, task) in conn_guard.drain() {
-            task.abort();
+        let tasks = {
+            let mut conn_guard = runtime
+                .connections
+                .lock()
+                .map_err(|_| "connection registry poisoned".to_string())?;
+            conn_guard.drain().map(|(_, task)| task).collect::<Vec<_>>()
+        };
+        // The shared cancellation token is also observed by every proxy.
+        // Await their normal cancellation path instead of aborting them so
+        // their lifetime guards run before close() returns.
+        for task in tasks {
+            let _ = task.await;
         }
-        drop(conn_guard);
+        // All tracked proxies have stopped, so normalize the aggregate even
+        // if a task failed before normal completion. No proxy can decrement
+        // after this store because every join handle above has completed.
+        runtime.active_connections.store(0, Ordering::SeqCst);
         if let Ok(mut guard) = runtime.info.lock() {
             guard.state = TunnelState::Closed;
             guard.active_connections = 0;
@@ -264,18 +297,20 @@ async fn accept_loop(
                                 runtime
                                     .active_connections
                                     .fetch_add(1, Ordering::SeqCst);
+                                let cleanup = ForwardProxyGuard {
+                                    connection: Arc::clone(&connection),
+                                    channel_id,
+                                    active_connections: Arc::clone(&runtime.active_connections),
+                                };
                                 let task = tokio::spawn({
                                     let runtime = Arc::clone(&runtime);
-                                    let connection = Arc::clone(&connection);
                                     async move {
-                                        proxy_connection(
-                                            socket,
-                                            channel,
-                                            runtime.token.clone(),
-                                            Arc::clone(&runtime.active_connections),
-                                        )
-                                        .await;
-                                        connection.release_filtered_channel(channel_id);
+                                        proxy_connection(socket, channel, runtime.token.clone()).await;
+                                        // Bookkeeping must be released before this task
+                                        // removes its own join handle. Otherwise close()
+                                        // could miss the still-finishing task and reset the
+                                        // aggregate count before this decrement runs.
+                                        drop(cleanup);
                                         // Drop the finished task handle so
                                         // the registry only holds live
                                         // connections.
@@ -315,7 +350,6 @@ async fn proxy_connection(
     local: TcpStream,
     channel: kodework_ssh::connection::ForwardChannel,
     token: CancellationToken,
-    active_connections: Arc<AtomicU32>,
 ) {
     let remote = channel.into_stream();
     let (mut local_r, mut local_w) = tokio::io::split(local);
@@ -337,7 +371,6 @@ async fn proxy_connection(
             {}
         }
     }
-    active_connections.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Join handles can finish before the accept loop gets a chance to remove
