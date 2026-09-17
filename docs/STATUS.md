@@ -48,7 +48,7 @@ These states are not interchangeable. Compilation or CI success alone does not m
 
 The repository CI has five substantive check families:
 
-1. frontend install/lint/tests/production build;
+1. frontend install/lint/local-documentation-link checks/tests/production build;
 2. Windows Rust sidecar preparation, formatting, locked Clippy with warnings denied, and full locked workspace tests;
 3. dependency/security policy including production npm audit, RustSec audit, and tracked-secret pattern rejection;
 4. portable Rust checks/tests on Linux;
@@ -71,12 +71,11 @@ Platform or network behavior is marked verified only when exercised in that envi
 
 ## Known follow-up work
 
-Current tracked follow-ups include:
+Current tracked follow-up work is intentionally narrow:
 
-- sanitized real product screenshots for README presentation ([#26](https://github.com/likangmax/KodeWork/issues/26));
 - repository administration/settings work that cannot be completed through ordinary source changes ([#44](https://github.com/likangmax/KodeWork/issues/44)).
 
-Planned work remains listed here until it is completed and verified.
+The README product-tour screenshot work tracked in [#26](https://github.com/likangmax/KodeWork/issues/26) is complete and is no longer an open project-status item.
 
 ## Reference documents
 
