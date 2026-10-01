@@ -30,7 +30,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
-    "oxlint": "^1.82.0",
+    "oxlint": "^1.85.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.0"
