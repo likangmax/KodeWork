@@ -232,12 +232,18 @@ export default function App() {
       busy = true
       try {
         const requests = await pendingHostKeyRequests(selectedId)
-        if (active && isCurrent() && requests.length > 0) {
-          setHostKeyRequest((current) => current ?? requests[0])
+        if (active && isCurrent()) {
+          // The owner-specific snapshot is authoritative; remove timed-out
+          // or cancelled dialogs instead of blocking the next prompt.
+          setHostKeyRequest((current) =>
+            current && requests.some((request) => request.request_id === current.request_id)
+              ? current : (requests[0] ?? null))
         }
         const keyboardRequests = await pendingKeyboardInteractiveRequests(selectedId)
-        if (active && isCurrent() && keyboardRequests.length > 0) {
-          setKeyboardInteractiveRequest((current) => current ?? keyboardRequests[0])
+        if (active && isCurrent()) {
+          setKeyboardInteractiveRequest((current) =>
+            current && keyboardRequests.some((request) => request.request_id === current.request_id)
+              ? current : (keyboardRequests[0] ?? null))
         }
       } catch { /* transient */ }
       finally { busy = false }
@@ -486,7 +492,7 @@ export default function App() {
   const onKeyboardInteractiveAnswer = async () => {
     if (!keyboardInteractiveRequest || !selectedId || keyboardInteractiveRequest.owner_host_id !== selectedId) return
     const isCurrent = hostScope.accepts(selectedId)
-    const responses = keyboardInteractiveInputs.current.map((input) => input.value)
+    const responses = keyboardInteractiveRequest.prompts.map((_, index) => keyboardInteractiveInputs.current[index]?.value ?? '')
     keyboardInteractiveInputs.current.forEach((input) => { input.value = '' })
     const requestId = keyboardInteractiveRequest.request_id
     setKeyboardInteractiveRequest(null)
@@ -623,6 +629,8 @@ export default function App() {
       return
     }
     if (!isCurrent()) return
+    setHostKeyRequest(null)
+    setKeyboardInteractiveRequest(null)
     setBridgeInfo(null)
     setPanes([])
     setTransfers({})

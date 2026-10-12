@@ -496,6 +496,10 @@ async fn connect_host_inner_with_profile(
             )
         })
         .transpose()?;
+    // Supersede approvals from any earlier connection generation.
+    // Cancel before acquiring SessionManager's per-host connect mutex.
+    state.host_key.cancel_for_owner(host.id);
+    state.keyboard_interactive.cancel_for_owner(host.id);
     let outcome = state
         .sessions
         .connect_with_jump_auth_typed(&host, auth, jump_auth)

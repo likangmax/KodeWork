@@ -248,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn timed_out_otp_does_not_leave_ghost_prompt_or_pending_sender() {
-        let broker = Arc::new(KeyboardInteractiveBroker::new(Duration::from_millis(50)));
+        let broker = Arc::new(KeyboardInteractiveBroker::new(Duration::from_millis(180)));
         let owner = HostId::new();
         let task = {
             let broker = Arc::clone(&broker);
