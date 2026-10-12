@@ -437,6 +437,11 @@ export default function App() {
   }
 
   const runConnect = async (host: Host, passwordValue?: string) => {
+    // A fresh transport generation must not receive words captured by an
+    // earlier browser SpeechRecognition session for the same workstation.
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
+    setMicListening(false)
     lastHostRef.current = host
     const seq = ++connectSeq.current
     const isCurrent = hostScope.accepts(host.id)
