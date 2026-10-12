@@ -22,6 +22,7 @@ import { LocalTerminalWorkspace } from './terminal/LocalTerminalWorkspace'
 import { TerminalWorkspace } from './terminal/TerminalWorkspace'
 import { RuntimePanel } from './runtime/RuntimePanel'
 import { useResumeRecovery } from './runtime/useResumeRecovery'
+import { HostResponseScope } from './runtime/hostResponseScope'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
@@ -67,6 +68,7 @@ type ConnectPhase = 'idle' | 'connecting' | 'ready' | 'failed'
 export default function App() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [hostScope] = useState(() => new HostResponseScope())
   const [draft, setDraft] = useState<Host | null>(null)
   const [message, setMessageState] = useState('')
   const [messageIsError, setMessageIsError] = useState(false)
@@ -110,6 +112,8 @@ export default function App() {
   const [theme, onThemeChange] = useTheme()
   const [language, onLanguageChange, needsLanguagePrompt] = useLanguage()
   const t = useCallback((key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args), [language])
+  const latestT = useRef(t)
+  latestT.current = t
   const [activeTab, setActiveTab] = useState<'terminal' | 'local' | 'files' | 'preview' | 'actions'>('terminal')
   const [panes, setPanes] = useState<{ id: number; channel: number }[]>([])
   const [splitDir, setSplitDir] = useState<'h' | 'v'>('h')
@@ -142,7 +146,6 @@ export default function App() {
   const [micListening, setMicListening] = useState(false)
   const recognitionRef = useRef<any | null>(null)
   const runtimePoll = useRef<number | null>(null)
-  const runtimePollBusy = useRef(false)
   const herdrMissingPolls = useRef(0)
   const connectSeq = useRef(0)
   const lastHostRef = useRef<Host | null>(null)
@@ -151,6 +154,17 @@ export default function App() {
   const pollRef = useRef<number | null>(null)
   const phaseRef = useRef<ConnectPhase>(phase)
   phaseRef.current = phase
+
+  // Stale requests from A are invalid even when the user switches A -> B -> A.
+  const chooseHostId = (id: string | null) => {
+    if (selectedIdRef.current !== id) {
+      hostScope.select(id)
+      connectSeq.current += 1
+      filesSeq.current += 1
+    }
+    selectedIdRef.current = id
+    setSelectedId(id)
+  }
 
   useEffect(() => () => {
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)
@@ -173,23 +187,23 @@ export default function App() {
     let active = true
     const load = async () => {
       if (!isDesktop()) {
-        if (active) setMessage(t('previewMode'))
+        if (active) setMessage(latestT.current('previewMode'))
         return
       }
       try {
         const loaded = await listHosts()
         if (!active) return
         setHosts(loaded)
-        setSelectedId(loaded[0]?.id ?? null)
+        chooseHostId(loaded[0]?.id ?? null)
         setFilesPath(loaded[0]?.default_remote_path || '/')
-        setMessage(loaded.length === 0 ? t('noWorkstationConfigured') : t('loadedWorkstations', String(loaded.length)))
+        setMessage(loaded.length === 0 ? latestT.current('noWorkstationConfigured') : latestT.current('loadedWorkstations', String(loaded.length)))
       } catch (error) {
-        if (active) setMessage(t('loadConfigFailed', String(error)))
+        if (active) setMessage(latestT.current('loadConfigFailed', String(error)))
       }
     }
     void load()
     return () => { active = false }
-  }, [setMessage, t])
+  }, [setMessage])
 
   // Warm the selected embedded Tailscale path once per host selection.  The
   // previous implementation also warmed the first host during initial load
@@ -209,19 +223,20 @@ export default function App() {
 
   // Poll for pending host-key decisions while connecting.
   useEffect(() => {
-    if (phase !== 'connecting') return
+    if (phase !== 'connecting' || !selectedId) return
     let active = true
     let busy = false
+    const isCurrent = hostScope.accepts(selectedId)
     const poll = async () => {
-      if (!active || busy) return
+      if (!active || !isCurrent() || busy) return
       busy = true
       try {
         const requests = await pendingHostKeyRequests()
-        if (active && requests.length > 0) {
+        if (active && isCurrent() && requests.length > 0) {
           setHostKeyRequest((current) => current ?? requests[0])
         }
         const keyboardRequests = await pendingKeyboardInteractiveRequests()
-        if (active && keyboardRequests.length > 0) {
+        if (active && isCurrent() && keyboardRequests.length > 0) {
           setKeyboardInteractiveRequest((current) => current ?? keyboardRequests[0])
         }
       } catch { /* transient */ }
@@ -234,12 +249,14 @@ export default function App() {
       if (pollRef.current !== null) window.clearInterval(pollRef.current)
       pollRef.current = null
     }
-  }, [phase])
+  }, [phase, selectedId, hostScope])
 
   const refreshState = useCallback(async (hostId: string) => {
     if (!isDesktop()) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const state = await sessionState(hostId)
+      if (!isCurrent()) return
       const labels: Record<string, string> = {
         Disconnected: t('stateDisconnected'), ResolvingAddress: t('stateResolving'), Connecting: t('stateConnecting'),
         VerifyingHostKey: t('stateVerifyingHostKey'), Authenticating: t('stateAuthenticating'), Ready: t('stateReady'),
@@ -248,7 +265,7 @@ export default function App() {
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
     } catch { /* transient */ }
-  }, [t])
+  }, [t, hostScope])
 
   useResumeRecovery(Boolean(selectedId && phase !== 'idle'), () => {
     if (selectedId) void refreshState(selectedId)
@@ -258,16 +275,20 @@ export default function App() {
   // and the runtime panel is actually visible.
   useEffect(() => {
     if (!isDesktop() || phase !== 'ready' || !selectedId || activeTab !== 'terminal' || !runtimeOpen) return
+    let active = true
+    let busy = false
+    const id = selectedId
+    const isCurrent = hostScope.accepts(id)
     const poll = async () => {
-      if (runtimePollBusy.current) return
-      runtimePollBusy.current = true
-      const id = selectedId
+      if (!active || !isCurrent() || busy) return
+      busy = true
       try {
         const sessionsPromise = tmuxList(id)
         const herdrPromise = (herdrVersion === null || herdrMissing)
           ? herdrDetect(id)
           : Promise.resolve(herdrVersion)
         const [sessionsResult, herdrResult] = await Promise.allSettled([sessionsPromise, herdrPromise])
+        if (!active || !isCurrent()) return
         if (sessionsResult.status === 'fulfilled') {
           setTmuxSessions((previous) => sameTmuxSessions(previous, sessionsResult.value) ? previous : sessionsResult.value)
         }
@@ -292,19 +313,22 @@ export default function App() {
         }
         try {
           const found = await herdrAgents(id)
+          if (!active || !isCurrent()) return
           setAgents((previous) => sameAgents(previous, found) ? previous : found)
           setHerdrError(null)
         } catch (error) {
+          if (!active || !isCurrent()) return
           setAgents((previous) => previous.length === 0 ? previous : [])
           setHerdrError(String(error))
         }
       } finally {
-        runtimePollBusy.current = false
+        busy = false
       }
     }
     void poll()
     runtimePoll.current = window.setInterval(() => void poll(), 8000)
     return () => {
+      active = false
       if (runtimePoll.current !== null) window.clearInterval(runtimePoll.current)
       runtimePoll.current = null
     }
@@ -316,8 +340,9 @@ export default function App() {
   useEffect(() => {
     if (phase !== 'ready' || !selectedId || !isDesktop() || panes.length > 0) return
     let active = true
+    const isCurrent = hostScope.accepts(selectedId)
     void openPane(selectedId, 80, 24).then(([id, channel]) => {
-      if (!active) {
+      if (!active || !isCurrent()) {
         // React StrictMode double-runs effects in dev: the first run's
         // pane must be closed again or it becomes an orphan PTY on the
         // host until disconnect.
@@ -325,7 +350,7 @@ export default function App() {
         return
       }
       setPanes([{ id, channel }])
-    }).catch((error) => setMessage(t('openTerminalFailed', String(error))))
+    }).catch((error) => { if (active && isCurrent()) setMessage(t('openTerminalFailed', String(error))) })
     return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, selectedId, activeTab])
@@ -334,7 +359,9 @@ export default function App() {
   // prompts for credentials, but never owns reconnect timing or retry loops.
   useEffect(() => {
     if (!isDesktop() || !selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
     const unsubscribe = subscribeSessionRuntime(selectedId, (snapshot) => {
+        if (!isCurrent()) return
         const state = snapshot.state
         if (state === 'Reconnecting') {
           setStateLabel(t('stateReconnecting'))
@@ -379,12 +406,18 @@ export default function App() {
 
   const onSplit = async (dir: 'h' | 'v') => {
     if (!selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      const [id, channel] = await openPane(selectedId, 80, 24)
+      const [id, channel] = await openPane(hostId, 80, 24)
+      if (!isCurrent()) {
+        void closePane(hostId, id).catch(() => {})
+        return
+      }
       setPanes((items) => [...items, { id, channel }])
       setSplitDir(dir)
     } catch (error) {
-      setMessage(t('splitFailed', String(error)))
+      if (isCurrent()) setMessage(t('splitFailed', String(error)))
     }
   }
 
@@ -397,6 +430,7 @@ export default function App() {
   const runConnect = async (host: Host, passwordValue?: string) => {
     lastHostRef.current = host
     const seq = ++connectSeq.current
+    const isCurrent = hostScope.accepts(host.id)
     // Any panes from a previous transport are invalid; they will be
     // reopened by the ready-effect once this connection establishes.
     setPanes([])
@@ -409,11 +443,11 @@ export default function App() {
     setMessage(t('connectingTo', host.label))
     try {
       const result = await connectHost(host, passwordValue)
-      if (seq !== connectSeq.current) return
+      if (seq !== connectSeq.current || !isCurrent()) return
       setMessage(result)
       void refreshState(host.id)
     } catch (error) {
-      if (seq !== connectSeq.current) return
+      if (seq !== connectSeq.current || !isCurrent()) return
       const connectError = asConnectError(error)
       if (connectError?.kind === 'CredentialRequired') {
         setPhase('failed')
@@ -484,7 +518,7 @@ export default function App() {
           const storedHost = await saveTailscaleAuthKey(draft.id, tailscaleKey)
           if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
           setHosts((items) => [...items.filter((h) => h.id !== storedHost.id), storedHost].sort((a, b) => a.label.localeCompare(b.label)))
-          setSelectedId(storedHost.id)
+          chooseHostId(storedHost.id)
           setDraft(null)
           setMessage(editingActiveHost
             ? t('hostAndTailscaleSavedDisconnected')
@@ -492,7 +526,7 @@ export default function App() {
           return
         }
         setHosts((items) => [...items.filter((h) => h.id !== storedDraft.id), storedDraft].sort((a, b) => a.label.localeCompare(b.label)))
-        setSelectedId(storedDraft.id)
+        chooseHostId(storedDraft.id)
         setDraft(null)
         setMessage(editingActiveHost
           ? t('hostSavedDisconnected')
@@ -506,7 +540,7 @@ export default function App() {
     if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
     if (privateKeyPassphraseRef.current) privateKeyPassphraseRef.current.value = ''
     setHosts((items) => [...items.filter((h) => h.id !== draft.id), draft].sort((a, b) => a.label.localeCompare(b.label)))
-    setSelectedId(draft.id)
+    chooseHostId(draft.id)
     setDraft(null)
     setMessage(isDesktop()
       ? t('hostSavedReconnectHint')
@@ -521,7 +555,7 @@ export default function App() {
       try { await deleteHost(selected.id) } catch (error) { setMessage(t('deleteFailed', String(error))); return }
     }
     setHosts((items) => items.filter((h) => h.id !== selected.id))
-    setSelectedId(null)
+    chooseHostId(null)
     setMessage(isDesktop() ? t('workstationDeleted') : t('previewRemovedFromPage'))
   }
 
@@ -529,18 +563,29 @@ export default function App() {
    *  and its backend connection; otherwise the new host reuses stale
    *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
   const onSelectHost = (host: Host) => {
-    if (selectedId && selectedId !== host.id && isDesktop()) {
+    if (selectedId === host.id) return
+    if (selectedId && isDesktop()) {
       void disconnectHost(selectedId).catch(() => {})
     }
-    setSelectedId(host.id)
+    chooseHostId(host.id)
     setFilesPath(host.default_remote_path || '/')
     setPhase('idle')
     setStateLabel(t('stateDisconnected'))
     setPanes([])
     setTransfers({})
     setFiles([])
+    setFilesLoading(false)
     setSelectedRemote(null)
     setBridgeInfo(null)
+    setProjects([])
+    setActionsByProject({})
+    setRuns([])
+    setRunResult(null)
+    setActionBusy(false)
+    setProjectDraft(null)
+    setActionDraft(null)
+    setConfirmAction(null)
+    lastHostRef.current = null
     setTmuxSessions([])
     setAgents([])
     setHerdrVersion(null)
@@ -560,7 +605,16 @@ export default function App() {
 
   const onDisconnect = async () => {
     if (!selected) return
-    await disconnectHost(selected.id).catch(() => {})
+    const isCurrent = hostScope.accepts(selected.id)
+    connectSeq.current += 1
+    filesSeq.current += 1
+    try {
+      await disconnectHost(selected.id)
+    } catch (error) {
+      if (isCurrent()) setMessage(language === 'zh-CN' ? `断开连接失败：${String(error)}` : `Disconnect failed: ${String(error)}`)
+      return
+    }
+    if (!isCurrent()) return
     setBridgeInfo(null)
     setPanes([])
     setTransfers({})
@@ -681,47 +735,64 @@ export default function App() {
   // ---- workspace controls ----
   useEffect(() => {
     if (!isDesktop() || !selectedId || phase !== 'ready') return
-    void projectList(selectedId).then(setProjects).catch(() => {})
-    void runReconcile(selectedId).then(() => runList(undefined, 50, selectedId).then(setRuns)).catch(() => {})
-    if (activeTab === 'actions') {
-      void runList(undefined, 50, selectedId).then(setRuns).catch(() => {})
-    }
-  }, [selectedId, activeTab, phase])
+    let active = true
+    const isCurrent = hostScope.accepts(selectedId)
+    const applyRuns = (items: Run[]) => { if (active && isCurrent()) setRuns(items) }
+    void projectList(selectedId).then((items) => { if (active && isCurrent()) setProjects(items) }).catch(() => {})
+    void runReconcile(selectedId)
+      .then(() => active && isCurrent() ? runList(undefined, 50, selectedId) : null)
+      .then((items) => { if (items) applyRuns(items) })
+      .catch(() => {})
+    if (activeTab === 'actions') void runList(undefined, 50, selectedId).then(applyRuns).catch(() => {})
+    return () => { active = false }
+  }, [selectedId, activeTab, phase, hostScope])
 
-  const refreshActions = async (projectId: string) => {
+  const refreshActions = async (projectId: string, hostId = selectedIdRef.current) => {
+    if (!hostId) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const actions = await actionList(projectId)
-      setActionsByProject((map) => ({ ...map, [projectId]: actions }))
+      if (isCurrent()) setActionsByProject((map) => ({ ...map, [projectId]: actions }))
     } catch { /* transient */ }
   }
 
   useEffect(() => {
-    for (const project of projects) void refreshActions(project.id)
+    for (const project of projects) {
+      if (project.host_id === selectedId) void refreshActions(project.id, project.host_id)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects])
+  }, [projects, selectedId])
 
   const onProjectSave = async () => {
     if (!projectDraft || !selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
       await projectSave(projectDraft)
-      setProjects(await projectList(selectedId))
+      if (!isCurrent()) return
+      const updated = await projectList(hostId)
+      if (!isCurrent()) return
+      setProjects(updated)
       setProjectDraft(null)
     } catch (error) {
-      setMessage(t('projectSaveFailed', String(error)))
+      if (isCurrent()) setMessage(t('projectSaveFailed', String(error)))
     }
   }
 
   const onActionSave = async () => {
-    if (!actionDraft) return
+    if (!actionDraft || !selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const action = actionDraft.mode === 'Quick'
         ? actionDraft
         : { ...actionDraft, timeout_ms: null }
       await actionSave(action)
-      await refreshActions(action.project_id)
-      setActionDraft(null)
+      if (!isCurrent()) return
+      await refreshActions(action.project_id, hostId)
+      if (isCurrent()) setActionDraft(null)
     } catch (error) {
-      setMessage(t('actionSaveFailed', String(error)))
+      if (isCurrent()) setMessage(t('actionSaveFailed', String(error)))
     }
   }
 
@@ -738,11 +809,14 @@ export default function App() {
 
   const executeAction = async (action: Action, confirmed: boolean) => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     setActionBusy(true)
     try {
-      const outcome = await runAction(selected.id, action, confirmed)
+      const outcome = await runAction(hostId, action, confirmed)
+      if (!isCurrent()) return
       setRunResult(outcome)
-      void runList(undefined, 50, selected.id).then(setRuns).catch(() => {})
+      void runList(undefined, 50, hostId).then((items) => { if (isCurrent()) setRuns(items) }).catch(() => {})
       const resultMessage = outcome.disposition === 'Completed'
         ? (outcome.exit_code === 0
           ? t('actionCompleted')
@@ -752,9 +826,9 @@ export default function App() {
           : t('commandSentToTerminal')
       setMessage(resultMessage + (outcome.output_bytes > 400 ? t('outputTruncatedSuffix') : ''))
     } catch (error) {
-      setMessage(t('actionFailed', String(error)))
+      if (isCurrent()) setMessage(t('actionFailed', String(error)))
     } finally {
-      setActionBusy(false)
+      if (isCurrent()) setActionBusy(false)
     }
   }
 
@@ -802,6 +876,7 @@ export default function App() {
   // ---- file panel ----
   const refreshFiles = useCallback(async () => {
     if (!selectedId || !isDesktop()) return
+    const isCurrent = hostScope.accepts(selectedId)
     // Sequence guard: a slow response for an older path must not
     // overwrite the listing the user is currently looking at.
     const seq = ++filesSeq.current
@@ -812,39 +887,50 @@ export default function App() {
       // first successful request and can transiently return an empty root.
       // A Linux root directory cannot be genuinely empty in a usable host,
       // so retry that one ambiguous result before telling the user it is.
-      if (filesPath === '/' && listing.length === 0 && seq === filesSeq.current) {
+      if (filesPath === '/' && listing.length === 0 && seq === filesSeq.current && isCurrent()) {
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         listing = await sftpList(selectedId, filesPath)
       }
-      if (seq === filesSeq.current) setFiles(listing)
+      if (seq === filesSeq.current && isCurrent()) setFiles(listing)
     } catch (error) {
-      if (seq === filesSeq.current) {
+      if (seq === filesSeq.current && isCurrent()) {
         setFiles([])
         setMessage(t('fileListFailed', String(error)))
       }
     } finally {
-      if (seq === filesSeq.current) setFilesLoading(false)
+      if (seq === filesSeq.current && isCurrent()) setFilesLoading(false)
     }
-  }, [selectedId, filesPath, setMessage, t])
+  }, [selectedId, filesPath, setMessage, t, hostScope])
+
+  // Directory navigation refreshes the list without recreating the per-host
+  // native transfer subscription on every path change.
+  const refreshFilesRef = useRef(refreshFiles)
+  refreshFilesRef.current = refreshFiles
+  useEffect(() => {
+    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return
+    void refreshFiles()
+  }, [activeTab, phase, selectedId, refreshFiles])
 
   useEffect(() => {
-    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return () => {}
-    void refreshFiles()
+    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
     // Subscribe per host: switching hosts must tear down the old
     // subscription, otherwise stale transfer events from the previous
     // host keep updating this panel and the new host gets no events.
     return subscribeSftp(selectedId, (event) => {
+      if (!isCurrent()) return
       if ('State' in event) {
         const { id, status } = event.State
         setTransfers((map) => ({ ...map, [id]: { ...(map[id] ?? { transferred: 0, total: null, speed: 0 }), status } }))
         // An upload that just finished changed the remote listing.
         if (status === 'Completed') {
-          void refreshFiles()
+          void refreshFilesRef.current()
         }
         // Terminal transfer entries auto-dismiss after a grace period so
         // long-lived sessions do not accumulate stale rows.
         if (['Completed', 'Failed', 'Cancelled'].includes(status)) {
           window.setTimeout(() => {
+            if (!isCurrent()) return
             setTransfers((map) => {
               const next = { ...map }
               if (next[id] && ['Completed', 'Failed', 'Cancelled'].includes(next[id].status)) delete next[id]
@@ -861,7 +947,7 @@ export default function App() {
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, phase, selectedId])
+  }, [activeTab, phase, selectedId, hostScope])
 
   const onOpenRemote = (entry: RemoteFileMeta) => {
     if (entry.is_dir) {
@@ -875,16 +961,21 @@ export default function App() {
 
   const onUploadClick = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const remoteDirectory = filesPath
+    const isCurrent = hostScope.accepts(hostId)
     const { open } = await import('@tauri-apps/plugin-dialog')
     const picked = await open({ multiple: true, directory: false })
+    if (!isCurrent()) return
     const paths = Array.isArray(picked) ? picked : (picked ? [picked] : [])
     for (const localPath of paths) {
+      if (!isCurrent()) return
       const name = localPath.split(/[\\/]/).pop() ?? 'file'
-      const remote = filesPath === '/' ? '/' + name : filesPath + '/' + name
+      const remote = remoteDirectory === '/' ? '/' + name : remoteDirectory + '/' + name
       try {
-        await sftpUpload(selected.id, localPath, remote)
+        await sftpUpload(hostId, localPath, remote)
       } catch (error) {
-        setMessage(t('uploadFailed', String(error)))
+        if (isCurrent()) setMessage(t('uploadFailed', String(error)))
       }
     }
   }
@@ -906,14 +997,17 @@ export default function App() {
 
   const onDownloadClick = async () => {
     if (!selected || !selectedRemote) return
+    const hostId = selected.id
+    const remotePath = selectedRemote
+    const isCurrent = hostScope.accepts(hostId)
     const { save } = await import('@tauri-apps/plugin-dialog')
-    const name = selectedRemote.split('/').pop() ?? 'download'
+    const name = remotePath.split('/').pop() ?? 'download'
     const target = await save({ defaultPath: name })
-    if (!target) return
+    if (!target || !isCurrent()) return
     try {
-      await sftpDownload(selected.id, selectedRemote, target)
+      await sftpDownload(hostId, remotePath, target)
     } catch (error) {
-      setMessage(t('downloadFailed', String(error)))
+      if (isCurrent()) setMessage(t('downloadFailed', String(error)))
     }
   }
 
@@ -1120,7 +1214,7 @@ export default function App() {
               selectedRemote={selectedRemote}
               transfers={transfers}
               formatSize={formatSize}
-              onPathChange={setFilesPath}
+              onPathChange={(path) => { setSelectedRemote(null); setFilesPath(path) }}
               onOpen={onOpenRemote}
               onRefresh={() => { void refreshFiles() }}
               onUpload={() => { void onUploadClick() }}
