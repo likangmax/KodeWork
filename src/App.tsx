@@ -23,6 +23,7 @@ import { TerminalWorkspace } from './terminal/TerminalWorkspace'
 import { RuntimePanel } from './runtime/RuntimePanel'
 import { useResumeRecovery } from './runtime/useResumeRecovery'
 import { HostResponseScope } from './runtime/hostResponseScope'
+import { voiceDestination } from './terminal/voiceDestination'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
@@ -154,10 +155,16 @@ export default function App() {
   const pollRef = useRef<number | null>(null)
   const phaseRef = useRef<ConnectPhase>(phase)
   phaseRef.current = phase
+  const panesRef = useRef(panes)
+  panesRef.current = panes
 
   // Stale requests from A are invalid even when the user switches A -> B -> A.
   const chooseHostId = (id: string | null) => {
     if (selectedIdRef.current !== id) {
+      // Cancel an in-flight browser recognition before it can type into B.
+      recognitionRef.current?.abort?.()
+      recognitionRef.current = null
+      setMicListening(false)
       hostScope.select(id)
       connectSeq.current += 1
       filesSeq.current += 1
@@ -168,6 +175,8 @@ export default function App() {
 
   useEffect(() => () => {
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
   }, [])
 
   const selected = hosts.find((h) => h.id === selectedId) ?? null
@@ -605,6 +614,9 @@ export default function App() {
 
   const onDisconnect = async () => {
     if (!selected) return
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
+    setMicListening(false)
     const isCurrent = hostScope.accepts(selected.id)
     connectSeq.current += 1
     filesSeq.current += 1
@@ -838,6 +850,12 @@ export default function App() {
       setMicListening(false)
       return
     }
+    const ownerHostId = selectedIdRef.current
+    if (!ownerHostId || phaseRef.current !== 'ready') {
+      setMessage(t('speechNeedsTerminal'))
+      return
+    }
+    const isCurrent = hostScope.accepts(ownerHostId)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const windowAny = window as any
     const Impl = windowAny.SpeechRecognition || windowAny.webkitSpeechRecognition
@@ -851,26 +869,30 @@ export default function App() {
     recognition.interimResults = false
     recognition.continuous = false
     recognition.onresult = (event: any) => {
-      const text = event.results?.[0]?.[0]?.transcript ?? ''
-      if (text.trim()) {
-        const paneId = firstPaneId()
-        if (paneId === null) {
-          setMessage(t('speechNeedsTerminal'))
-          return
-        }
-        // Read the CURRENT host at delivery time: the recognition closure
-        // must not send to a host the user switched away from mid-speech.
-        const target = selectedIdRef.current
-        if (!target) return
-        void sendInput(target, paneId, inputEncoder.encode(text.trim())).catch(() => {})
-        setMessage(t('speechInput', text.trim()))
-      }
+      if (recognitionRef.current !== recognition) return
+      const destination = voiceDestination(ownerHostId, isCurrent(), phaseRef.current === 'ready', panesRef.current[0]?.id ?? null)
+      if (!destination) return
+      const text = String(event.results?.[0]?.[0]?.transcript ?? '').trim()
+      if (!text) return
+      void sendInput(destination.hostId, destination.paneId, inputEncoder.encode(text))
+        .catch((error) => { if (isCurrent()) setMessage(t('speechInputFailed', String(error))) })
+      setMessage(t('speechInput', text))
     }
-    recognition.onend = () => setMicListening(false)
-    recognition.onerror = () => setMicListening(false)
+    const finish = () => {
+      if (recognitionRef.current !== recognition) return
+      recognitionRef.current = null
+      setMicListening(false)
+    }
+    recognition.onend = finish
+    recognition.onerror = finish
     recognitionRef.current = recognition
-    recognition.start()
-    setMicListening(true)
+    try {
+      recognition.start()
+      setMicListening(true)
+    } catch (error) {
+      finish()
+      setMessage(t('speechUnsupported') + ': ' + String(error))
+    }
   }
 
   // ---- file panel ----
