@@ -146,7 +146,6 @@ export default function App() {
   const [micListening, setMicListening] = useState(false)
   const recognitionRef = useRef<any | null>(null)
   const runtimePoll = useRef<number | null>(null)
-  const runtimePollBusy = useRef(false)
   const herdrMissingPolls = useRef(0)
   const connectSeq = useRef(0)
   const lastHostRef = useRef<Host | null>(null)
@@ -224,19 +223,20 @@ export default function App() {
 
   // Poll for pending host-key decisions while connecting.
   useEffect(() => {
-    if (phase !== 'connecting') return
+    if (phase !== 'connecting' || !selectedId) return
     let active = true
     let busy = false
+    const isCurrent = hostScope.accepts(selectedId)
     const poll = async () => {
-      if (!active || busy) return
+      if (!active || !isCurrent() || busy) return
       busy = true
       try {
         const requests = await pendingHostKeyRequests()
-        if (active && requests.length > 0) {
+        if (active && isCurrent() && requests.length > 0) {
           setHostKeyRequest((current) => current ?? requests[0])
         }
         const keyboardRequests = await pendingKeyboardInteractiveRequests()
-        if (active && keyboardRequests.length > 0) {
+        if (active && isCurrent() && keyboardRequests.length > 0) {
           setKeyboardInteractiveRequest((current) => current ?? keyboardRequests[0])
         }
       } catch { /* transient */ }
@@ -249,7 +249,7 @@ export default function App() {
       if (pollRef.current !== null) window.clearInterval(pollRef.current)
       pollRef.current = null
     }
-  }, [phase])
+  }, [phase, selectedId, hostScope])
 
   const refreshState = useCallback(async (hostId: string) => {
     if (!isDesktop()) return
@@ -275,16 +275,20 @@ export default function App() {
   // and the runtime panel is actually visible.
   useEffect(() => {
     if (!isDesktop() || phase !== 'ready' || !selectedId || activeTab !== 'terminal' || !runtimeOpen) return
+    let active = true
+    let busy = false
+    const id = selectedId
+    const isCurrent = hostScope.accepts(id)
     const poll = async () => {
-      if (runtimePollBusy.current) return
-      runtimePollBusy.current = true
-      const id = selectedId
+      if (!active || !isCurrent() || busy) return
+      busy = true
       try {
         const sessionsPromise = tmuxList(id)
         const herdrPromise = (herdrVersion === null || herdrMissing)
           ? herdrDetect(id)
           : Promise.resolve(herdrVersion)
         const [sessionsResult, herdrResult] = await Promise.allSettled([sessionsPromise, herdrPromise])
+        if (!active || !isCurrent()) return
         if (sessionsResult.status === 'fulfilled') {
           setTmuxSessions((previous) => sameTmuxSessions(previous, sessionsResult.value) ? previous : sessionsResult.value)
         }
@@ -309,19 +313,22 @@ export default function App() {
         }
         try {
           const found = await herdrAgents(id)
+          if (!active || !isCurrent()) return
           setAgents((previous) => sameAgents(previous, found) ? previous : found)
           setHerdrError(null)
         } catch (error) {
+          if (!active || !isCurrent()) return
           setAgents((previous) => previous.length === 0 ? previous : [])
           setHerdrError(String(error))
         }
       } finally {
-        runtimePollBusy.current = false
+        busy = false
       }
     }
     void poll()
     runtimePoll.current = window.setInterval(() => void poll(), 8000)
     return () => {
+      active = false
       if (runtimePoll.current !== null) window.clearInterval(runtimePoll.current)
       runtimePoll.current = null
     }
