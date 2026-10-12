@@ -938,7 +938,7 @@ export default function App() {
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, phase, selectedId, hostScope]
+  }, [activeTab, phase, selectedId, hostScope])
 
   const onOpenRemote = (entry: RemoteFileMeta) => {
     if (entry.is_dir) {
