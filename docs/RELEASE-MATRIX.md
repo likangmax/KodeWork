@@ -40,6 +40,14 @@ The repository also carries [third-party notices](THIRD-PARTY-NOTICES.md). Do no
 
 Tauri updater signatures and Windows Authenticode serve different trust purposes. A stable release path must not treat one as a substitute for the other.
 
+### Signed-version updater protection
+
+The Tauri updater is configured with `requireSignedVersion: true`: the authenticated `version:X.Y.Z` in the signature's trusted comment must match `latest.json`. Tauri CLI 2.11.5+ inserts this field automatically during a signed `tauri build`. Unversioned legacy signatures are intentionally rejected for future strict-mode updates.
+
+The stable release, update publisher and manifest verifier invoke `scripts/verify-updater-signature.mjs` before accepting an installer. It decodes Tauri's base64 `.msi.sig`, cryptographically verifies the *MSI and its global signature* using Minisign and the updater public key embedded in this repository, then compares the authenticated version. The release workflow installs pinned Minisign 0.8.0; local verification requires Node.js and Minisign. Failing signature/version checks block publication.
+
+Older versioned MSI files remain in the update bucket rather than being removed by `aws s3 sync --delete`. **Release evidence is still necessary:** an actual signed Windows MSI, the real production `latest.json` endpoint, upgrade from installed v0.2.3, Authenticode and rollback must be independently tested before calling the updater service production-verified. Do not assume source CI covers deployment or access to release signing secrets.
+
 ## Stable Windows publication rules
 
 Before publishing a stable Windows tag, the release path must:

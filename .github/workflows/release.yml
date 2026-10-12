@@ -66,6 +66,11 @@ jobs:
         run: ./scripts/prepare-tailscale.ps1
       - name: Install frontend dependencies
         run: npm ci
+      - name: Install pinned Minisign verifier
+        shell: pwsh
+        run: |
+          choco install minisign --version=0.8.0 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to install pinned Minisign verifier.' }
       - name: Build MSI and updater signature
         shell: pwsh
         env:
@@ -103,6 +108,11 @@ jobs:
           $msi = $msis[0]
           $sig = Get-Item ($msi.FullName + '.sig') -ErrorAction SilentlyContinue
           if (-not $sig) { throw 'Updater signature was not generated.' }
+          # Tauri .sig contains a base64-encoded Minisign signature, not plaintext.
+          # Verify signature with the embedded public key and authenticated app version.
+          $expectedVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          & node scripts/verify-updater-signature.mjs $msi.FullName $sig.FullName $expectedVersion
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid updater MSI signature or version; refusing publication.' }
           $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $staging = Join-Path $env:RUNNER_TEMP 'kodework-release-assets'
           New-Item -ItemType Directory -Path $staging -Force | Out-Null
