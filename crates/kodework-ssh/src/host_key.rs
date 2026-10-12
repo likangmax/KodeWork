@@ -224,6 +224,9 @@ impl KnownHosts for MemoryKnownHosts {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostKeyRequest {
     pub request_id: u64,
+    /// UI owner; separate from the known-host identity (notably for bastions).
+    pub owner_host_id: Option<HostId>,
+    pub connection_generation: u64,
     pub info: HostKeyInfo,
 }
 
@@ -276,6 +279,51 @@ impl HostKeyBroker {
         guard.drain(..).collect()
     }
 
+    /// Snapshot pending prompts for one workstation without stealing another
+    /// workstation’s prompt or losing a prompt during a tab switch.
+    #[must_use]
+    pub fn pending_for_owner(&self, host_id: HostId) -> Vec<HostKeyRequest> {
+        self.pending
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .filter(|request| request.owner_host_id == Some(host_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Ensure a renderer cannot approve a prompt for a different workstation.
+    pub fn answer_for_owner(
+        &self,
+        host_id: HostId,
+        request_id: u64,
+        decision: HostKeyDecision,
+    ) -> bool {
+        let owned = self
+            .pending
+            .lock()
+            .map(|guard| guard.iter().any(|request| {
+                request.request_id == request_id && request.owner_host_id == Some(host_id)
+            }))
+            .unwrap_or(false);
+        owned && self.answer(request_id, decision)
+    }
+
+    /// Disconnect cancels interactive approvals before waiting on the SSH
+    /// connection mutex; otherwise disconnect can block on a modal timeout.
+    pub fn cancel_for_owner(&self, host_id: HostId) {
+        let ids: Vec<u64> = self.pending_for_owner(host_id)
+            .into_iter()
+            .map(|request| request.request_id)
+            .collect();
+        for id in ids {
+            let _ = self.answer_for_owner(host_id, id, HostKeyDecision::Reject);
+        }
+    }
+
     /// Answer a pending request. Returns false when the request already
     /// timed out or was answered.
     pub fn answer(&self, request_id: u64, decision: HostKeyDecision) -> bool {
@@ -283,10 +331,13 @@ impl HostKeyBroker {
             Ok(mut guard) => guard.remove(&request_id),
             Err(_) => return false,
         };
-        match sender {
-            Some(sender) => sender.send(decision).is_ok(),
-            None => false,
+        let applied = sender.is_some_and(|sender| sender.send(decision).is_ok());
+        if applied {
+            if let Ok(mut guard) = self.pending.lock() {
+                guard.retain(|request| request.request_id != request_id);
+            }
         }
+        applied
     }
 
     /// Verify the server key for `hostname:port`.
@@ -306,6 +357,21 @@ impl HostKeyBroker {
     pub async fn verify_for_host(
         &self,
         host_id: Option<HostId>,
+        hostname: &str,
+        port: u16,
+        key: &PublicKey,
+    ) -> Result<bool, SshError> {
+        self.verify_for_connection(host_id, host_id, 0, hostname, port, key).await
+    }
+
+    /// The identity for trusted keys and the owner of an approval prompt must
+    /// never be conflated: a jump host is pinned by endpoint, but its prompt
+    /// belongs to the workstation that initiated the bastion connection.
+    pub async fn verify_for_connection(
+        &self,
+        host_id: Option<HostId>,
+        owner_host_id: Option<HostId>,
+        connection_generation: u64,
         hostname: &str,
         port: u16,
         key: &PublicKey,
@@ -365,6 +431,8 @@ impl HostKeyBroker {
             })?;
             guard.push_back(HostKeyRequest {
                 request_id,
+                owner_host_id,
+                connection_generation,
                 info: info.clone(),
             });
         }
@@ -450,6 +518,50 @@ mod tests {
             .await
             .unwrap_or_else(|error| unreachable!("verify task join failed: {error}"));
         assert_eq!(result, Ok(true));
+    }
+
+
+    #[tokio::test]
+    async fn simultaneous_prompts_remain_owned_and_cancel_isolated() {
+        let broker = Arc::new(HostKeyBroker::new(
+            Arc::new(MemoryKnownHosts::new()),
+            Duration::from_secs(3),
+        ));
+        let owner_a = HostId::new();
+        let owner_b = HostId::new();
+        let a = {
+            let broker = Arc::clone(&broker);
+            let key = test_key();
+            tokio::spawn(async move {
+                broker.verify_for_connection(Some(owner_a), Some(owner_a), 1, "a.example", 22, &key).await
+            })
+        };
+        let b = {
+            let broker = Arc::clone(&broker);
+            let key = test_key();
+            tokio::spawn(async move {
+                // A bastion has endpoint-scoped trust, but B owns its dialog.
+                broker.verify_for_connection(None, Some(owner_b), 1, "jump.example", 22, &key).await
+            })
+        };
+        let (a_req, b_req) = loop {
+            let a = broker.pending_for_owner(owner_a);
+            let b = broker.pending_for_owner(owner_b);
+            if let (Some(a), Some(b)) = (a.first(), b.first()) {
+                break (a.clone(), b.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(a_req.connection_generation, 1);
+        assert_eq!(b_req.owner_host_id, Some(owner_b));
+        assert!(!broker.answer_for_owner(owner_a, b_req.request_id, HostKeyDecision::TrustAndSave));
+        broker.cancel_for_owner(owner_a);
+        assert!(broker.pending_for_owner(owner_a).is_empty());
+        assert_eq!(broker.pending_for_owner(owner_b).len(), 1);
+        assert_eq!(a.await.unwrap_or_else(|error| unreachable!("{error}")), Err(SshError::HostKeyRejected));
+        assert!(broker.answer_for_owner(owner_b, b_req.request_id, HostKeyDecision::TrustOnce));
+        assert_eq!(b.await.unwrap_or_else(|error| unreachable!("{error}")), Ok(true));
+        assert!(broker.pending_for_owner(owner_b).is_empty());
     }
 
     #[tokio::test]
