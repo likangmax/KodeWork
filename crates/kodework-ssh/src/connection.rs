@@ -96,6 +96,8 @@ pub struct ConnectionOptions {
     pub username: String,
     /// Logical workstation identity used to bind trust across fallback paths.
     pub logical_host_id: Option<HostId>,
+    /// Workstation that owns approval dialogs; distinct from trust identity.
+    pub ui_owner_host_id: Option<HostId>,
     /// Authentication methods tried in order until one succeeds.
     pub auth: Vec<AuthMethod>,
     pub host_key: Arc<HostKeyBroker>,
@@ -126,6 +128,7 @@ impl ConnectionOptions {
             port,
             username,
             logical_host_id: None,
+            ui_owner_host_id: None,
             auth,
             host_key,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -224,7 +227,7 @@ impl SshConnection {
             event_tx,
             options.generation,
             Arc::clone(&filtered_channels),
-        );
+        ).with_ui_owner(options.ui_owner_host_id);
 
         let mut handle = if let Some(proxy) = options.proxy.as_ref() {
             let stream = spawn_proxy_stream(proxy).await?;
@@ -317,6 +320,8 @@ impl SshConnection {
             Arc::clone(&options.host_key),
             options.generation,
         );
+        // Bastion pinning remains endpoint-scoped; approval belongs to target UI.
+        jump_options.ui_owner_host_id = options.ui_owner_host_id;
         jump_options.connect_timeout = options.connect_timeout;
         let (jump_connection, mut jump_events) = Self::connect_direct(jump_options).await?;
 
@@ -349,7 +354,7 @@ impl SshConnection {
             event_tx,
             options.generation,
             Arc::clone(&filtered_channels),
-        );
+        ).with_ui_owner(options.ui_owner_host_id);
         let mut handle = tokio::time::timeout(
             options.connect_timeout,
             client::connect_stream(config, stream, handler),
@@ -881,7 +886,9 @@ async fn authenticate(
                         } => {
                             let expected = prompts.len();
                             let responses = broker
-                                .prompt(
+                                .prompt_for_connection(
+                                    options.ui_owner_host_id,
+                                    options.generation,
                                     name,
                                     instructions,
                                     prompts
