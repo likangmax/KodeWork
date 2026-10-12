@@ -577,7 +577,10 @@ mod tests {
                     // needs a reply. The counter survives split data events.
                     let queries = query_detector.count_new(&bytes);
                     if cursor_queries_answered + queries > MAX_CURSOR_QUERY_RESPONSES {
-                        return Err("PowerShell requested excessive cursor positions before readiness".to_string());
+                        return Err(
+                            "PowerShell requested excessive cursor positions before readiness"
+                                .to_string(),
+                        );
                     }
                     for _ in 0..queries {
                         manager
