@@ -900,7 +900,7 @@ export default function App() {
     } finally {
       if (seq === filesSeq.current && isCurrent()) setFilesLoading(false)
     }
-  }, [selectedId, filesPath, setMessage, t, hostScope]
+  }, [selectedId, filesPath, setMessage, t, hostScope])
 
   useEffect(() => {
     if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return () => {}
