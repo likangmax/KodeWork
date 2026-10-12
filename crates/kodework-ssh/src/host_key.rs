@@ -459,7 +459,7 @@ impl HostKeyBroker {
         }
 
         let outcome = tokio::time::timeout(self.decision_timeout, receiver).await;
-        let result = match outcome {
+        match outcome {
             Ok(Ok(HostKeyDecision::TrustOnce)) => Ok(true),
             Ok(Ok(HostKeyDecision::TrustAndSave)) => {
                 match host_id {
@@ -471,8 +471,7 @@ impl HostKeyBroker {
             }
             Ok(Ok(HostKeyDecision::Reject)) | Ok(Err(_)) => Err(SshError::HostKeyRejected),
             Err(_) => Err(SshError::HostKeyDecisionTimeout),
-        };
-        result
+        }
     }
 
     fn forget(&self, request_id: u64) {
