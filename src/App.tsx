@@ -876,6 +876,7 @@ export default function App() {
   // ---- file panel ----
   const refreshFiles = useCallback(async () => {
     if (!selectedId || !isDesktop()) return
+    const isCurrent = hostScope.accepts(selectedId)
     // Sequence guard: a slow response for an older path must not
     // overwrite the listing the user is currently looking at.
     const seq = ++filesSeq.current
@@ -886,28 +887,30 @@ export default function App() {
       // first successful request and can transiently return an empty root.
       // A Linux root directory cannot be genuinely empty in a usable host,
       // so retry that one ambiguous result before telling the user it is.
-      if (filesPath === '/' && listing.length === 0 && seq === filesSeq.current) {
+      if (filesPath === '/' && listing.length === 0 && seq === filesSeq.current && isCurrent()) {
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         listing = await sftpList(selectedId, filesPath)
       }
-      if (seq === filesSeq.current) setFiles(listing)
+      if (seq === filesSeq.current && isCurrent()) setFiles(listing)
     } catch (error) {
-      if (seq === filesSeq.current) {
+      if (seq === filesSeq.current && isCurrent()) {
         setFiles([])
         setMessage(t('fileListFailed', String(error)))
       }
     } finally {
-      if (seq === filesSeq.current) setFilesLoading(false)
+      if (seq === filesSeq.current && isCurrent()) setFilesLoading(false)
     }
-  }, [selectedId, filesPath, setMessage, t])
+  }, [selectedId, filesPath, setMessage, t, hostScope]
 
   useEffect(() => {
     if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return () => {}
     void refreshFiles()
+    const isCurrent = hostScope.accepts(selectedId)
     // Subscribe per host: switching hosts must tear down the old
     // subscription, otherwise stale transfer events from the previous
     // host keep updating this panel and the new host gets no events.
     return subscribeSftp(selectedId, (event) => {
+      if (!isCurrent()) return
       if ('State' in event) {
         const { id, status } = event.State
         setTransfers((map) => ({ ...map, [id]: { ...(map[id] ?? { transferred: 0, total: null, speed: 0 }), status } }))
@@ -935,7 +938,7 @@ export default function App() {
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, phase, selectedId])
+  }, [activeTab, phase, selectedId, hostScope]
 
   const onOpenRemote = (entry: RemoteFileMeta) => {
     if (entry.is_dir) {
@@ -949,16 +952,21 @@ export default function App() {
 
   const onUploadClick = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const remoteDirectory = filesPath
+    const isCurrent = hostScope.accepts(hostId)
     const { open } = await import('@tauri-apps/plugin-dialog')
     const picked = await open({ multiple: true, directory: false })
+    if (!isCurrent()) return
     const paths = Array.isArray(picked) ? picked : (picked ? [picked] : [])
     for (const localPath of paths) {
+      if (!isCurrent()) return
       const name = localPath.split(/[\\/]/).pop() ?? 'file'
-      const remote = filesPath === '/' ? '/' + name : filesPath + '/' + name
+      const remote = remoteDirectory === '/' ? '/' + name : remoteDirectory + '/' + name
       try {
-        await sftpUpload(selected.id, localPath, remote)
+        await sftpUpload(hostId, localPath, remote)
       } catch (error) {
-        setMessage(t('uploadFailed', String(error)))
+        if (isCurrent()) setMessage(t('uploadFailed', String(error)))
       }
     }
   }
@@ -980,14 +988,17 @@ export default function App() {
 
   const onDownloadClick = async () => {
     if (!selected || !selectedRemote) return
+    const hostId = selected.id
+    const remotePath = selectedRemote
+    const isCurrent = hostScope.accepts(hostId)
     const { save } = await import('@tauri-apps/plugin-dialog')
-    const name = selectedRemote.split('/').pop() ?? 'download'
+    const name = remotePath.split('/').pop() ?? 'download'
     const target = await save({ defaultPath: name })
-    if (!target) return
+    if (!target || !isCurrent()) return
     try {
-      await sftpDownload(selected.id, selectedRemote, target)
+      await sftpDownload(hostId, remotePath, target)
     } catch (error) {
-      setMessage(t('downloadFailed', String(error)))
+      if (isCurrent()) setMessage(t('downloadFailed', String(error)))
     }
   }
 
