@@ -7,13 +7,13 @@
 
 mod run;
 
-pub use run::{
-    ActionRunError, RemoteRunProbe, RemoteRunProbeRequest, RemoteRunState, RunDisposition,
-    RunOutcome,
-};
 use run::{
     build_action_command, build_remote_run_probe_command, build_run_script, parse_epoch_seconds,
     shell_quote,
+};
+pub use run::{
+    ActionRunError, RemoteRunProbe, RemoteRunProbeRequest, RemoteRunState, RunDisposition,
+    RunOutcome,
 };
 
 use crate::tunnel::{TunnelInfo, TunnelManager};
@@ -28,8 +28,7 @@ use kodework_sftp::backend::{RemoteFileMeta, RusshSftpBackend, SftpBackend};
 use kodework_sftp::manager::{TransferEvent, TransferLeaseRegistry, TransferManager};
 use kodework_sftp::{TransferRequest, DEFAULT_MAX_CONCURRENCY};
 use kodework_ssh::connection::{
-    AuthMethod, CommandOutput, ConnectionOptions, JumpSpec, ProxyCommand,
-    SshConnection, SshPty,
+    AuthMethod, CommandOutput, ConnectionOptions, JumpSpec, ProxyCommand, SshConnection, SshPty,
 };
 use kodework_ssh::handler::SessionEvent;
 use kodework_ssh::host_key::HostKeyBroker;
@@ -1772,7 +1771,6 @@ impl SessionManager {
     }
 }
 
-
 /// Forwards connection events to subscribers; the primary subscriber gets
 /// true backpressure, mirrors use best-effort delivery with a drop counter.
 async fn pump_events(
@@ -2179,4 +2177,3 @@ mod transport_state_tests {
         ));
     }
 }
-

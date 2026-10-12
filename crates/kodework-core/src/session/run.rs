@@ -110,7 +110,9 @@ pub(super) fn parse_epoch_seconds(value: Option<&str>) -> Option<u64> {
     value?.parse::<u64>().ok()?.checked_mul(1_000)
 }
 
-pub(super) fn build_remote_run_probe_command(requests: &[RemoteRunProbeRequest]) -> Result<String, String> {
+pub(super) fn build_remote_run_probe_command(
+    requests: &[RemoteRunProbeRequest],
+) -> Result<String, String> {
     let mut command = String::from("set -f; ");
     for request in requests {
         let id = request.run_id.as_uuid().simple().to_string();
@@ -283,5 +285,4 @@ mod tests {
         assert!(!script.contains("[ -f \"$base/started_at_s\" ] ||"));
         assert!(script.contains("else printf '%s\\tunknown\\n'"));
     }
-
 }
