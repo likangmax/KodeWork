@@ -7,6 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'BaseUrl or KODEWORK_UPDATE_BASE_URL is required.' }
+if ($BaseUrl -notmatch '^https://') { throw 'Updater BaseUrl must use HTTPS.' }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Updater version must be stable X.Y.Z.' }
 $msiDirectory = Join-Path $root 'target\release\bundle\msi'
 $msi = Get-ChildItem -LiteralPath $msiDirectory -Filter "*_${Version}_x64_en-US.msi" | Select-Object -First 1
 if (-not $msi) { throw "MSI for version $Version was not found in $msiDirectory" }
@@ -15,6 +17,9 @@ if (-not (Test-Path -LiteralPath $signaturePath)) { throw "Updater signature mis
 
 $signature = [System.IO.File]::ReadAllText($signaturePath).Trim()
 if ([string]::IsNullOrWhiteSpace($signature)) { throw 'Updater signature is empty.' }
+# Verify the authentic MSI and signed version before copying or publishing.
+& node (Join-Path $PSScriptRoot 'verify-updater-signature.mjs') $msi.FullName $signaturePath $Version
+if ($LASTEXITCODE -ne 0) { throw 'Updater MSI signature/version verification failed.' }
 $channel = Join-Path $Destination 'stable'
 New-Item -ItemType Directory -Force -Path $channel | Out-Null
 $artifactName = "kodework-windows-$Version-x86_64.msi"
@@ -44,7 +49,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $channel $artifactName), 
 
 if (-not [string]::IsNullOrWhiteSpace($env:KODEWORK_UPDATE_S3_URI)) {
   $aws = Get-Command aws -ErrorAction Stop
-  & $aws.Source s3 sync $channel ($env:KODEWORK_UPDATE_S3_URI.TrimEnd('/') + '/stable') --delete --cache-control 'public,max-age=300'
+  & $aws.Source s3 sync $channel ($env:KODEWORK_UPDATE_S3_URI.TrimEnd('/') + '/stable') --cache-control 'public,max-age=300'
   if ($LASTEXITCODE -ne 0) { throw "aws s3 sync failed with exit code $LASTEXITCODE" }
 }
 Write-Host "Update channel prepared at $channel"

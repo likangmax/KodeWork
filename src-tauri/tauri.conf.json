@@ -30,7 +30,9 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["msi"],
+    "targets": [
+      "msi"
+    ],
     "externalBin": [
       "binaries/tailscale",
       "binaries/tailscaled"
@@ -57,7 +59,8 @@
       ],
       "windows": {
         "installMode": "passive"
-      }
+      },
+      "requireSignedVersion": true
     }
   }
 }
