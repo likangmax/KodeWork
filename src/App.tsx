@@ -23,6 +23,7 @@ import { TerminalWorkspace } from './terminal/TerminalWorkspace'
 import { RuntimePanel } from './runtime/RuntimePanel'
 import { useResumeRecovery } from './runtime/useResumeRecovery'
 import { HostResponseScope } from './runtime/hostResponseScope'
+import { HostDisconnectGate } from './runtime/hostDisconnectGate'
 import { voiceDestination } from './terminal/voiceDestination'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
@@ -70,6 +71,7 @@ export default function App() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hostScope] = useState(() => new HostResponseScope())
+  const [disconnectGate] = useState(() => new HostDisconnectGate())
   const [draft, setDraft] = useState<Host | null>(null)
   const [message, setMessageState] = useState('')
   const [messageIsError, setMessageIsError] = useState(false)
@@ -437,14 +439,26 @@ export default function App() {
   }
 
   const runConnect = async (host: Host, passwordValue?: string) => {
+    const seq = ++connectSeq.current
+    const isCurrent = hostScope.accepts(host.id)
+    // A previous fire-and-forget disconnect from A -> B must settle before
+    // we dispatch a new transport for A after a rapid A -> B -> A switch.
+    try {
+      await disconnectGate.awaitPending(host.id)
+    } catch (error) {
+      if (seq === connectSeq.current && isCurrent()) {
+        setPhase('failed')
+        setMessage(t('connectFailed', String(error)))
+      }
+      return
+    }
+    if (seq !== connectSeq.current || !isCurrent()) return
     // A fresh transport generation must not receive words captured by an
     // earlier browser SpeechRecognition session for the same workstation.
     recognitionRef.current?.abort?.()
     recognitionRef.current = null
     setMicListening(false)
     lastHostRef.current = host
-    const seq = ++connectSeq.current
-    const isCurrent = hostScope.accepts(host.id)
     // Any panes from a previous transport are invalid; they will be
     // reopened by the ready-effect once this connection establishes.
     setPanes([])
@@ -513,7 +527,7 @@ export default function App() {
       try {
         const editingActiveHost = selectedId === draft.id && (phase === 'ready' || phase === 'connecting')
         if (editingActiveHost) {
-          await disconnectHost(draft.id)
+          await disconnectGate.enqueue(draft.id, () => disconnectHost(draft.id))
           setPanes([])
           setTransfers({})
           setFiles([])
@@ -578,8 +592,10 @@ export default function App() {
    *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
   const onSelectHost = (host: Host) => {
     if (selectedId === host.id) return
-    if (selectedId && isDesktop()) {
-      void disconnectHost(selectedId).catch(() => {})
+    if (selectedId && isDesktop() && (phase === 'ready' || phase === 'connecting')) {
+      // Register the outgoing operation synchronously before the new host is
+      // selected, even though native disconnection is asynchronous.
+      void disconnectGate.enqueue(selectedId, () => disconnectHost(selectedId)).catch(() => {})
     }
     chooseHostId(host.id)
     setFilesPath(host.default_remote_path || '/')
@@ -629,7 +645,7 @@ export default function App() {
     connectSeq.current += 1
     filesSeq.current += 1
     try {
-      await disconnectHost(selected.id)
+      await disconnectGate.enqueue(selected.id, () => disconnectHost(selected.id))
     } catch (error) {
       if (isCurrent()) setMessage(language === 'zh-CN' ? `断开连接失败：${String(error)}` : `Disconnect failed: ${String(error)}`)
       return
