@@ -6,11 +6,14 @@ describe('HostDisconnectGate', () => {
     const gate = new HostDisconnectGate()
     const trace: string[] = []
     let finishA: (() => void) | null = null
+    let signalAStart: (() => void) | undefined
+    const aStarted = new Promise<void>((resolve) => { signalAStart = resolve })
     const outgoingA = gate.enqueue('a', () => new Promise<void>((resolve) => {
       trace.push('disconnect-a-started')
       finishA = resolve
+      signalAStart?.()
     }))
-    await Promise.resolve()
+    await aStarted
     const reconnectA = gate.awaitPending('a').then(() => { trace.push('connect-a') })
     await gate.awaitPending('b').then(() => { trace.push('connect-b') })
     expect(trace).toEqual(['disconnect-a-started', 'connect-b'])
@@ -25,12 +28,15 @@ describe('HostDisconnectGate', () => {
     const gate = new HostDisconnectGate()
     const events: string[] = []
     let release: (() => void) | null = null
+    let signalFirstStart: (() => void) | undefined
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStart = resolve })
     const first = gate.enqueue('a', () => new Promise<void>((resolve) => {
       events.push('first')
       release = resolve
+      signalFirstStart?.()
     }))
     const second = gate.enqueue('a', async () => { events.push('second') })
-    await Promise.resolve()
+    await firstStarted
     expect(events).toEqual(['first'])
     const unblock = release as (() => void) | null
     if (!unblock) throw new Error('first disconnect did not start')
