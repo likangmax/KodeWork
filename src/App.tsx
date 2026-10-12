@@ -28,6 +28,7 @@ import { useTheme } from './settings/useTheme'
 import { useLanguage } from './settings/useLanguage'
 import { LanguagePrompt } from './settings/LanguagePrompt'
 import { translate } from './i18n'
+import { isErrorMessage } from './message'
 import { WorkspaceHeader } from './workspace/WorkspaceHeader'
 
 const inputEncoder = new TextEncoder()
@@ -73,7 +74,7 @@ export default function App() {
   // Enhanced message: errors are highlighted and any message expires so a
   // later poll/success cannot permanently overwrite an important error.
   const setMessage = useCallback((text: string) => {
-    const isError = /失败|错误|无法|拒绝|异常|已拒绝|fail|error|denied|refused|timeout|invalid/i.test(text)
+    const isError = isErrorMessage(text)
     setMessageState(text)
     setMessageIsError(isError)
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)

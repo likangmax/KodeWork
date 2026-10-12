@@ -2,6 +2,7 @@
 
 ## 0.2.4 — Unreleased — Reliability, security, accessibility, and maintenance
 
+- Chinese timeout warnings now receive the same error highlighting and 30-second display duration as English timeout messages.
 - Hardened Run lifecycle/reconciliation so transport or launcher success is never misreported as remote command success; unresolved outcomes remain explicit and reconcilable.
 - Strengthened SSH host-key trust ownership across direct, Tailscale, public-fallback, and jump-host paths, with fail-closed trust-store reads and native reconnect state propagation.
 - Hardened SFTP resume and transfer identity with prefix verification, destination leases, source revalidation, safe `~` expansion, and more reliable pause/resume/retry/cancel behavior.
