@@ -67,7 +67,8 @@ impl KeyboardInteractiveBroker {
         self.pending
             .lock()
             .map(|guard| {
-                guard.iter()
+                guard
+                    .iter()
                     .filter(|request| request.owner_host_id == Some(host_id))
                     .cloned()
                     .collect()
@@ -75,19 +76,31 @@ impl KeyboardInteractiveBroker {
             .unwrap_or_default()
     }
 
-    pub fn answer_for_owner(&self, host_id: HostId, request_id: u64, responses: Vec<String>) -> bool {
-        let owned = self.pending.lock()
-            .map(|guard| guard.iter().any(|request| {
-                request.request_id == request_id && request.owner_host_id == Some(host_id)
-            }))
+    pub fn answer_for_owner(
+        &self,
+        host_id: HostId,
+        request_id: u64,
+        responses: Vec<String>,
+    ) -> bool {
+        let owned = self
+            .pending
+            .lock()
+            .map(|guard| {
+                guard.iter().any(|request| {
+                    request.request_id == request_id && request.owner_host_id == Some(host_id)
+                })
+            })
             .unwrap_or(false);
         owned && self.answer(request_id, responses)
     }
 
     /// Wake pending authentication immediately before a requested disconnect.
     pub fn cancel_for_owner(&self, host_id: HostId) {
-        let ids = self.pending_for_owner(host_id).into_iter()
-            .map(|request| request.request_id).collect::<Vec<_>>();
+        let ids = self
+            .pending_for_owner(host_id)
+            .into_iter()
+            .map(|request| request.request_id)
+            .collect::<Vec<_>>();
         for id in ids {
             // Dropping a pending sender makes the authenticator return Cancelled.
             if let Ok(mut guard) = self.requests.lock() {
@@ -120,7 +133,8 @@ impl KeyboardInteractiveBroker {
         instructions: String,
         prompts: Vec<KeyboardPrompt>,
     ) -> Result<Vec<String>, SshError> {
-        self.prompt_for_connection(None, 0, name, instructions, prompts).await
+        self.prompt_for_connection(None, 0, name, instructions, prompts)
+            .await
     }
 
     pub async fn prompt_for_connection(
@@ -176,7 +190,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-
     #[tokio::test]
     async fn prompts_are_not_stolen_across_workstations_and_can_be_cancelled() {
         let broker = Arc::new(KeyboardInteractiveBroker::new(Duration::from_secs(3)));
@@ -185,13 +198,18 @@ mod tests {
         let spawn = |owner| {
             let broker = Arc::clone(&broker);
             tokio::spawn(async move {
-                broker.prompt_for_connection(
-                    Some(owner),
-                    7,
-                    "OTP".into(),
-                    "Enter verification code".into(),
-                    vec![KeyboardPrompt { prompt: "Code".into(), echo: false }],
-                ).await
+                broker
+                    .prompt_for_connection(
+                        Some(owner),
+                        7,
+                        "OTP".into(),
+                        "Enter verification code".into(),
+                        vec![KeyboardPrompt {
+                            prompt: "Code".into(),
+                            echo: false,
+                        }],
+                    )
+                    .await
             })
         };
         let a = spawn(owner_a);
@@ -205,15 +223,23 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-        }).await.expect("both OTP prompts must appear");
+        })
+        .await
+        .expect("both OTP prompts must appear");
         assert_ne!(id_a, id_b);
         assert!(!broker.answer_for_owner(owner_a, id_b, vec!["bad".into()]));
         broker.cancel_for_owner(owner_a);
-        assert_eq!(a.await.unwrap_or_else(|error| unreachable!("{error}")), Err(SshError::Cancelled));
+        assert_eq!(
+            a.await.unwrap_or_else(|error| unreachable!("{error}")),
+            Err(SshError::Cancelled)
+        );
         assert!(broker.pending_for_owner(owner_a).is_empty());
         assert_eq!(broker.pending_for_owner(owner_b).len(), 1);
         assert!(broker.answer_for_owner(owner_b, id_b, vec!["123456".into()]));
-        assert_eq!(b.await.unwrap_or_else(|error| unreachable!("{error}")), Ok(vec!["123456".into()]));
+        assert_eq!(
+            b.await.unwrap_or_else(|error| unreachable!("{error}")),
+            Ok(vec!["123456".into()])
+        );
         assert!(broker.pending_for_owner(owner_b).is_empty());
     }
 

@@ -227,7 +227,8 @@ impl SshConnection {
             event_tx,
             options.generation,
             Arc::clone(&filtered_channels),
-        ).with_ui_owner(options.ui_owner_host_id);
+        )
+        .with_ui_owner(options.ui_owner_host_id);
 
         let mut handle = if let Some(proxy) = options.proxy.as_ref() {
             let stream = spawn_proxy_stream(proxy).await?;
@@ -354,7 +355,8 @@ impl SshConnection {
             event_tx,
             options.generation,
             Arc::clone(&filtered_channels),
-        ).with_ui_owner(options.ui_owner_host_id);
+        )
+        .with_ui_owner(options.ui_owner_host_id);
         let mut handle = tokio::time::timeout(
             options.connect_timeout,
             client::connect_stream(config, stream, handler),

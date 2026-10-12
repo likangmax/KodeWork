@@ -305,9 +305,11 @@ impl HostKeyBroker {
         let owned = self
             .pending
             .lock()
-            .map(|guard| guard.iter().any(|request| {
-                request.request_id == request_id && request.owner_host_id == Some(host_id)
-            }))
+            .map(|guard| {
+                guard.iter().any(|request| {
+                    request.request_id == request_id && request.owner_host_id == Some(host_id)
+                })
+            })
             .unwrap_or(false);
         owned && self.answer(request_id, decision)
     }
@@ -315,7 +317,8 @@ impl HostKeyBroker {
     /// Disconnect cancels interactive approvals before waiting on the SSH
     /// connection mutex; otherwise disconnect can block on a modal timeout.
     pub fn cancel_for_owner(&self, host_id: HostId) {
-        let ids: Vec<u64> = self.pending_for_owner(host_id)
+        let ids: Vec<u64> = self
+            .pending_for_owner(host_id)
             .into_iter()
             .map(|request| request.request_id)
             .collect();
@@ -361,7 +364,8 @@ impl HostKeyBroker {
         port: u16,
         key: &PublicKey,
     ) -> Result<bool, SshError> {
-        self.verify_for_connection(host_id, host_id, 0, hostname, port, key).await
+        self.verify_for_connection(host_id, host_id, 0, hostname, port, key)
+            .await
     }
 
     /// The identity for trusted keys and the owner of an approval prompt must
@@ -520,7 +524,6 @@ mod tests {
         assert_eq!(result, Ok(true));
     }
 
-
     #[tokio::test]
     async fn simultaneous_prompts_remain_owned_and_cancel_isolated() {
         let broker = Arc::new(HostKeyBroker::new(
@@ -533,7 +536,9 @@ mod tests {
             let broker = Arc::clone(&broker);
             let key = test_key();
             tokio::spawn(async move {
-                broker.verify_for_connection(Some(owner_a), Some(owner_a), 1, "a.example", 22, &key).await
+                broker
+                    .verify_for_connection(Some(owner_a), Some(owner_a), 1, "a.example", 22, &key)
+                    .await
             })
         };
         let b = {
@@ -541,7 +546,9 @@ mod tests {
             let key = test_key();
             tokio::spawn(async move {
                 // A bastion has endpoint-scoped trust, but B owns its dialog.
-                broker.verify_for_connection(None, Some(owner_b), 1, "jump.example", 22, &key).await
+                broker
+                    .verify_for_connection(None, Some(owner_b), 1, "jump.example", 22, &key)
+                    .await
             })
         };
         let (a_req, b_req) = tokio::time::timeout(Duration::from_secs(2), async {
@@ -553,16 +560,24 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-        }).await.expect("both host-key prompts must appear");
+        })
+        .await
+        .expect("both host-key prompts must appear");
         assert_eq!(a_req.connection_generation, 1);
         assert_eq!(b_req.owner_host_id, Some(owner_b));
         assert!(!broker.answer_for_owner(owner_a, b_req.request_id, HostKeyDecision::TrustAndSave));
         broker.cancel_for_owner(owner_a);
         assert!(broker.pending_for_owner(owner_a).is_empty());
         assert_eq!(broker.pending_for_owner(owner_b).len(), 1);
-        assert_eq!(a.await.unwrap_or_else(|error| unreachable!("{error}")), Err(SshError::HostKeyRejected));
+        assert_eq!(
+            a.await.unwrap_or_else(|error| unreachable!("{error}")),
+            Err(SshError::HostKeyRejected)
+        );
         assert!(broker.answer_for_owner(owner_b, b_req.request_id, HostKeyDecision::TrustOnce));
-        assert_eq!(b.await.unwrap_or_else(|error| unreachable!("{error}")), Ok(true));
+        assert_eq!(
+            b.await.unwrap_or_else(|error| unreachable!("{error}")),
+            Ok(true)
+        );
         assert!(broker.pending_for_owner(owner_b).is_empty());
     }
 
