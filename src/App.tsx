@@ -735,47 +735,64 @@ export default function App() {
   // ---- workspace controls ----
   useEffect(() => {
     if (!isDesktop() || !selectedId || phase !== 'ready') return
-    void projectList(selectedId).then(setProjects).catch(() => {})
-    void runReconcile(selectedId).then(() => runList(undefined, 50, selectedId).then(setRuns)).catch(() => {})
-    if (activeTab === 'actions') {
-      void runList(undefined, 50, selectedId).then(setRuns).catch(() => {})
-    }
-  }, [selectedId, activeTab, phase])
+    let active = true
+    const isCurrent = hostScope.accepts(selectedId)
+    const applyRuns = (items: Run[]) => { if (active && isCurrent()) setRuns(items) }
+    void projectList(selectedId).then((items) => { if (active && isCurrent()) setProjects(items) }).catch(() => {})
+    void runReconcile(selectedId)
+      .then(() => active && isCurrent() ? runList(undefined, 50, selectedId) : null)
+      .then((items) => { if (items) applyRuns(items) })
+      .catch(() => {})
+    if (activeTab === 'actions') void runList(undefined, 50, selectedId).then(applyRuns).catch(() => {})
+    return () => { active = false }
+  }, [selectedId, activeTab, phase, hostScope])
 
-  const refreshActions = async (projectId: string) => {
+  const refreshActions = async (projectId: string, hostId = selectedIdRef.current) => {
+    if (!hostId) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const actions = await actionList(projectId)
-      setActionsByProject((map) => ({ ...map, [projectId]: actions }))
+      if (isCurrent()) setActionsByProject((map) => ({ ...map, [projectId]: actions }))
     } catch { /* transient */ }
   }
 
   useEffect(() => {
-    for (const project of projects) void refreshActions(project.id)
+    for (const project of projects) {
+      if (project.host_id === selectedId) void refreshActions(project.id, project.host_id)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects])
+  }, [projects, selectedId])
 
   const onProjectSave = async () => {
     if (!projectDraft || !selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
       await projectSave(projectDraft)
-      setProjects(await projectList(selectedId))
+      if (!isCurrent()) return
+      const updated = await projectList(hostId)
+      if (!isCurrent()) return
+      setProjects(updated)
       setProjectDraft(null)
     } catch (error) {
-      setMessage(t('projectSaveFailed', String(error)))
+      if (isCurrent()) setMessage(t('projectSaveFailed', String(error)))
     }
   }
 
   const onActionSave = async () => {
-    if (!actionDraft) return
+    if (!actionDraft || !selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const action = actionDraft.mode === 'Quick'
         ? actionDraft
         : { ...actionDraft, timeout_ms: null }
       await actionSave(action)
-      await refreshActions(action.project_id)
-      setActionDraft(null)
+      if (!isCurrent()) return
+      await refreshActions(action.project_id, hostId)
+      if (isCurrent()) setActionDraft(null)
     } catch (error) {
-      setMessage(t('actionSaveFailed', String(error)))
+      if (isCurrent()) setMessage(t('actionSaveFailed', String(error)))
     }
   }
 
@@ -792,11 +809,14 @@ export default function App() {
 
   const executeAction = async (action: Action, confirmed: boolean) => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     setActionBusy(true)
     try {
-      const outcome = await runAction(selected.id, action, confirmed)
+      const outcome = await runAction(hostId, action, confirmed)
+      if (!isCurrent()) return
       setRunResult(outcome)
-      void runList(undefined, 50, selected.id).then(setRuns).catch(() => {})
+      void runList(undefined, 50, hostId).then((items) => { if (isCurrent()) setRuns(items) }).catch(() => {})
       const resultMessage = outcome.disposition === 'Completed'
         ? (outcome.exit_code === 0
           ? t('actionCompleted')
@@ -806,9 +826,9 @@ export default function App() {
           : t('commandSentToTerminal')
       setMessage(resultMessage + (outcome.output_bytes > 400 ? t('outputTruncatedSuffix') : ''))
     } catch (error) {
-      setMessage(t('actionFailed', String(error)))
+      if (isCurrent()) setMessage(t('actionFailed', String(error)))
     } finally {
-      setActionBusy(false)
+      if (isCurrent()) setActionBusy(false)
     }
   }
 
