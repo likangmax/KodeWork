@@ -23,6 +23,8 @@ import { TerminalWorkspace } from './terminal/TerminalWorkspace'
 import { RuntimePanel } from './runtime/RuntimePanel'
 import { useResumeRecovery } from './runtime/useResumeRecovery'
 import { HostResponseScope } from './runtime/hostResponseScope'
+import { HostDisconnectGate } from './runtime/hostDisconnectGate'
+import { voiceDestination } from './terminal/voiceDestination'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
@@ -69,6 +71,7 @@ export default function App() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hostScope] = useState(() => new HostResponseScope())
+  const [disconnectGate] = useState(() => new HostDisconnectGate())
   const [draft, setDraft] = useState<Host | null>(null)
   const [message, setMessageState] = useState('')
   const [messageIsError, setMessageIsError] = useState(false)
@@ -154,10 +157,16 @@ export default function App() {
   const pollRef = useRef<number | null>(null)
   const phaseRef = useRef<ConnectPhase>(phase)
   phaseRef.current = phase
+  const panesRef = useRef(panes)
+  panesRef.current = panes
 
   // Stale requests from A are invalid even when the user switches A -> B -> A.
   const chooseHostId = (id: string | null) => {
     if (selectedIdRef.current !== id) {
+      // Cancel an in-flight browser recognition before it can type into B.
+      recognitionRef.current?.abort?.()
+      recognitionRef.current = null
+      setMicListening(false)
       hostScope.select(id)
       connectSeq.current += 1
       filesSeq.current += 1
@@ -168,6 +177,8 @@ export default function App() {
 
   useEffect(() => () => {
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
   }, [])
 
   const selected = hosts.find((h) => h.id === selectedId) ?? null
@@ -231,13 +242,19 @@ export default function App() {
       if (!active || !isCurrent() || busy) return
       busy = true
       try {
-        const requests = await pendingHostKeyRequests()
-        if (active && isCurrent() && requests.length > 0) {
-          setHostKeyRequest((current) => current ?? requests[0])
+        const requests = await pendingHostKeyRequests(selectedId)
+        if (active && isCurrent()) {
+          // The owner-specific snapshot is authoritative; remove timed-out
+          // or cancelled dialogs instead of blocking the next prompt.
+          setHostKeyRequest((current) =>
+            current && requests.some((request) => request.request_id === current.request_id)
+              ? current : (requests[0] ?? null))
         }
-        const keyboardRequests = await pendingKeyboardInteractiveRequests()
-        if (active && isCurrent() && keyboardRequests.length > 0) {
-          setKeyboardInteractiveRequest((current) => current ?? keyboardRequests[0])
+        const keyboardRequests = await pendingKeyboardInteractiveRequests(selectedId)
+        if (active && isCurrent()) {
+          setKeyboardInteractiveRequest((current) =>
+            current && keyboardRequests.some((request) => request.request_id === current.request_id)
+              ? current : (keyboardRequests[0] ?? null))
         }
       } catch { /* transient */ }
       finally { busy = false }
@@ -428,9 +445,26 @@ export default function App() {
   }
 
   const runConnect = async (host: Host, passwordValue?: string) => {
-    lastHostRef.current = host
     const seq = ++connectSeq.current
     const isCurrent = hostScope.accepts(host.id)
+    // A previous fire-and-forget disconnect from A -> B must settle before
+    // we dispatch a new transport for A after a rapid A -> B -> A switch.
+    try {
+      await disconnectGate.awaitPending(host.id)
+    } catch (error) {
+      if (seq === connectSeq.current && isCurrent()) {
+        setPhase('failed')
+        setMessage(t('connectFailed', String(error)))
+      }
+      return
+    }
+    if (seq !== connectSeq.current || !isCurrent()) return
+    // A fresh transport generation must not receive words captured by an
+    // earlier browser SpeechRecognition session for the same workstation.
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
+    setMicListening(false)
+    lastHostRef.current = host
     // Any panes from a previous transport are invalid; they will be
     // reopened by the ready-effect once this connection establishes.
     setPanes([])
@@ -472,21 +506,29 @@ export default function App() {
   }
 
   const onHostKeyDecision = async (decision: 'trust_once' | 'trust_and_save' | 'reject') => {
-    if (!hostKeyRequest) return
-    await answerHostKey(hostKeyRequest.request_id, decision)
-    setHostKeyRequest(null)
+    if (!hostKeyRequest || !selectedId || hostKeyRequest.owner_host_id !== selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
+    try {
+      const answered = await answerHostKey(selectedId, hostKeyRequest.request_id, decision)
+      if (!isCurrent()) return
+      setHostKeyRequest(null)
+      if (!answered) setMessage(language === 'zh-CN' ? '主机密钥确认已过期，请重新连接。' : 'Host-key approval expired; reconnect and retry.')
+    } catch (error) {
+      if (isCurrent()) setMessage(language === 'zh-CN' ? `主机密钥确认失败：${String(error)}` : `Host-key approval failed: ${String(error)}`)
+    }
   }
   const onKeyboardInteractiveAnswer = async () => {
-    if (!keyboardInteractiveRequest) return
-    const responses = keyboardInteractiveInputs.current.map((input) => input.value)
+    if (!keyboardInteractiveRequest || !selectedId || keyboardInteractiveRequest.owner_host_id !== selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
+    const responses = keyboardInteractiveRequest.prompts.map((_, index) => keyboardInteractiveInputs.current[index]?.value ?? '')
     keyboardInteractiveInputs.current.forEach((input) => { input.value = '' })
     const requestId = keyboardInteractiveRequest.request_id
     setKeyboardInteractiveRequest(null)
     try {
-      const answered = await answerKeyboardInteractive(requestId, responses)
-      if (!answered) setMessage(t('keyboardInteractiveExpired'))
+      const answered = await answerKeyboardInteractive(selectedId, requestId, responses)
+      if (isCurrent() && !answered) setMessage(t('keyboardInteractiveExpired'))
     } catch (error) {
-      setMessage(t('keyboardInteractiveSubmitFailed', String(error)))
+      if (isCurrent()) setMessage(t('keyboardInteractiveSubmitFailed', String(error)))
     }
   }
   const saveDraft = async () => {
@@ -499,7 +541,7 @@ export default function App() {
       try {
         const editingActiveHost = selectedId === draft.id && (phase === 'ready' || phase === 'connecting')
         if (editingActiveHost) {
-          await disconnectHost(draft.id)
+          await disconnectGate.enqueue(draft.id, () => disconnectHost(draft.id))
           setPanes([])
           setTransfers({})
           setFiles([])
@@ -564,8 +606,10 @@ export default function App() {
    *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
   const onSelectHost = (host: Host) => {
     if (selectedId === host.id) return
-    if (selectedId && isDesktop()) {
-      void disconnectHost(selectedId).catch(() => {})
+    if (selectedId && isDesktop() && (phase === 'ready' || phase === 'connecting')) {
+      // Register the outgoing operation synchronously before the new host is
+      // selected, even though native disconnection is asynchronous.
+      void disconnectGate.enqueue(selectedId, () => disconnectHost(selectedId)).catch(() => {})
     }
     chooseHostId(host.id)
     setFilesPath(host.default_remote_path || '/')
@@ -577,6 +621,9 @@ export default function App() {
     setFilesLoading(false)
     setSelectedRemote(null)
     setBridgeInfo(null)
+    setTunnels([])
+    setPreviewUrl(null)
+    setTunnelPanelOpen(false)
     setProjects([])
     setActionsByProject({})
     setRuns([])
@@ -605,17 +652,24 @@ export default function App() {
 
   const onDisconnect = async () => {
     if (!selected) return
+    recognitionRef.current?.abort?.()
+    recognitionRef.current = null
+    setMicListening(false)
     const isCurrent = hostScope.accepts(selected.id)
     connectSeq.current += 1
     filesSeq.current += 1
     try {
-      await disconnectHost(selected.id)
+      await disconnectGate.enqueue(selected.id, () => disconnectHost(selected.id))
     } catch (error) {
       if (isCurrent()) setMessage(language === 'zh-CN' ? `断开连接失败：${String(error)}` : `Disconnect failed: ${String(error)}`)
       return
     }
     if (!isCurrent()) return
+    setHostKeyRequest(null)
+    setKeyboardInteractiveRequest(null)
     setBridgeInfo(null)
+    setTunnels([])
+    setPreviewUrl(null)
     setPanes([])
     setTransfers({})
     setFiles([])
@@ -645,54 +699,77 @@ export default function App() {
 
   const onTmuxCreate = async () => {
     if (!selected || !newTmuxName.trim()) return
+    const hostId = selected.id
+    const name = newTmuxName.trim()
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      await tmuxNew(selected.id, newTmuxName.trim())
+      await tmuxNew(hostId, name)
+      if (!isCurrent()) return
       setNewTmuxName('')
-      setTmuxSessions(await tmuxList(selected.id))
+      const sessions = await tmuxList(hostId)
+      if (isCurrent()) setTmuxSessions(sessions)
     } catch (error) {
-      setMessage(t('tmuxCreateFailed', String(error)))
+      if (isCurrent()) setMessage(t('tmuxCreateFailed', String(error)))
     }
   }
 
   const onTmuxKill = async (name: string) => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      await tmuxKill(selected.id, name)
-      setTmuxSessions(await tmuxList(selected.id))
+      await tmuxKill(hostId, name)
+      if (!isCurrent()) return
+      const sessions = await tmuxList(hostId)
+      if (isCurrent()) setTmuxSessions(sessions)
     } catch (error) {
-      setMessage(t('tmuxKillFailed', String(error)))
+      if (isCurrent()) setMessage(t('tmuxKillFailed', String(error)))
     }
   }
 
   const onHerdrAttach = () => {
     if (!selected) return
-    void herdrAttach(selected.id).catch((error) => setMessage(t('herdrLaunchFailed', String(error))))
+    const isCurrent = hostScope.accepts(selected.id)
+    void herdrAttach(selected.id).catch((error) => { if (isCurrent()) setMessage(t('herdrLaunchFailed', String(error))) })
   }
 
   const onHerdrBridge = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      const info = await herdrBridge(selected.id, 0)
+      const info = await herdrBridge(hostId, 0)
+      if (!isCurrent()) {
+        // A bridge opened after a workstation switch must not leak its tunnel.
+        await tunnelClose(info.tunnel.id).catch(() => {})
+        await herdrBridgeStopById(hostId, info.bridge_id).catch(() => {})
+        return
+      }
       setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, bridgeId: info.bridge_id })
       setMessage(t('herdrBridged', info.tunnel.local_addr))
     } catch (error) {
-      setMessage(t('bridgeFailed', String(error)))
+      if (isCurrent()) setMessage(t('bridgeFailed', String(error)))
     }
   }
 
   const onHerdrBridgeStop = async () => {
     if (!selected || !bridgeInfo) return
-    try {
-      // Close the local tunnel and then the exact SSH-owned BridgeId. The
-      // remote port/PID are compatibility metadata, never ownership keys.
-      await tunnelClose(bridgeInfo.tunnelId).catch(() => {})
-      await herdrBridgeStopById(selected.id, bridgeInfo.bridgeId).catch(() => {})
-      setBridgeInfo(null)
-      setTunnels(await tunnelList())
-      setMessage(t('herdrBridgeStopped'))
-    } catch (error) {
-      setMessage(t('bridgeStopFailed', String(error)))
+    const hostId = selected.id
+    const bridge = bridgeInfo
+    const isCurrent = hostScope.accepts(hostId)
+    const errors: string[] = []
+    // Both cleanups are attempted even if one fails, but never report
+    // success until the SSH bridge and the local tunnel are both gone.
+    try { await tunnelClose(bridge.tunnelId) } catch (error) { errors.push(String(error)) }
+    try { await herdrBridgeStopById(hostId, bridge.bridgeId) } catch (error) { errors.push(String(error)) }
+    if (!isCurrent()) return
+    if (errors.length > 0) {
+      setMessage(t('bridgeStopFailed', errors.join('; ')))
+      return // Preserve identifiers so cleanup remains retryable.
     }
+    setBridgeInfo(null)
+    void tunnelList().then((items) => { if (isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId)) }).catch(() => {})
+    setMessage(t('herdrBridgeStopped'))
   }
 
   // ---- snippets ----
@@ -838,6 +915,12 @@ export default function App() {
       setMicListening(false)
       return
     }
+    const ownerHostId = selectedIdRef.current
+    if (!ownerHostId || phaseRef.current !== 'ready') {
+      setMessage(t('speechNeedsTerminal'))
+      return
+    }
+    const isCurrent = hostScope.accepts(ownerHostId)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const windowAny = window as any
     const Impl = windowAny.SpeechRecognition || windowAny.webkitSpeechRecognition
@@ -851,26 +934,30 @@ export default function App() {
     recognition.interimResults = false
     recognition.continuous = false
     recognition.onresult = (event: any) => {
-      const text = event.results?.[0]?.[0]?.transcript ?? ''
-      if (text.trim()) {
-        const paneId = firstPaneId()
-        if (paneId === null) {
-          setMessage(t('speechNeedsTerminal'))
-          return
-        }
-        // Read the CURRENT host at delivery time: the recognition closure
-        // must not send to a host the user switched away from mid-speech.
-        const target = selectedIdRef.current
-        if (!target) return
-        void sendInput(target, paneId, inputEncoder.encode(text.trim())).catch(() => {})
-        setMessage(t('speechInput', text.trim()))
-      }
+      if (recognitionRef.current !== recognition) return
+      const destination = voiceDestination(ownerHostId, isCurrent(), phaseRef.current === 'ready', panesRef.current[0]?.id ?? null)
+      if (!destination) return
+      const text = String(event.results?.[0]?.[0]?.transcript ?? '').trim()
+      if (!text) return
+      void sendInput(destination.hostId, destination.paneId, inputEncoder.encode(text))
+        .catch((error) => { if (isCurrent()) setMessage(t('speechInputFailed', String(error))) })
+      setMessage(t('speechInput', text))
     }
-    recognition.onend = () => setMicListening(false)
-    recognition.onerror = () => setMicListening(false)
+    const finish = () => {
+      if (recognitionRef.current !== recognition) return
+      recognitionRef.current = null
+      setMicListening(false)
+    }
+    recognition.onend = finish
+    recognition.onerror = finish
     recognitionRef.current = recognition
-    recognition.start()
-    setMicListening(true)
+    try {
+      recognition.start()
+      setMicListening(true)
+    } catch (error) {
+      finish()
+      setMessage(t('speechUnsupported') + ': ' + String(error))
+    }
   }
 
   // ---- file panel ----
@@ -1020,48 +1107,65 @@ export default function App() {
 
   // ---- tunnels & preview ----
   useEffect(() => {
-    if (!isDesktop() || !(phase === 'ready')) return
+    if (!isDesktop() || phase !== 'ready' || !selectedId) return
+    let active = true
+    const isCurrent = hostScope.accepts(selectedId)
+    const hostId = selectedId
     const poll = () => {
-      void tunnelList().then(setTunnels).catch(() => {})
+      void tunnelList().then((items) => {
+        if (active && isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId))
+      }).catch(() => {})
     }
     poll()
     const timer = window.setInterval(poll, 5000)
-    return () => window.clearInterval(timer)
-  }, [phase, selectedId])
+    return () => { active = false; window.clearInterval(timer) }
+  }, [phase, selectedId, hostScope])
 
   const onCreateTunnel = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     const remotePort = Number(tunnelRemotePort)
-    if (!remotePort || remotePort < 1 || remotePort > 65535) {
+    if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) {
       setMessage(t('remotePortRange'))
       return
     }
     try {
       const local = tunnelLocal.trim() === '' ? 0 : Number(tunnelLocal)
-      if (Number.isNaN(local) || local < 0 || local > 65535) {
+      if (!Number.isInteger(local) || local < 0 || local > 65535) {
         setMessage(t('localPortRange'))
         return
       }
-      const info = await tunnelOpen(selected.id, local, tunnelRemoteHost.trim() || '127.0.0.1', remotePort)
-      setTunnels(await tunnelList())
+      const info = await tunnelOpen(hostId, local, tunnelRemoteHost.trim() || '127.0.0.1', remotePort)
+      if (!isCurrent()) {
+        await tunnelClose(info.id).catch(() => {})
+        return
+      }
       setTunnelLocal(String(info.local_addr.split(':')[1]))
       setMessage(t('tunnelEstablished', info.local_addr, info.remote_host, String(info.remote_port)))
+      void tunnelList().then((items) => { if (isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId)) }).catch(() => {})
     } catch (error) {
-      setMessage(t('tunnelCreateFailed', String(error)))
+      if (isCurrent()) setMessage(t('tunnelCreateFailed', String(error)))
     }
   }
 
   const onCloseTunnel = async (id: string) => {
+    const hostId = selectedIdRef.current
+    if (!hostId) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       await tunnelClose(id)
-      setTunnels(await tunnelList())
+      if (!isCurrent()) return
+      const items = await tunnelList()
+      if (!isCurrent()) return
+      setTunnels(items.filter((item) => item.host_id === hostId))
       setPreviewUrl((url) => {
         const closed = tunnels.find((tunnel) => tunnel.id === id)
-        if (closed && url?.includes(closed.local_addr.split(':')[1])) return null
-        return url
+        if (!closed || !url) return url
+        try { return new URL(url).host === closed.local_addr ? null : url } catch { return url }
       })
     } catch (error) {
-      setMessage(t('tunnelCloseFailed', String(error)))
+      if (isCurrent()) setMessage(t('tunnelCloseFailed', String(error)))
     }
   }
 
