@@ -65,6 +65,15 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
+      - name: Repeat native PowerShell ConPTY readiness smoke test
+        shell: pwsh
+        run: |
+          # Catch flaky startup/handshake failures without hiding a failed attempt.
+          foreach ($attempt in 1..2) {
+            Write-Host "PowerShell ConPTY readiness repeat $attempt/2"
+            cargo test --locked -p kodework-local-pty --lib tests::powershell_round_trip_uses_real_conpty -- --exact
+            if ($LASTEXITCODE -ne 0) { throw "ConPTY readiness repeat $attempt failed." }
+          }
 
   dependency-security:
     name: Dependency and secret policy

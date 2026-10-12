@@ -484,8 +484,17 @@ mod tests {
     ) -> Result<Vec<u8>, String> {
         use std::time::{Duration, Instant};
 
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Busy hosted Windows runners can spend longer initializing PowerShell/PSReadLine.
+        // Keep the deadline bounded, and collect safe diagnostics on timeout.
+        let started = Instant::now();
+        let startup_timeout = if std::env::var_os("CI").is_some() {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(15)
+        };
+        let deadline = started + startup_timeout;
         let mut output = Vec::new();
+        let mut data_events = 0_usize;
         let mut answered_device_query = false;
         // Queue the probe immediately.  A shell may emit a prompt only after
         // startup scripts and PSReadLine have initialized, so prompt shape is
@@ -498,16 +507,26 @@ mod tests {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!(
-                    "local terminal did not become ready; output was {}",
-                    String::from_utf8_lossy(&output)
+                    "local terminal readiness timed out after {:?}: {} data events, {} bytes, device query answered={answered_device_query}",
+                    started.elapsed(),
+                    data_events,
+                    output.len(),
                 ));
             }
             let event = tokio::time::timeout(remaining, events.recv())
                 .await
-                .map_err(|_| "local terminal readiness timed out".to_string())?
+                .map_err(|_| {
+                    format!(
+                        "local terminal readiness timed out after {:?}: {} data events, {} bytes, device query answered={answered_device_query}",
+                        started.elapsed(),
+                        data_events,
+                        output.len(),
+                    )
+                })?
                 .ok_or_else(|| "local terminal event stream closed before readiness".to_string())?;
             match event {
                 super::LocalTerminalEvent::Data { bytes } => {
+                    data_events += 1;
                     output.extend(bytes);
                     if output
                         .windows(b"\x1b[6n".len())
@@ -552,44 +571,52 @@ mod tests {
         let mut events = manager
             .subscribe(descriptor.id)
             .map_err(|error| error.to_string())?;
-        let mut output = wait_for_terminal_sentinel(
-            &manager,
-            descriptor.id,
-            &mut events,
-            readiness_command,
-            readiness_sentinel,
-        )
-        .await?;
-        manager
-            .write(descriptor.id, command)
-            .map_err(|error| error.to_string())?;
-        let output = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            while let Some(event) = events.recv().await {
-                match event {
-                    super::LocalTerminalEvent::Data { bytes } => {
-                        output.extend(bytes);
-                        if String::from_utf8_lossy(&output).contains(sentinel) {
-                            return Ok(output);
+        // Always kill test-owned children, including on timeouts/failed assertions.
+        // Leaked PowerShell processes make unrelated subsequent CI tests less reliable.
+        let result = async {
+            let mut output = wait_for_terminal_sentinel(
+                &manager,
+                descriptor.id,
+                &mut events,
+                readiness_command,
+                readiness_sentinel,
+            )
+            .await?;
+            manager
+                .write(descriptor.id, command)
+                .map_err(|error| error.to_string())?;
+            let output = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while let Some(event) = events.recv().await {
+                    match event {
+                        super::LocalTerminalEvent::Data { bytes } => {
+                            output.extend(bytes);
+                            if String::from_utf8_lossy(&output).contains(sentinel) {
+                                return Ok(output);
+                            }
+                        }
+                        super::LocalTerminalEvent::Exited { code } => {
+                            return Err(format!(
+                                "local terminal exited with {code}; output was {}",
+                                String::from_utf8_lossy(&output),
+                            ))
+                        }
+                        super::LocalTerminalEvent::Error { message } => {
+                            return Err(format!("local PTY read failed: {message}"));
                         }
                     }
-                    super::LocalTerminalEvent::Exited { code } => {
-                        return Err(format!(
-                            "local terminal exited with {code}; output was {}",
-                            String::from_utf8_lossy(&output),
-                        ))
-                    }
-                    super::LocalTerminalEvent::Error { message } => {
-                        return Err(format!("local PTY read failed: {message}"));
-                    }
                 }
+                Ok(output)
+            })
+            .await
+            .map_err(|_| "local terminal should produce output before timeout".to_string())??;
+            if !String::from_utf8_lossy(&output).contains(sentinel) {
+                return Err("local terminal closed before the command sentinel".to_string());
             }
-            Ok(output)
-        })
-        .await
-        .map_err(|_| "local terminal should produce output before timeout".to_string())??;
-        assert!(String::from_utf8_lossy(&output).contains(sentinel));
+            Ok(())
+        }
+        .await;
         manager.shutdown();
-        Ok(())
+        result
     }
 
     #[test]
