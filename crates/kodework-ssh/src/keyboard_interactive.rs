@@ -196,14 +196,16 @@ mod tests {
         };
         let a = spawn(owner_a);
         let b = spawn(owner_b);
-        let (id_a, id_b) = loop {
-            let a = broker.pending_for_owner(owner_a);
-            let b = broker.pending_for_owner(owner_b);
-            if let (Some(a), Some(b)) = (a.first(), b.first()) {
-                break (a.request_id, b.request_id);
+        let (id_a, id_b) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let a = broker.pending_for_owner(owner_a);
+                let b = broker.pending_for_owner(owner_b);
+                if let (Some(a), Some(b)) = (a.first(), b.first()) {
+                    break (a.request_id, b.request_id);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
+        }).await.expect("both OTP prompts must appear");
         assert_ne!(id_a, id_b);
         assert!(!broker.answer_for_owner(owner_a, id_b, vec!["bad".into()]));
         broker.cancel_for_owner(owner_a);

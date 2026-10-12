@@ -544,14 +544,16 @@ mod tests {
                 broker.verify_for_connection(None, Some(owner_b), 1, "jump.example", 22, &key).await
             })
         };
-        let (a_req, b_req) = loop {
-            let a = broker.pending_for_owner(owner_a);
-            let b = broker.pending_for_owner(owner_b);
-            if let (Some(a), Some(b)) = (a.first(), b.first()) {
-                break (a.clone(), b.clone());
+        let (a_req, b_req) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let a = broker.pending_for_owner(owner_a);
+                let b = broker.pending_for_owner(owner_b);
+                if let (Some(a), Some(b)) = (a.first(), b.first()) {
+                    break (a.clone(), b.clone());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
+        }).await.expect("both host-key prompts must appear");
         assert_eq!(a_req.connection_generation, 1);
         assert_eq!(b_req.owner_host_id, Some(owner_b));
         assert!(!broker.answer_for_owner(owner_a, b_req.request_id, HostKeyDecision::TrustAndSave));
