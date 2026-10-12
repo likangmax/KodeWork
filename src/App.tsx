@@ -902,9 +902,17 @@ export default function App() {
     }
   }, [selectedId, filesPath, setMessage, t, hostScope])
 
+  // Directory navigation refreshes the list without recreating the per-host
+  // native transfer subscription on every path change.
+  const refreshFilesRef = useRef(refreshFiles)
+  refreshFilesRef.current = refreshFiles
   useEffect(() => {
-    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return () => {}
+    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return
     void refreshFiles()
+  }, [activeTab, phase, selectedId, refreshFiles])
+
+  useEffect(() => {
+    if (activeTab !== 'files' || phase !== 'ready' || !selectedId) return
     const isCurrent = hostScope.accepts(selectedId)
     // Subscribe per host: switching hosts must tear down the old
     // subscription, otherwise stale transfer events from the previous
@@ -916,12 +924,13 @@ export default function App() {
         setTransfers((map) => ({ ...map, [id]: { ...(map[id] ?? { transferred: 0, total: null, speed: 0 }), status } }))
         // An upload that just finished changed the remote listing.
         if (status === 'Completed') {
-          void refreshFiles()
+          void refreshFilesRef.current()
         }
         // Terminal transfer entries auto-dismiss after a grace period so
         // long-lived sessions do not accumulate stale rows.
         if (['Completed', 'Failed', 'Cancelled'].includes(status)) {
           window.setTimeout(() => {
+            if (!isCurrent()) return
             setTransfers((map) => {
               const next = { ...map }
               if (next[id] && ['Completed', 'Failed', 'Cancelled'].includes(next[id].status)) delete next[id]
@@ -1205,7 +1214,7 @@ export default function App() {
               selectedRemote={selectedRemote}
               transfers={transfers}
               formatSize={formatSize}
-              onPathChange={setFilesPath}
+              onPathChange={(path) => { setSelectedRemote(null); setFilesPath(path) }}
               onOpen={onOpenRemote}
               onRefresh={() => { void refreshFiles() }}
               onUpload={() => { void onUploadClick() }}
