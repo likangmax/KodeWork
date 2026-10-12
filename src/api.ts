@@ -73,6 +73,8 @@ export type Host = {
 
 export type HostKeyRequest = {
   request_id: number
+  owner_host_id: string | null
+  connection_generation: number
   info: {
     hostname: string
     port: number
@@ -83,6 +85,8 @@ export type HostKeyRequest = {
 }
 export type KeyboardInteractiveRequest = {
   request_id: number
+  owner_host_id: string | null
+  connection_generation: number
   name: string
   instructions: string
   prompts: { prompt: string; echo: boolean }[]
@@ -173,12 +177,13 @@ export const subscribeSessionRuntime = (hostId: string, onEvent: (snapshot: Conn
     raw.cleanupCallback?.()
   }
 }
-export const pendingHostKeyRequests = () => invoke<HostKeyRequest[]>('pending_host_key_requests')
-export const answerHostKey = (requestId: number, decision: 'trust_once' | 'trust_and_save' | 'reject') =>
-  invoke<boolean>('answer_host_key', { requestId, decision })
-export const pendingKeyboardInteractiveRequests = () => invoke<KeyboardInteractiveRequest[]>('pending_keyboard_interactive_requests')
-export const answerKeyboardInteractive = (requestId: number, responses: string[]) =>
-  invoke<boolean>('answer_keyboard_interactive', { requestId, responses })
+export const pendingHostKeyRequests = (hostId: string) => invoke<HostKeyRequest[]>('pending_host_key_requests', { hostId })
+export const answerHostKey = (hostId: string, requestId: number, decision: 'trust_once' | 'trust_and_save' | 'reject') =>
+  invoke<boolean>('answer_host_key', { hostId, requestId, decision })
+export const pendingKeyboardInteractiveRequests = (hostId: string) =>
+  invoke<KeyboardInteractiveRequest[]>('pending_keyboard_interactive_requests', { hostId })
+export const answerKeyboardInteractive = (hostId: string, requestId: number, responses: string[]) =>
+  invoke<boolean>('answer_keyboard_interactive', { hostId, requestId, responses })
 
 export const subscribeSession = (hostId: string, channelFilter: number | null, onEvent: (event: SessionEvent) => void): (() => void) => {
   if (!isDesktop()) return () => {}
