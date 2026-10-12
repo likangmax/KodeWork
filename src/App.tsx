@@ -586,6 +586,9 @@ export default function App() {
     setFilesLoading(false)
     setSelectedRemote(null)
     setBridgeInfo(null)
+    setTunnels([])
+    setPreviewUrl(null)
+    setTunnelPanelOpen(false)
     setProjects([])
     setActionsByProject({})
     setRuns([])
@@ -628,6 +631,8 @@ export default function App() {
     }
     if (!isCurrent()) return
     setBridgeInfo(null)
+    setTunnels([])
+    setPreviewUrl(null)
     setPanes([])
     setTransfers({})
     setFiles([])
@@ -657,54 +662,77 @@ export default function App() {
 
   const onTmuxCreate = async () => {
     if (!selected || !newTmuxName.trim()) return
+    const hostId = selected.id
+    const name = newTmuxName.trim()
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      await tmuxNew(selected.id, newTmuxName.trim())
+      await tmuxNew(hostId, name)
+      if (!isCurrent()) return
       setNewTmuxName('')
-      setTmuxSessions(await tmuxList(selected.id))
+      const sessions = await tmuxList(hostId)
+      if (isCurrent()) setTmuxSessions(sessions)
     } catch (error) {
-      setMessage(t('tmuxCreateFailed', String(error)))
+      if (isCurrent()) setMessage(t('tmuxCreateFailed', String(error)))
     }
   }
 
   const onTmuxKill = async (name: string) => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      await tmuxKill(selected.id, name)
-      setTmuxSessions(await tmuxList(selected.id))
+      await tmuxKill(hostId, name)
+      if (!isCurrent()) return
+      const sessions = await tmuxList(hostId)
+      if (isCurrent()) setTmuxSessions(sessions)
     } catch (error) {
-      setMessage(t('tmuxKillFailed', String(error)))
+      if (isCurrent()) setMessage(t('tmuxKillFailed', String(error)))
     }
   }
 
   const onHerdrAttach = () => {
     if (!selected) return
-    void herdrAttach(selected.id).catch((error) => setMessage(t('herdrLaunchFailed', String(error))))
+    const isCurrent = hostScope.accepts(selected.id)
+    void herdrAttach(selected.id).catch((error) => { if (isCurrent()) setMessage(t('herdrLaunchFailed', String(error))) })
   }
 
   const onHerdrBridge = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      const info = await herdrBridge(selected.id, 0)
+      const info = await herdrBridge(hostId, 0)
+      if (!isCurrent()) {
+        // A bridge opened after a workstation switch must not leak its tunnel.
+        await tunnelClose(info.tunnel.id).catch(() => {})
+        await herdrBridgeStopById(hostId, info.bridge_id).catch(() => {})
+        return
+      }
       setBridgeInfo({ local: info.tunnel.local_addr, socket: info.remote_socket, tunnelId: info.tunnel.id, bridgeId: info.bridge_id })
       setMessage(t('herdrBridged', info.tunnel.local_addr))
     } catch (error) {
-      setMessage(t('bridgeFailed', String(error)))
+      if (isCurrent()) setMessage(t('bridgeFailed', String(error)))
     }
   }
 
   const onHerdrBridgeStop = async () => {
     if (!selected || !bridgeInfo) return
-    try {
-      // Close the local tunnel and then the exact SSH-owned BridgeId. The
-      // remote port/PID are compatibility metadata, never ownership keys.
-      await tunnelClose(bridgeInfo.tunnelId).catch(() => {})
-      await herdrBridgeStopById(selected.id, bridgeInfo.bridgeId).catch(() => {})
-      setBridgeInfo(null)
-      setTunnels(await tunnelList())
-      setMessage(t('herdrBridgeStopped'))
-    } catch (error) {
-      setMessage(t('bridgeStopFailed', String(error)))
+    const hostId = selected.id
+    const bridge = bridgeInfo
+    const isCurrent = hostScope.accepts(hostId)
+    const errors: string[] = []
+    // Both cleanups are attempted even if one fails, but never report
+    // success until the SSH bridge and the local tunnel are both gone.
+    try { await tunnelClose(bridge.tunnelId) } catch (error) { errors.push(String(error)) }
+    try { await herdrBridgeStopById(hostId, bridge.bridgeId) } catch (error) { errors.push(String(error)) }
+    if (!isCurrent()) return
+    if (errors.length > 0) {
+      setMessage(t('bridgeStopFailed', errors.join('; ')))
+      return // Preserve identifiers so cleanup remains retryable.
     }
+    setBridgeInfo(null)
+    void tunnelList().then((items) => { if (isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId)) }).catch(() => {})
+    setMessage(t('herdrBridgeStopped'))
   }
 
   // ---- snippets ----
@@ -1042,48 +1070,65 @@ export default function App() {
 
   // ---- tunnels & preview ----
   useEffect(() => {
-    if (!isDesktop() || !(phase === 'ready')) return
+    if (!isDesktop() || phase !== 'ready' || !selectedId) return
+    let active = true
+    const isCurrent = hostScope.accepts(selectedId)
+    const hostId = selectedId
     const poll = () => {
-      void tunnelList().then(setTunnels).catch(() => {})
+      void tunnelList().then((items) => {
+        if (active && isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId))
+      }).catch(() => {})
     }
     poll()
     const timer = window.setInterval(poll, 5000)
-    return () => window.clearInterval(timer)
-  }, [phase, selectedId])
+    return () => { active = false; window.clearInterval(timer) }
+  }, [phase, selectedId, hostScope])
 
   const onCreateTunnel = async () => {
     if (!selected) return
+    const hostId = selected.id
+    const isCurrent = hostScope.accepts(hostId)
     const remotePort = Number(tunnelRemotePort)
-    if (!remotePort || remotePort < 1 || remotePort > 65535) {
+    if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) {
       setMessage(t('remotePortRange'))
       return
     }
     try {
       const local = tunnelLocal.trim() === '' ? 0 : Number(tunnelLocal)
-      if (Number.isNaN(local) || local < 0 || local > 65535) {
+      if (!Number.isInteger(local) || local < 0 || local > 65535) {
         setMessage(t('localPortRange'))
         return
       }
-      const info = await tunnelOpen(selected.id, local, tunnelRemoteHost.trim() || '127.0.0.1', remotePort)
-      setTunnels(await tunnelList())
+      const info = await tunnelOpen(hostId, local, tunnelRemoteHost.trim() || '127.0.0.1', remotePort)
+      if (!isCurrent()) {
+        await tunnelClose(info.id).catch(() => {})
+        return
+      }
       setTunnelLocal(String(info.local_addr.split(':')[1]))
       setMessage(t('tunnelEstablished', info.local_addr, info.remote_host, String(info.remote_port)))
+      void tunnelList().then((items) => { if (isCurrent()) setTunnels(items.filter((item) => item.host_id === hostId)) }).catch(() => {})
     } catch (error) {
-      setMessage(t('tunnelCreateFailed', String(error)))
+      if (isCurrent()) setMessage(t('tunnelCreateFailed', String(error)))
     }
   }
 
   const onCloseTunnel = async (id: string) => {
+    const hostId = selectedIdRef.current
+    if (!hostId) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       await tunnelClose(id)
-      setTunnels(await tunnelList())
+      if (!isCurrent()) return
+      const items = await tunnelList()
+      if (!isCurrent()) return
+      setTunnels(items.filter((item) => item.host_id === hostId))
       setPreviewUrl((url) => {
         const closed = tunnels.find((tunnel) => tunnel.id === id)
-        if (closed && url?.includes(closed.local_addr.split(':')[1])) return null
-        return url
+        if (!closed || !url) return url
+        try { return new URL(url).host === closed.local_addr ? null : url } catch { return url }
       })
     } catch (error) {
-      setMessage(t('tunnelCloseFailed', String(error)))
+      if (isCurrent()) setMessage(t('tunnelCloseFailed', String(error)))
     }
   }
 
