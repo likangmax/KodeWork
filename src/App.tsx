@@ -406,12 +406,18 @@ export default function App() {
 
   const onSplit = async (dir: 'h' | 'v') => {
     if (!selectedId) return
+    const hostId = selectedId
+    const isCurrent = hostScope.accepts(hostId)
     try {
-      const [id, channel] = await openPane(selectedId, 80, 24)
+      const [id, channel] = await openPane(hostId, 80, 24)
+      if (!isCurrent()) {
+        void closePane(hostId, id).catch(() => {})
+        return
+      }
       setPanes((items) => [...items, { id, channel }])
       setSplitDir(dir)
     } catch (error) {
-      setMessage(t('splitFailed', String(error)))
+      if (isCurrent()) setMessage(t('splitFailed', String(error)))
     }
   }
 
@@ -557,7 +563,8 @@ export default function App() {
    *  and its backend connection; otherwise the new host reuses stale
    *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
   const onSelectHost = (host: Host) => {
-    if (selectedId && selectedId !== host.id && isDesktop()) {
+    if (selectedId === host.id) return
+    if (selectedId && isDesktop()) {
       void disconnectHost(selectedId).catch(() => {})
     }
     chooseHostId(host.id)
@@ -567,8 +574,18 @@ export default function App() {
     setPanes([])
     setTransfers({})
     setFiles([])
+    setFilesLoading(false)
     setSelectedRemote(null)
     setBridgeInfo(null)
+    setProjects([])
+    setActionsByProject({})
+    setRuns([])
+    setRunResult(null)
+    setActionBusy(false)
+    setProjectDraft(null)
+    setActionDraft(null)
+    setConfirmAction(null)
+    lastHostRef.current = null
     setTmuxSessions([])
     setAgents([])
     setHerdrVersion(null)
@@ -588,7 +605,16 @@ export default function App() {
 
   const onDisconnect = async () => {
     if (!selected) return
-    await disconnectHost(selected.id).catch(() => {})
+    const isCurrent = hostScope.accepts(selected.id)
+    connectSeq.current += 1
+    filesSeq.current += 1
+    try {
+      await disconnectHost(selected.id)
+    } catch (error) {
+      if (isCurrent()) setMessage(language === 'zh-CN' ? `断开连接失败：${String(error)}` : `Disconnect failed: ${String(error)}`)
+      return
+    }
+    if (!isCurrent()) return
     setBridgeInfo(null)
     setPanes([])
     setTransfers({})
