@@ -562,7 +562,7 @@ mod tests {
             }
         })
         .await
-        .expect("both host-key prompts must appear");
+        .unwrap_or_else(|error| unreachable!("{error}"));
         assert_eq!(a_req.connection_generation, 1);
         assert_eq!(b_req.owner_host_id, Some(owner_b));
         assert!(!broker.answer_for_owner(owner_a, b_req.request_id, HostKeyDecision::TrustAndSave));
