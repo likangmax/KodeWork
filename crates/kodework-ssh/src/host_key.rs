@@ -241,6 +241,19 @@ pub struct HostKeyBroker {
     decision_timeout: Duration,
 }
 
+/// Automatic cleanup also runs if the connection task is aborted while its
+/// host-key confirmation is pending (not only on answer/deadline).
+struct PendingHostKeyGuard<'a> {
+    broker: &'a HostKeyBroker,
+    request_id: u64,
+}
+
+impl Drop for PendingHostKeyGuard<'_> {
+    fn drop(&mut self) {
+        self.broker.forget(self.request_id);
+    }
+}
+
 impl std::fmt::Debug for HostKeyBroker {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let pending = self.pending.lock().map(|guard| guard.len()).unwrap_or(0);
@@ -429,6 +442,10 @@ impl HostKeyBroker {
             })?;
             guard.insert(request_id, sender);
         }
+        let _cleanup = PendingHostKeyGuard {
+            broker: self,
+            request_id,
+        };
         {
             let mut guard = self.pending.lock().map_err(|_| {
                 SshError::InvalidConfiguration("host-key broker lock poisoned".into())
@@ -455,9 +472,6 @@ impl HostKeyBroker {
             Ok(Ok(HostKeyDecision::Reject)) | Ok(Err(_)) => Err(SshError::HostKeyRejected),
             Err(_) => Err(SshError::HostKeyDecisionTimeout),
         };
-        // The decision is no longer awaited; drop the pending entry so the
-        // UI never sees a stale request and the map does not leak senders.
-        self.forget(request_id);
         result
     }
 
@@ -522,6 +536,38 @@ mod tests {
             .await
             .unwrap_or_else(|error| unreachable!("verify task join failed: {error}"));
         assert_eq!(result, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn aborting_host_key_verification_forgets_pending_prompt() {
+        let broker = Arc::new(HostKeyBroker::new(
+            Arc::new(MemoryKnownHosts::new()),
+            Duration::from_secs(5),
+        ));
+        let owner = HostId::new();
+        let task = {
+            let broker = Arc::clone(&broker);
+            let key = test_key();
+            tokio::spawn(async move {
+                broker
+                    .verify_for_connection(Some(owner), Some(owner), 5, "abort.example", 22, &key)
+                    .await
+            })
+        };
+        let request_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(request) = broker.pending_for_owner(owner).first() {
+                    break request.request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        task.abort();
+        assert!(task.await.is_err());
+        assert!(broker.pending_for_owner(owner).is_empty());
+        assert!(!broker.answer_for_owner(owner, request_id, HostKeyDecision::TrustOnce));
     }
 
     #[tokio::test]

@@ -31,6 +31,19 @@ pub struct KeyboardInteractiveBroker {
     timeout: Duration,
 }
 
+/// A cancelled/aborted authentication task must not leave an orphaned
+/// keyboard-interactive request in the broker.
+struct PendingKeyboardGuard<'a> {
+    broker: &'a KeyboardInteractiveBroker,
+    request_id: u64,
+}
+
+impl Drop for PendingKeyboardGuard<'_> {
+    fn drop(&mut self) {
+        self.broker.forget(self.request_id);
+    }
+}
+
 impl std::fmt::Debug for KeyboardInteractiveBroker {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let pending = self.pending.lock().map(|guard| guard.len()).unwrap_or(0);
@@ -156,6 +169,10 @@ impl KeyboardInteractiveBroker {
             .lock()
             .map_err(|_| SshError::Cancelled)?
             .insert(request_id, sender);
+        let _cleanup = PendingKeyboardGuard {
+            broker: self,
+            request_id,
+        };
         self.pending
             .lock()
             .map_err(|_| SshError::Cancelled)?
@@ -167,15 +184,11 @@ impl KeyboardInteractiveBroker {
                 instructions,
                 prompts,
             });
-        // Always forget the request, including on deadline expiry. Using
-        // `?` before cleanup would leave a stale prompt in the broker queue.
-        let result = match tokio::time::timeout(self.timeout, receiver).await {
+        match tokio::time::timeout(self.timeout, receiver).await {
             Ok(Ok(responses)) => Ok(responses),
             Ok(Err(_)) => Err(SshError::Cancelled),
             Err(_) => Err(SshError::Timeout),
-        };
-        self.forget(request_id);
-        result
+        }
     }
 
     fn forget(&self, request_id: u64) {
@@ -244,6 +257,43 @@ mod tests {
             Ok(vec!["123456".into()])
         );
         assert!(broker.pending_for_owner(owner_b).is_empty());
+    }
+
+    #[tokio::test]
+    async fn aborting_keyboard_interactive_task_forgets_pending_prompt() {
+        let broker = Arc::new(KeyboardInteractiveBroker::new(Duration::from_secs(5)));
+        let owner = HostId::new();
+        let task = {
+            let broker = Arc::clone(&broker);
+            tokio::spawn(async move {
+                broker
+                    .prompt_for_connection(
+                        Some(owner),
+                        5,
+                        "OTP".into(),
+                        "Enter a code".into(),
+                        vec![KeyboardPrompt {
+                            prompt: "Code: ".into(),
+                            echo: false,
+                        }],
+                    )
+                    .await
+            })
+        };
+        let request_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(request) = broker.pending_for_owner(owner).first() {
+                    break request.request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        task.abort();
+        assert!(task.await.is_err());
+        assert!(broker.pending_for_owner(owner).is_empty());
+        assert!(!broker.answer_for_owner(owner, request_id, vec!["late".into()]));
     }
 
     #[tokio::test]
