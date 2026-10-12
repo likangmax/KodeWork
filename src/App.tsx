@@ -22,6 +22,7 @@ import { LocalTerminalWorkspace } from './terminal/LocalTerminalWorkspace'
 import { TerminalWorkspace } from './terminal/TerminalWorkspace'
 import { RuntimePanel } from './runtime/RuntimePanel'
 import { useResumeRecovery } from './runtime/useResumeRecovery'
+import { HostResponseScope } from './runtime/hostResponseScope'
 import { SettingsPanel } from './settings/SettingsPanel'
 import { HostEditor } from './settings/HostEditor'
 import { useTheme } from './settings/useTheme'
@@ -67,6 +68,7 @@ type ConnectPhase = 'idle' | 'connecting' | 'ready' | 'failed'
 export default function App() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [hostScope] = useState(() => new HostResponseScope())
   const [draft, setDraft] = useState<Host | null>(null)
   const [message, setMessageState] = useState('')
   const [messageIsError, setMessageIsError] = useState(false)
@@ -152,6 +154,17 @@ export default function App() {
   const phaseRef = useRef<ConnectPhase>(phase)
   phaseRef.current = phase
 
+  // Stale requests from A are invalid even when the user switches A -> B -> A.
+  const chooseHostId = (id: string | null) => {
+    if (selectedIdRef.current !== id) {
+      hostScope.select(id)
+      connectSeq.current += 1
+      filesSeq.current += 1
+    }
+    selectedIdRef.current = id
+    setSelectedId(id)
+  }
+
   useEffect(() => () => {
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)
   }, [])
@@ -180,7 +193,7 @@ export default function App() {
         const loaded = await listHosts()
         if (!active) return
         setHosts(loaded)
-        setSelectedId(loaded[0]?.id ?? null)
+        chooseHostId(loaded[0]?.id ?? null)
         setFilesPath(loaded[0]?.default_remote_path || '/')
         setMessage(loaded.length === 0 ? t('noWorkstationConfigured') : t('loadedWorkstations', String(loaded.length)))
       } catch (error) {
@@ -484,7 +497,7 @@ export default function App() {
           const storedHost = await saveTailscaleAuthKey(draft.id, tailscaleKey)
           if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
           setHosts((items) => [...items.filter((h) => h.id !== storedHost.id), storedHost].sort((a, b) => a.label.localeCompare(b.label)))
-          setSelectedId(storedHost.id)
+          chooseHostId(storedHost.id)
           setDraft(null)
           setMessage(editingActiveHost
             ? t('hostAndTailscaleSavedDisconnected')
@@ -492,7 +505,7 @@ export default function App() {
           return
         }
         setHosts((items) => [...items.filter((h) => h.id !== storedDraft.id), storedDraft].sort((a, b) => a.label.localeCompare(b.label)))
-        setSelectedId(storedDraft.id)
+        chooseHostId(storedDraft.id)
         setDraft(null)
         setMessage(editingActiveHost
           ? t('hostSavedDisconnected')
@@ -506,7 +519,7 @@ export default function App() {
     if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
     if (privateKeyPassphraseRef.current) privateKeyPassphraseRef.current.value = ''
     setHosts((items) => [...items.filter((h) => h.id !== draft.id), draft].sort((a, b) => a.label.localeCompare(b.label)))
-    setSelectedId(draft.id)
+    chooseHostId(draft.id)
     setDraft(null)
     setMessage(isDesktop()
       ? t('hostSavedReconnectHint')
@@ -521,7 +534,7 @@ export default function App() {
       try { await deleteHost(selected.id) } catch (error) { setMessage(t('deleteFailed', String(error))); return }
     }
     setHosts((items) => items.filter((h) => h.id !== selected.id))
-    setSelectedId(null)
+    chooseHostId(null)
     setMessage(isDesktop() ? t('workstationDeleted') : t('previewRemovedFromPage'))
   }
 
@@ -532,7 +545,7 @@ export default function App() {
     if (selectedId && selectedId !== host.id && isDesktop()) {
       void disconnectHost(selectedId).catch(() => {})
     }
-    setSelectedId(host.id)
+    chooseHostId(host.id)
     setFilesPath(host.default_remote_path || '/')
     setPhase('idle')
     setStateLabel(t('stateDisconnected'))
