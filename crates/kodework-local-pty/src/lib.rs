@@ -474,6 +474,47 @@ mod tests {
     #[cfg(windows)]
     static CONPTY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Streaming detector for the VT cursor-position request ESC[6n. The
+    /// request may be split between arbitrary ConPTY data event boundaries.
+    /// Detect each occurrence exactly once, rather than repeatedly scanning
+    /// all accumulated output and answering only the first request.
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct CursorPositionQueryDetector {
+        matched: usize,
+    }
+
+    #[cfg(windows)]
+    impl CursorPositionQueryDetector {
+        fn count_new(&mut self, bytes: &[u8]) -> usize {
+            const QUERY: &[u8] = b"\x1b[6n";
+            let mut found = 0;
+            for &byte in bytes {
+                if byte == QUERY[self.matched] {
+                    self.matched += 1;
+                    if self.matched == QUERY.len() {
+                        found += 1;
+                        self.matched = 0;
+                    }
+                } else {
+                    self.matched = usize::from(byte == QUERY[0]);
+                }
+            }
+            found
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cursor_position_detector_handles_split_and_repeated_requests() {
+        let mut detector = CursorPositionQueryDetector::default();
+        assert_eq!(detector.count_new(b"first\x1b["), 0);
+        assert_eq!(detector.count_new(b"6nother\x1b[6n"), 2);
+        assert_eq!(detector.count_new(b"plain output"), 0);
+        assert_eq!(detector.count_new(b"\x1b[6"), 0);
+        assert_eq!(detector.count_new(b"n\x1b[6n"), 2);
+    }
+
     #[cfg(windows)]
     async fn wait_for_terminal_sentinel(
         manager: &super::LocalTerminalManager,
@@ -495,7 +536,11 @@ mod tests {
         let deadline = started + startup_timeout;
         let mut output = Vec::new();
         let mut data_events = 0_usize;
-        let mut answered_device_query = false;
+        let mut query_detector = CursorPositionQueryDetector::default();
+        let mut cursor_queries_answered = 0_usize;
+        // Detect pathological query loops, but do not silently ignore a
+        // legitimate second/third PSReadLine request on busy Windows runners.
+        const MAX_CURSOR_QUERY_RESPONSES: usize = 16;
         // Queue the probe immediately.  A shell may emit a prompt only after
         // startup scripts and PSReadLine have initialized, so prompt shape is
         // not a reliable readiness protocol.  The command sits in the PTY
@@ -507,7 +552,7 @@ mod tests {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!(
-                    "local terminal readiness timed out after {:?}: {} data events, {} bytes, device query answered={answered_device_query}",
+                    "local terminal readiness timed out after {:?}: {} data events, {} bytes, cursor-position queries answered={cursor_queries_answered}",
                     started.elapsed(),
                     data_events,
                     output.len(),
@@ -517,7 +562,7 @@ mod tests {
                 .await
                 .map_err(|_| {
                     format!(
-                        "local terminal readiness timed out after {:?}: {} data events, {} bytes, device query answered={answered_device_query}",
+                        "local terminal readiness timed out after {:?}: {} data events, {} bytes, cursor-position queries answered={cursor_queries_answered}",
                         started.elapsed(),
                         data_events,
                         output.len(),
@@ -527,17 +572,23 @@ mod tests {
             match event {
                 super::LocalTerminalEvent::Data { bytes } => {
                     data_events += 1;
-                    output.extend(bytes);
-                    if output
-                        .windows(b"\x1b[6n".len())
-                        .any(|window| window == b"\x1b[6n")
-                        && !answered_device_query
-                    {
+                    // PowerShell/PSReadLine can ask for the cursor position
+                    // more than once during startup. Every distinct request
+                    // needs a reply. The counter survives split data events.
+                    let queries = query_detector.count_new(&bytes);
+                    if cursor_queries_answered + queries > MAX_CURSOR_QUERY_RESPONSES {
+                        return Err(
+                            "PowerShell requested excessive cursor positions before readiness"
+                                .to_string(),
+                        );
+                    }
+                    for _ in 0..queries {
                         manager
                             .write(id, b"\x1b[1;1R")
                             .map_err(|error| error.to_string())?;
-                        answered_device_query = true;
                     }
+                    cursor_queries_answered += queries;
+                    output.extend(bytes);
                     if String::from_utf8_lossy(&output).contains(readiness_sentinel) {
                         return Ok(output);
                     }
