@@ -248,6 +248,8 @@ pub(crate) async fn delete_host(
     }
     // Deleting a host must not leave an SSH transport, tunnel or PTY alive
     // after its persistent record and credential references are gone.
+    state.host_key.cancel_for_owner(host_id);
+    state.keyboard_interactive.cancel_for_owner(host_id);
     if let Ok(mut active) = state.reconnecting.lock() {
         active.remove(&host_id);
     }
@@ -1005,6 +1007,10 @@ pub(crate) async fn disconnect_host(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<(), String> {
+    // Wake any pending host-key/OTP request before the connect/disconnect
+    // mutex; a modal must not keep an abandoned connection alive.
+    state.host_key.cancel_for_owner(host_id);
+    state.keyboard_interactive.cancel_for_owner(host_id);
     if let Ok(mut active) = state.reconnecting.lock() {
         active.remove(&host_id);
     }
@@ -1090,14 +1096,18 @@ pub(crate) async fn resize_pty(
 
 /// Pending host-key decisions for the renderer to display.
 #[tauri::command]
-pub(crate) fn pending_host_key_requests(state: State<'_, AppState>) -> Vec<HostKeyRequest> {
-    state.host_key.drain_requests()
+pub(crate) fn pending_host_key_requests(
+    state: State<'_, AppState>,
+    host_id: HostId,
+) -> Vec<HostKeyRequest> {
+    state.host_key.pending_for_owner(host_id)
 }
 
 /// User decision for a pending host-key request.
 #[tauri::command]
 pub(crate) fn answer_host_key(
     state: State<'_, AppState>,
+    host_id: HostId,
     request_id: u64,
     decision: String,
 ) -> bool {
@@ -1106,26 +1116,28 @@ pub(crate) fn answer_host_key(
         "trust_and_save" => HostKeyDecision::TrustAndSave,
         _ => HostKeyDecision::Reject,
     };
-    state.host_key.answer(request_id, decision)
+    state.host_key.answer_for_owner(host_id, request_id, decision)
 }
 
 #[tauri::command]
 pub(crate) fn pending_keyboard_interactive_requests(
     state: State<'_, AppState>,
+    host_id: HostId,
 ) -> Result<Vec<kodework_ssh::keyboard_interactive::KeyboardInteractiveRequest>, String> {
-    Ok(state.keyboard_interactive.drain_requests())
+    Ok(state.keyboard_interactive.pending_for_owner(host_id))
 }
 
 #[tauri::command]
 pub(crate) fn answer_keyboard_interactive(
     state: State<'_, AppState>,
+    host_id: HostId,
     request_id: u64,
     responses: Vec<String>,
 ) -> Result<bool, String> {
     if responses.len() > 32 || responses.iter().any(|response| response.len() > 4096) {
         return Err("keyboard-interactive response is too large".into());
     }
-    Ok(state.keyboard_interactive.answer(request_id, responses))
+    Ok(state.keyboard_interactive.answer_for_owner(host_id, request_id, responses))
 }
 
 /// Subscribes the renderer to terminal events for a host. The events flow

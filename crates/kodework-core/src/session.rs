@@ -459,6 +459,7 @@ impl SessionManager {
                 generation,
             );
             options.logical_host_id = Some(host.id);
+            options.ui_owner_host_id = Some(host.id);
             options.connect_timeout = self.connect_timeout;
             if host.jump.is_none() {
                 if let Some(proxy) = candidate.proxy {

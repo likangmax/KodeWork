@@ -231,11 +231,11 @@ export default function App() {
       if (!active || !isCurrent() || busy) return
       busy = true
       try {
-        const requests = await pendingHostKeyRequests()
+        const requests = await pendingHostKeyRequests(selectedId)
         if (active && isCurrent() && requests.length > 0) {
           setHostKeyRequest((current) => current ?? requests[0])
         }
-        const keyboardRequests = await pendingKeyboardInteractiveRequests()
+        const keyboardRequests = await pendingKeyboardInteractiveRequests(selectedId)
         if (active && isCurrent() && keyboardRequests.length > 0) {
           setKeyboardInteractiveRequest((current) => current ?? keyboardRequests[0])
         }
@@ -472,21 +472,29 @@ export default function App() {
   }
 
   const onHostKeyDecision = async (decision: 'trust_once' | 'trust_and_save' | 'reject') => {
-    if (!hostKeyRequest) return
-    await answerHostKey(hostKeyRequest.request_id, decision)
-    setHostKeyRequest(null)
+    if (!hostKeyRequest || !selectedId || hostKeyRequest.owner_host_id !== selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
+    try {
+      const answered = await answerHostKey(selectedId, hostKeyRequest.request_id, decision)
+      if (!isCurrent()) return
+      setHostKeyRequest(null)
+      if (!answered) setMessage(language === 'zh-CN' ? '主机密钥确认已过期，请重新连接。' : 'Host-key approval expired; reconnect and retry.')
+    } catch (error) {
+      if (isCurrent()) setMessage(language === 'zh-CN' ? `主机密钥确认失败：${String(error)}` : `Host-key approval failed: ${String(error)}`)
+    }
   }
   const onKeyboardInteractiveAnswer = async () => {
-    if (!keyboardInteractiveRequest) return
+    if (!keyboardInteractiveRequest || !selectedId || keyboardInteractiveRequest.owner_host_id !== selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
     const responses = keyboardInteractiveInputs.current.map((input) => input.value)
     keyboardInteractiveInputs.current.forEach((input) => { input.value = '' })
     const requestId = keyboardInteractiveRequest.request_id
     setKeyboardInteractiveRequest(null)
     try {
-      const answered = await answerKeyboardInteractive(requestId, responses)
-      if (!answered) setMessage(t('keyboardInteractiveExpired'))
+      const answered = await answerKeyboardInteractive(selectedId, requestId, responses)
+      if (isCurrent() && !answered) setMessage(t('keyboardInteractiveExpired'))
     } catch (error) {
-      setMessage(t('keyboardInteractiveSubmitFailed', String(error)))
+      if (isCurrent()) setMessage(t('keyboardInteractiveSubmitFailed', String(error)))
     }
   }
   const saveDraft = async () => {

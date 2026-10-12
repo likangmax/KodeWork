@@ -46,6 +46,7 @@ pub struct SshHandler {
     hostname: String,
     port: u16,
     logical_host_id: Option<HostId>,
+    ui_owner_host_id: Option<HostId>,
     host_key: Arc<HostKeyBroker>,
     events: mpsc::Sender<SessionEvent>,
     /// Channel numbers owned by non-terminal traffic (SFTP subsystem,
@@ -70,11 +71,18 @@ impl SshHandler {
             hostname,
             port,
             logical_host_id,
+            ui_owner_host_id: logical_host_id,
             host_key,
             events,
             generation,
             filtered_channels,
         }
+    }
+
+    #[must_use]
+    pub fn with_ui_owner(mut self, owner_host_id: Option<HostId>) -> Self {
+        self.ui_owner_host_id = owner_host_id;
+        self
     }
 
     #[must_use]
@@ -121,7 +129,14 @@ impl client::Handler for SshHandler {
             }
         };
         self.host_key
-            .verify_for_host(self.logical_host_id, &self.hostname, self.port, key)
+            .verify_for_connection(
+                self.logical_host_id,
+                self.ui_owner_host_id,
+                self.generation,
+                &self.hostname,
+                self.port,
+                key,
+            )
             .await
     }
 
