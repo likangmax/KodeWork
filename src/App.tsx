@@ -112,6 +112,8 @@ export default function App() {
   const [theme, onThemeChange] = useTheme()
   const [language, onLanguageChange, needsLanguagePrompt] = useLanguage()
   const t = useCallback((key: Parameters<typeof translate>[1], ...args: string[]) => translate(language, key, ...args), [language])
+  const latestT = useRef(t)
+  latestT.current = t
   const [activeTab, setActiveTab] = useState<'terminal' | 'local' | 'files' | 'preview' | 'actions'>('terminal')
   const [panes, setPanes] = useState<{ id: number; channel: number }[]>([])
   const [splitDir, setSplitDir] = useState<'h' | 'v'>('h')
@@ -186,7 +188,7 @@ export default function App() {
     let active = true
     const load = async () => {
       if (!isDesktop()) {
-        if (active) setMessage(t('previewMode'))
+        if (active) setMessage(latestT.current('previewMode'))
         return
       }
       try {
@@ -195,14 +197,14 @@ export default function App() {
         setHosts(loaded)
         chooseHostId(loaded[0]?.id ?? null)
         setFilesPath(loaded[0]?.default_remote_path || '/')
-        setMessage(loaded.length === 0 ? t('noWorkstationConfigured') : t('loadedWorkstations', String(loaded.length)))
+        setMessage(loaded.length === 0 ? latestT.current('noWorkstationConfigured') : latestT.current('loadedWorkstations', String(loaded.length)))
       } catch (error) {
-        if (active) setMessage(t('loadConfigFailed', String(error)))
+        if (active) setMessage(latestT.current('loadConfigFailed', String(error)))
       }
     }
     void load()
     return () => { active = false }
-  }, [setMessage, t])
+  }, [setMessage])
 
   // Warm the selected embedded Tailscale path once per host selection.  The
   // previous implementation also warmed the first host during initial load
@@ -251,8 +253,10 @@ export default function App() {
 
   const refreshState = useCallback(async (hostId: string) => {
     if (!isDesktop()) return
+    const isCurrent = hostScope.accepts(hostId)
     try {
       const state = await sessionState(hostId)
+      if (!isCurrent()) return
       const labels: Record<string, string> = {
         Disconnected: t('stateDisconnected'), ResolvingAddress: t('stateResolving'), Connecting: t('stateConnecting'),
         VerifyingHostKey: t('stateVerifyingHostKey'), Authenticating: t('stateAuthenticating'), Ready: t('stateReady'),
@@ -261,7 +265,7 @@ export default function App() {
       setStateLabel(labels[state] ?? state)
       setPhase(state === 'Ready' ? 'ready' : state === 'Failed' ? 'failed' : state === 'Disconnected' ? 'idle' : 'connecting')
     } catch { /* transient */ }
-  }, [t])
+  }, [t, hostScope])
 
   useResumeRecovery(Boolean(selectedId && phase !== 'idle'), () => {
     if (selectedId) void refreshState(selectedId)
@@ -329,8 +333,9 @@ export default function App() {
   useEffect(() => {
     if (phase !== 'ready' || !selectedId || !isDesktop() || panes.length > 0) return
     let active = true
+    const isCurrent = hostScope.accepts(selectedId)
     void openPane(selectedId, 80, 24).then(([id, channel]) => {
-      if (!active) {
+      if (!active || !isCurrent()) {
         // React StrictMode double-runs effects in dev: the first run's
         // pane must be closed again or it becomes an orphan PTY on the
         // host until disconnect.
@@ -338,7 +343,7 @@ export default function App() {
         return
       }
       setPanes([{ id, channel }])
-    }).catch((error) => setMessage(t('openTerminalFailed', String(error))))
+    }).catch((error) => { if (active && isCurrent()) setMessage(t('openTerminalFailed', String(error))) })
     return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, selectedId, activeTab])
@@ -347,7 +352,9 @@ export default function App() {
   // prompts for credentials, but never owns reconnect timing or retry loops.
   useEffect(() => {
     if (!isDesktop() || !selectedId) return
+    const isCurrent = hostScope.accepts(selectedId)
     const unsubscribe = subscribeSessionRuntime(selectedId, (snapshot) => {
+        if (!isCurrent()) return
         const state = snapshot.state
         if (state === 'Reconnecting') {
           setStateLabel(t('stateReconnecting'))
@@ -410,6 +417,7 @@ export default function App() {
   const runConnect = async (host: Host, passwordValue?: string) => {
     lastHostRef.current = host
     const seq = ++connectSeq.current
+    const isCurrent = hostScope.accepts(host.id)
     // Any panes from a previous transport are invalid; they will be
     // reopened by the ready-effect once this connection establishes.
     setPanes([])
@@ -422,11 +430,11 @@ export default function App() {
     setMessage(t('connectingTo', host.label))
     try {
       const result = await connectHost(host, passwordValue)
-      if (seq !== connectSeq.current) return
+      if (seq !== connectSeq.current || !isCurrent()) return
       setMessage(result)
       void refreshState(host.id)
     } catch (error) {
-      if (seq !== connectSeq.current) return
+      if (seq !== connectSeq.current || !isCurrent()) return
       const connectError = asConnectError(error)
       if (connectError?.kind === 'CredentialRequired') {
         setPhase('failed')
