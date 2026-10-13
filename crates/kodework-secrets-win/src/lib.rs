@@ -5,6 +5,7 @@
 //! unsafe surface is confined to `windows_impl` and reviewed there; the
 //! public API is plain `SecretStore` implementations.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 #[cfg(windows)]
 pub mod windows_impl;
 

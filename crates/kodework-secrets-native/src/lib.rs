@@ -8,6 +8,7 @@
 //! the desktop shell deliberately keeps using the existing Credential Manager
 //! adapter so existing Windows installations do not lose their records.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use keyring::Entry;
 use kodework_domain::{CredentialProvider, CredentialRef};
 use kodework_secrets::{SecretError, SecretStore, SecretValue};

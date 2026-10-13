@@ -3,6 +3,7 @@
 //! Address candidate resolution: configured addresses plus async discovery
 //! providers (Tailscale, future LAN scans), merged and ordered by policy.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use kodework_domain::{Address, AddressKind, Host};
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -4,6 +4,7 @@
 //! remote host. Loopback-only, token-gated, bounded output. Used by
 //! Kodework when present (never required).
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;

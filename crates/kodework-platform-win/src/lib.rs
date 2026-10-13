@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 pub mod clipboard;
 
 use serde::{Deserialize, Serialize};

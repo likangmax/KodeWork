@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use kodework_domain::{Address, AddressId, AuthenticationMode, Host, HostId, RuntimeKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;

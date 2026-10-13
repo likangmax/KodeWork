@@ -7,6 +7,7 @@
 //! retry are idempotent and driven by shared control flags so a slow or
 //! stalled backend never blocks the manager.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 pub mod backend;
 pub mod manager;
 

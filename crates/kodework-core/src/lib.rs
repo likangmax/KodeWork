@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 pub mod session;
 pub mod tunnel;
 

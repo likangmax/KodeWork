@@ -2,6 +2,7 @@
 
 //! Kodework test kit: fake adapters for offline integration and fault tests.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 pub mod fake_sftp;
 pub mod fake_sftp_server;
 pub mod fake_ssh;

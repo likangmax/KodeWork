@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use kodework_domain::CredentialRef;
 use std::collections::BTreeMap;
 use thiserror::Error;
