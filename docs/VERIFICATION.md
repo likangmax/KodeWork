@@ -4,8 +4,33 @@ This document records what was verified about this repository, how each claim wa
 produced, and what is deliberately **not** verified. It exists so that a reviewer
 can re-run the evidence instead of trusting a summary.
 
-Baseline: `3129c01` (the merge of PR #85). Work under review: the 16 commits after
-it, ending at the commit that introduced this file.
+**Levels of evidence are not interchangeable.** "Tests pass" is not "a release was
+built", which is not "an installed copy upgrades", which is not "the production
+update channel works". Each section below says which level it reaches.
+
+**Nothing in this report is delivered to users yet.** The newest published release
+is `v0.2.3`; everything described here sits on `main` ahead of it. Passing gates on
+`main` is not a release.
+
+Baseline: `3129c01` (the merge of PR #85). Work under review: the commits after it
+up to the one that introduced this file, plus the follow-up pull requests listed in
+§11.
+
+## 0. Corrections from external review
+
+An independent review of the first version of this report found real gaps in it.
+They are recorded here rather than quietly fixed, because the pattern matters:
+
+| Claim in the first version | What was actually true |
+| --- | --- |
+| "the interactive budget covers every interactive-capable site (connect_stream x2, authenticate x2)" | The **proxy** branch still used `connect_timeout`, so Tailscale-style proxy connections had a ~15 s window for a 60 s approval. Fixed; now covered by a behavioural test that measures the deadline (§7). |
+| "all undeliverable keyboard-interactive answers are wiped" | Three broker-side paths were wiped, but an answer **rejected for a wrong count** after delivery, and one rejected by the Tauri IPC size check, were dropped unwiped. Both now hold the answers in a `Zeroizing` owner until they are handed to the SSH layer, so every early return wipes (§7). |
+| "the shipped-graph check proves the advisory crate is not shipped" | A `cargo tree` invocation that **failed** was read as "crate absent", so the check could pass without inspecting anything. It now fails closed, with a self-test for the classifier (§4). |
+| "the panic scan covers production sources" | It truncated each file at the first `#[cfg(test)]`, so production code after a test module was never scanned, and it reported line numbers from the stripped text. Now it removes only `#[cfg(test)]` items and reports real line numbers (§7). |
+| "`use-effect-cleanup.test.ts` guards effect cleanup" | It is a structural text check, not a behavioural one: it cannot prove that a cleanup runs or runs in the right order (§7). |
+
+The general lesson, stated once: a guard that reports success when its own
+inspection fails is worse than no guard, because it is trusted.
 
 ## 1. Automated gates
 
@@ -166,9 +191,10 @@ counterparts, using `scripts/measure-startup.ps1`:
   version binding are verified; the origin itself is an operational step.
 - **Authenticode**: requires a commercial certificate; every rehearsal passes
   `-RequireAuthenticode:$false` deliberately.
-- **A real install/upgrade on a machine**: not performed, because a Kodework
-  installation already exists on the test machine and mutating it was out of
-  scope. The MSI-level contract in §6 is the evidence instead.
+- **Real remote hosts**: the SSH/Tailscale/jump-host/SFTP evidence comes from the
+  in-repo fake SSH server (a real russh server over real TCP) and the soak matrix.
+  No real Linux host, real Tailscale network or third-party SFTP server has been
+  exercised, which is what a release acceptance run still needs.
 - **The in-app update check button**: driving it requires UI automation, which was
   deliberately not performed; the client-side logic it calls is covered by §5
   (source reading plus an equivalent end-to-end verification).
@@ -178,15 +204,45 @@ counterparts, using `scripts/measure-startup.ps1`:
   fix is 0.20.0, and only Tauri moving to gtk-rs 0.20 can reach it). It is not in
   the shipped artifact, which §4 enforces mechanically.
 
-## 10. Process notes
+## 10. What each guard actually guarantees
 
-- The 16 commits were pushed **directly to `main`**, not through pull requests:
-  `enforce_admins` is `false`, so an owner push bypasses the required checks. They
-  were validated by CI on `main` afterwards, but there is no review trail. To make
-  that class of mistake impossible rather than discouraged:
-  `gh api -X PUT repos/likangmax/KodeWork/branches/main/protection/enforce_admins`.
+Recording the limits of the guards, because a guard that is trusted for more than
+it proves is a liability:
+
+- `scripts/check-shipped-graph.mjs` — proves that named crates are absent from the
+  `x86_64-pc-windows-msvc` dependency graph and present in the Linux one, and now
+  fails closed when an inspection cannot run. It is **not** a dependency audit of
+  the built artifact: it inspects the resolved graph, not the linked binary or the
+  bundled sidecars.
+- `crates/kodework-domain/tests/panic_free_sources.rs` — a source-level convention
+  check. It does not cover macro-generated code, third-party crates, or panics that
+  are not one of the three named macros (allocation failure, arithmetic overflow in
+  a build with overflow checks off). It now scans production code that follows a
+  test module and reports real line numbers.
+- `src/use-effect-cleanup.test.ts` — a structural check that an effect which
+  registers something also disposes it. It cannot prove that a cleanup runs, or
+  in what order relative to async work. Behavioural coverage would need a DOM test
+  environment, which this project does not currently have.
+- `src/i18n-usage.test.ts` — proves no catalogue key is unreferenced and that both
+  catalogues carry the same keys. It cannot prove a string is *displayed* correctly.
+- The keyboard-interactive wiping — the `Zeroizing` owner makes every early return
+  wipe, which is enforced by the type system rather than observed by a test. The
+  copy that `russh` takes ownership of cannot be wiped from this side, and keeping
+  a second copy to wipe would leave strictly more plaintext in the process than it
+  removes.
+
+## 11. Process notes
+
+- The first 17 commits were pushed **directly to `main`**, not through pull
+  requests: `enforce_admins` is `false`, so an owner push bypasses the required
+  checks. They were validated by CI on `main` afterwards, but there is no review
+  trail. The follow-up work (the proxy budget, the OTP scrubbing paths, the
+  fail-closed dependency check, the install acceptance on a runner) was done on
+  branches with pull requests whose CI had to pass first, which is the process that
+  should have been used throughout.
 - The harness scripts used for the one-off checks in §2, §3, §5 and §6 live outside
   the repository as development aids; the method and the exact commands are
-  described above so they can be re-created, and the two that are meant to be
-  re-run by maintainers (`scripts/verify-release.ps1`, `scripts/serve-update-channel.mjs`,
-  `scripts/publish-update.ps1`) are in the tree.
+  described above so they can be re-created. The ones meant to be re-run by
+  maintainers are in the tree: `scripts/verify-release.ps1`,
+  `scripts/serve-update-channel.mjs`, `scripts/publish-update.ps1`,
+  `scripts/check-shipped-graph.mjs` and `scripts/verify-install-upgrade.ps1`.
