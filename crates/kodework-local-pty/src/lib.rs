@@ -31,12 +31,13 @@ pub struct LocalTerminalDescriptor {
     pub label: String,
 }
 
+/// Events emitted by a local terminal session. `Exited::code` is `None` when
+/// the child could not be reaped in time; reporting a definite `0` there told
+/// the user that a failed command had succeeded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LocalTerminalEvent {
     Data { bytes: Vec<u8> },
-    /// `code` is `None` when the child could not be reaped in time. Reporting a
-    /// definite `0` there told the user a failed command had succeeded.
     Exited { code: Option<u32> },
     Error { message: String },
 }
