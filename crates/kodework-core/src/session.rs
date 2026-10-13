@@ -306,6 +306,11 @@ pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<HostId, ActiveSession>>>,
     event_buffer: usize,
     connect_timeout: Duration,
+    /// Budget for the phases that can wait on a user (host-key decision during
+    /// KEX, keyboard-interactive prompts during authentication). `None` keeps
+    /// `connect_timeout`, so callers that only shorten the transport timeout
+    /// (tests, embedded use) keep their timing.
+    interactive_timeout: Option<Duration>,
     transfer_leases: TransferLeaseRegistry,
 }
 
@@ -386,8 +391,17 @@ impl SessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: event_buffer.max(8),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            interactive_timeout: None,
             transfer_leases: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Raises the budget for the phases that can wait on a person, without
+    /// slowing down DNS/TCP failure detection for an unreachable host. The
+    /// desktop app sets this to match the host-key decision window, which is
+    /// otherwise unreachable because the connect deadline is shorter.
+    pub fn set_interactive_timeout(&mut self, timeout: Duration) {
+        self.interactive_timeout = Some(timeout);
     }
 
     /// Connects to the best candidate address, falling back on network
@@ -445,7 +459,25 @@ impl SessionManager {
             return Err(ConnectError::invalid("no enabled address candidates"));
         }
         let generation = self.next_generation(host.id);
-        let jump_auth = jump_auth.unwrap_or_else(|| auth.clone());
+        // A bastion must never receive the target host's credentials implicitly.
+        // The desktop path always resolves jump-specific credentials before
+        // calling in; the previous fallback (`jump_auth.unwrap_or_else(|| auth)`)
+        // would have disclosed the target password to a third-party hop for any
+        // caller that forgot to pass them. Fail closed instead.
+        let jump_auth = if host.jump.is_some() {
+            match jump_auth {
+                Some(explicit) if !explicit.is_empty() => explicit,
+                _ => {
+                    self.set_state(host.id, ConnectionState::Failed)?;
+                    return Err(ConnectError::invalid(
+                        "jump host requires its own credentials; target credentials are never reused",
+                    ));
+                }
+            }
+        } else {
+            // No bastion configured: the candidate loop never reads this.
+            Vec::new()
+        };
 
         let mut last_error = ConnectError::internal("no candidate attempted");
         for candidate in candidates {
@@ -461,6 +493,7 @@ impl SessionManager {
             options.logical_host_id = Some(host.id);
             options.ui_owner_host_id = Some(host.id);
             options.connect_timeout = self.connect_timeout;
+            options.interactive_timeout = self.interactive_timeout;
             if host.jump.is_none() {
                 if let Some(proxy) = candidate.proxy {
                     options.proxy = Some(ProxyCommand {
@@ -1592,6 +1625,14 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| "no session for host".to_string())?;
         let _connect_guard = session.connect_guard.lock().await;
+        // This transport stops being "current" the moment an explicit teardown
+        // begins. Without bumping the generation the old event pump keeps
+        // matching: it would repopulate pending_events after the clears below
+        // (they could then be replayed into a later subscriber) and its
+        // Disconnected event would flip the state back to Reconnecting, making
+        // a deliberate disconnect look like an unexpected drop to the
+        // supervisor.
+        let _ = session.controller.reserve_generation();
         let connection = session
             .connection
             .lock()
@@ -1707,7 +1748,12 @@ impl SessionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&host_id)
             .cloned()
-            .unwrap_or_else(|| unreachable!("session must exist"));
+            // `ensure_session` runs first, so this is unreachable in practice;
+            // it returns an error rather than aborting because the workspace
+            // denies panics and "cannot happen" is not a guarantee.
+            .ok_or_else(|| {
+                ConnectError::internal("session registry entry missing during attach")
+            })?;
         session
             .controller
             .install_generation(generation)

@@ -123,8 +123,14 @@ pub(super) fn build_remote_run_probe_command(
             ActionMode::Background => "background",
             ActionMode::Quick | ActionMode::Interactive => "quick",
         };
+        // Liveness must come from the pane, not from the session: with
+        // `remain-on-exit on` (a common tmux setting) the session outlives the
+        // script, so `has-session` alone reported a dead run as Running forever.
+        // Only an explicitly live pane (`pane_dead` = 0) counts as running;
+        // anything else - a dead pane, no output, or a tmux error - is Unknown,
+        // which keeps the documented "started is not success" contract.
         command.push_str(&format!(
-            "id='{id}'; base=\"$HOME/.cache/kodework/runs/$id\"; if [ -f \"$base/exit_code\" ]; then printf '%s\\tcompleted\\t%s\\t%s\\t%s\\n' \"$id\" \"$(cat -- \"$base/exit_code\" 2>/dev/null || true)\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif [ '{mode}' = 'background' ] && tmux has-session -t \"kodework-run-$id\" >/dev/null 2>&1; then printf '%s\\trunning\\n' \"$id\"; else printf '%s\\tunknown\\n' \"$id\"; fi; "
+            "id='{id}'; base=\"$HOME/.cache/kodework/runs/$id\"; if [ -f \"$base/exit_code\" ]; then printf '%s\\tcompleted\\t%s\\t%s\\t%s\\n' \"$id\" \"$(cat -- \"$base/exit_code\" 2>/dev/null || true)\" \"$(cat -- \"$base/started_at_s\" 2>/dev/null || true)\" \"$(cat -- \"$base/finished_at_s\" 2>/dev/null || true)\"; elif [ '{mode}' = 'background' ] && tmux has-session -t \"kodework-run-$id\" >/dev/null 2>&1; then dead=$(tmux list-panes -t \"kodework-run-$id\" -F '#{{pane_dead}}' 2>/dev/null | head -n 1); if [ \"$dead\" = \"0\" ]; then printf '%s\\trunning\\n' \"$id\"; else printf '%s\\tunknown\\n' \"$id\"; fi; else printf '%s\\tunknown\\n' \"$id\"; fi; "
         ));
     }
     Ok(command)
@@ -223,6 +229,97 @@ mod tests {
         assert!(build_action_command(&value).is_err());
     }
 
+    /// Hostile payloads must survive the quoting rule byte for byte. Running the
+    /// real interpreter is the only way to prove that, because the assertion is
+    /// about shell semantics rather than about string contents.
+    ///
+    /// A POSIX shell is required: the Unix CI jobs always have one, so the
+    /// invariant is enforced there. On Windows the test runs when a working
+    /// `sh`/`bash` is reachable (for example through WSL) and otherwise reports
+    /// that it could not run instead of pretending to pass.
+    #[test]
+    fn shell_quoting_round_trips_through_a_real_posix_shell() {
+        let Some(shell) = working_posix_shell() else {
+            // A POSIX shell is required on Unix, which is the enforcement point
+            // for this invariant. On Windows it is optional: the test runs when
+            // one is reachable (for example Git's sh) and reports that it could
+            // not run otherwise, rather than pretending to pass.
+            #[cfg(windows)]
+            {
+                eprintln!("skipped: no POSIX shell available on this host");
+                return;
+            }
+            #[cfg(not(windows))]
+            {
+                unreachable!("a POSIX shell is required to verify shell quoting here");
+            }
+        };
+
+        let payloads = [
+            "simple",
+            "with space",
+            "single'quote",
+            "double\"quote",
+            "back\\slash",
+            "$(whoami)",
+            "`id`",
+            "semi;colon",
+            "pipe|pipe",
+            "redirect>file",
+            "glob*?[a]",
+            "unicode-\u{4e2d}\u{6587}-\u{2713}",
+            "!history",
+            "#hash",
+            "~tilde",
+            "-leading-dash",
+            "tab\there",
+            "trailing-space ",
+            "''",
+            "\"\"",
+        ];
+        for payload in payloads {
+            let quoted = shell_quote(payload)
+                .unwrap_or_else(|error| unreachable!("{payload:?} should be quotable: {error}"));
+            let output = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(format!("printf %s {quoted}"))
+                .output()
+                .unwrap_or_else(|error| unreachable!("{shell} -c: {error}"));
+            assert!(
+                output.status.success(),
+                "{shell} rejected the quoting for {payload:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                payload,
+                "round trip changed {payload:?}"
+            );
+        }
+
+        // Control characters cannot be represented safely in a single shell word
+        // and must be refused rather than escaped.
+        for payload in ["line\nfeed", "carriage\rreturn", "nul\0byte"] {
+            assert!(
+                shell_quote(payload).is_err(),
+                "{payload:?} must be rejected, not quoted"
+            );
+        }
+    }
+
+    /// The first shell that actually runs, so a broken stub on `PATH` cannot make
+    /// the quoting test vacuous.
+    fn working_posix_shell() -> Option<&'static str> {
+        ["sh", "bash"].into_iter().find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("-c")
+                .arg("printf ok")
+                .output()
+                .map(|output| output.status.success() && output.stdout == b"ok")
+                .unwrap_or(false)
+        })
+    }
+
     #[test]
     fn control_characters_in_data_fields_are_rejected() {
         let mut value = action();
@@ -282,7 +379,39 @@ mod tests {
         .unwrap_or_else(|error| unreachable!("safe UUIDs must build: {error}"));
         assert!(script.contains("[ 'quick' = 'background' ]"));
         assert!(script.contains("tmux has-session"));
+        // A tmux session that survives its command (`remain-on-exit on`) must not
+        // be reported as a running run: only a live pane is evidence.
+        assert!(script.contains("#{pane_dead}"));
+        assert!(script.contains("[ \"$dead\" = \"0\" ]"));
         assert!(!script.contains("[ -f \"$base/started_at_s\" ] ||"));
         assert!(script.contains("else printf '%s\\tunknown\\n'"));
+    }
+
+    #[test]
+    fn probe_gates_tmux_liveness_on_the_requested_mode() {
+        let quick = build_remote_run_probe_command(&[RemoteRunProbeRequest {
+            run_id: RunId::new(),
+            mode: ActionMode::Quick,
+        }])
+        .unwrap_or_else(|error| unreachable!("safe UUIDs must build: {error}"));
+        let background = build_remote_run_probe_command(&[RemoteRunProbeRequest {
+            run_id: RunId::new(),
+            mode: ActionMode::Background,
+        }])
+        .unwrap_or_else(|error| unreachable!("safe UUIDs must build: {error}"));
+
+        assert!(quick.contains("[ 'quick' = 'background' ] && tmux has-session"));
+        assert!(background.contains("[ 'background' = 'background' ] && tmux has-session"));
+        // No tmux liveness check may be reachable without the mode guard: a
+        // Quick run is awaited to completion, so a leftover tmux session must
+        // never be able to turn an unresolved run into "running".
+        for (label, script) in [("quick", &quick), ("background", &background)] {
+            let total = script.matches("tmux has-session").count();
+            let guarded = script.matches("] && tmux has-session").count();
+            assert_eq!(
+                guarded, total,
+                "{label}: every tmux check must be mode-gated"
+            );
+        }
     }
 }

@@ -480,22 +480,40 @@ async fn generation_increments_on_reconnect() {
         .await
         .unwrap_or_else(|error| unreachable!("join: {error}"))
         .unwrap_or_else(|error| unreachable!("connect 1: {error}"));
-    assert_eq!(manager.generation(host.id), 1);
+    let first_generation = manager.generation(host.id);
+    assert!(first_generation >= 1);
     manager
         .disconnect(host.id)
         .await
         .unwrap_or_else(|error| unreachable!("disconnect: {error}"));
 
-    // Second connect (saved host key: no prompt) must use generation 2.
+    // An explicit teardown must invalidate the transport generation. Otherwise
+    // the old event pump still counts as "current": it can repopulate the
+    // pending-event buffer that disconnect just cleared, and its Disconnected
+    // event flips the state back to Reconnecting, so a deliberate disconnect
+    // looks like an unexpected drop to the supervisor.
+    let after_disconnect = manager.generation(host.id);
+    assert!(
+        after_disconnect > first_generation,
+        "disconnect must invalidate the transport generation ({first_generation} -> {after_disconnect})"
+    );
+
+    // Second connect (saved host key: no prompt) must use a strictly newer
+    // generation than the transport that was just torn down, so events from the
+    // old pump cannot reach the new session.
     let outcome = manager
         .connect(&host, auth())
         .await
         .unwrap_or_else(|error| unreachable!("connect 2: {error}"));
-    assert!(matches!(
-        outcome,
-        SessionOutcome::Connected { generation: 2, .. }
-    ));
-    assert_eq!(manager.generation(host.id), 2);
+    let second_generation = match outcome {
+        SessionOutcome::Connected { generation, .. } => generation,
+        _ => unreachable!("connect 2 must produce a connected session"),
+    };
+    assert!(
+        second_generation > after_disconnect,
+        "reconnect must use a newer generation ({after_disconnect} -> {second_generation})"
+    );
+    assert_eq!(manager.generation(host.id), second_generation);
     manager
         .disconnect(host.id)
         .await

@@ -1,4 +1,9 @@
 #![forbid(unsafe_code)]
+// `clippy::unreachable` is deliberately NOT enabled for this crate: the
+// `#[tauri::command]` attribute expands to code that contains `unreachable!()`
+// (30 sites here), so the lint reports macro-generated panics that we cannot
+// remove. The equivalent guarantee for our own code is covered by
+// `panic_free_production_sources` in crates/kodework-domain/tests.
 
 use kodework_core::session::SessionManager;
 use kodework_network::{CandidateResolver, ResolverPolicy};
@@ -77,9 +82,15 @@ impl AppState {
         // Host-key persistence is a metadata table; the broker owns the
         // user decision flow (trust once / trust and save / reject).
         let known_hosts = Arc::new(host_keys::SqliteKnownHosts::new(Arc::clone(&database)));
-        let host_key = Arc::new(HostKeyBroker::new(known_hosts, Duration::from_secs(60)));
-        let keyboard_interactive =
-            Arc::new(KeyboardInteractiveBroker::new(Duration::from_secs(120)));
+        // These budgets used to be unreachable: the connect attempt was capped at
+        // 15 s, so a decision window of 60 s (and a keyboard-interactive window of
+        // 120 s) could never elapse before the transport deadline killed the
+        // attempt mid-prompt. The window and the attempt budget are now stated
+        // together, with room for the handshake around the decision.
+        const DECISION_WINDOW: Duration = Duration::from_secs(60);
+        const INTERACTIVE_BUDGET: Duration = Duration::from_secs(75);
+        let host_key = Arc::new(HostKeyBroker::new(known_hosts, DECISION_WINDOW));
+        let keyboard_interactive = Arc::new(KeyboardInteractiveBroker::new(DECISION_WINDOW));
 
         // Address discovery: use a managed controller so EmbeddedUserspace
         // and the system daemon cannot accidentally share a control socket.
@@ -97,7 +108,8 @@ impl AppState {
             ResolverPolicy::default(),
         );
 
-        let sessions = SessionManager::new(Arc::clone(&host_key), resolver, 512);
+        let mut sessions = SessionManager::new(Arc::clone(&host_key), resolver, 512);
+        sessions.set_interactive_timeout(INTERACTIVE_BUDGET);
         let secrets = Arc::new(Mutex::new(secrets::new_store()));
         let local_terminals = kodework_local_pty::LocalTerminalManager::new();
 
