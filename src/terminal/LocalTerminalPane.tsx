@@ -94,10 +94,14 @@ export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, l
 
   useEffect(() => {
     if (!active) return
-    requestAnimationFrame(() => {
+    // The frame must be cancelled on deactivate/unmount: otherwise it can run
+    // after the terminal was disposed, which is only harmless because the other
+    // cleanup happens to null the refs first.
+    const frame = requestAnimationFrame(() => {
       try { fitRef.current?.fit() } catch { /* layout is not ready */ }
       termRef.current?.focus()
     })
+    return () => cancelAnimationFrame(frame)
   }, [active])
 
   return <div className="terminal-host" ref={containerRef} />
