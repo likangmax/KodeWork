@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -69,7 +69,9 @@ pub enum LocalPtyError {
 struct LocalSession {
     descriptor: LocalTerminalDescriptor,
     writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// `None` once the session is closed. Closing has to be able to *drop* the
+    /// master handle to release the pseudoconsole, which a plain `Box` cannot do.
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     subscriber: Mutex<Option<tokio::sync::mpsc::Sender<LocalTerminalEvent>>>,
     pending: Mutex<VecDeque<LocalTerminalEvent>>,
@@ -129,9 +131,16 @@ impl LocalTerminalManager {
         rows: u16,
         no_profile: bool,
     ) -> Result<LocalTerminalDescriptor, LocalPtyError> {
-        let mut sessions = self.sessions.lock().map_err(|_| LocalPtyError::Poisoned)?;
-        if sessions.len() >= MAX_SESSIONS {
-            return Err(LocalPtyError::LimitReached);
+        // Capacity is checked up front, but the registry lock is released before
+        // the process is spawned: a cold PowerShell/WSL start can take seconds,
+        // and holding the registry across it stalled write/resize/close for
+        // every other terminal. The bound is re-checked under the lock before
+        // insertion, so the limit still holds exactly.
+        {
+            let sessions = self.sessions.lock().map_err(|_| LocalPtyError::Poisoned)?;
+            if sessions.len() >= MAX_SESSIONS {
+                return Err(LocalPtyError::LimitReached);
+            }
         }
         let (program, args, label) =
             command_plan_with_options(&kind, distribution.as_deref(), no_profile)?;
@@ -171,14 +180,34 @@ impl LocalTerminalManager {
         let session = Arc::new(LocalSession {
             descriptor: descriptor.clone(),
             writer: Mutex::new(writer),
-            master: Mutex::new(pty.master),
+            master: Mutex::new(Some(pty.master)),
             child: Mutex::new(child),
             subscriber: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
         });
-        sessions.insert(id, Arc::clone(&session));
-        drop(sessions);
-        spawn_reader(Arc::clone(&session), reader);
+        {
+            let mut sessions = self.sessions.lock().map_err(|_| LocalPtyError::Poisoned)?;
+            // Another open may have taken the last slot while this one spawned.
+            if sessions.len() >= MAX_SESSIONS {
+                drop(sessions);
+                let mut child = session.child.lock().map_err(|_| LocalPtyError::Poisoned)?;
+                let _ = child.kill();
+                return Err(LocalPtyError::LimitReached);
+            }
+            sessions.insert(id, Arc::clone(&session));
+        }
+        if let Err(error) = spawn_reader(Arc::clone(&session), reader) {
+            // A session without a reader can never deliver output or an exit
+            // event, so it must not be reported as opened.
+            if let Ok(mut sessions) = self.sessions.lock() {
+                sessions.remove(&id);
+            }
+            let mut child = session.child.lock().map_err(|_| LocalPtyError::Poisoned)?;
+            let _ = child.kill();
+            return Err(LocalPtyError::Io(format!(
+                "local terminal reader thread failed to start: {error}"
+            )));
+        }
         Ok(descriptor)
     }
 
@@ -219,18 +248,16 @@ impl LocalTerminalManager {
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), LocalPtyError> {
         let session = self.get(id)?;
-        let result = session
-            .master
-            .lock()
-            .map_err(|_| LocalPtyError::Poisoned)?
+        let mut master = session.master.lock().map_err(|_| LocalPtyError::Poisoned)?;
+        let master = master.as_mut().ok_or(LocalPtyError::Missing(id))?;
+        master
             .resize(PtySize {
                 rows: rows.clamp(2, 512),
                 cols: cols.clamp(2, 512),
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|error| LocalPtyError::Pty(error.to_string()));
-        result
+            .map_err(|error| LocalPtyError::Pty(error.to_string()))
     }
 
     pub fn close(&self, id: u32) -> Result<(), LocalPtyError> {
@@ -240,8 +267,18 @@ impl LocalTerminalManager {
             .map_err(|_| LocalPtyError::Poisoned)?
             .remove(&id)
             .ok_or(LocalPtyError::Missing(id))?;
-        let mut child = session.child.lock().map_err(|_| LocalPtyError::Poisoned)?;
-        let _ = child.kill();
+        {
+            let mut child = session.child.lock().map_err(|_| LocalPtyError::Poisoned)?;
+            let _ = child.kill();
+        }
+        // Dropping the master handle closes the pseudoconsole, which is what
+        // unblocks the reader thread. `kill()` alone is not enough: a ConPTY or
+        // WSL process tree can keep the console open, and the reader thread owns
+        // an Arc of this session (and therefore the pseudoconsole), so without
+        // this the thread, the console and the process could all outlive close().
+        if let Ok(mut master) = session.master.lock() {
+            drop(master.take());
+        }
         Ok(())
     }
 
@@ -267,8 +304,13 @@ impl LocalTerminalManager {
     }
 }
 
-fn spawn_reader(session: Arc<LocalSession>, mut reader: Box<dyn Read + Send>) {
-    let _ = std::thread::Builder::new()
+/// Starts the output reader. The spawn error is returned rather than discarded
+/// so the caller can refuse to report a terminal that can never produce output.
+fn spawn_reader(
+    session: Arc<LocalSession>,
+    mut reader: Box<dyn Read + Send>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
         .name(format!("kodework-local-pty-{}", session.descriptor.id))
         .spawn(move || {
             let mut buffer = vec![0_u8; CHUNK_SIZE];
@@ -300,7 +342,8 @@ fn spawn_reader(session: Arc<LocalSession>, mut reader: Box<dyn Read + Send>) {
                     }
                 }
             }
-        });
+        })
+        .map(|_handle| ())
 }
 
 /// Reap the child to report its real exit status.
