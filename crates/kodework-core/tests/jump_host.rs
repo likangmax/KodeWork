@@ -102,8 +102,13 @@ async fn connection_chains_through_jump_host() {
     let outcome_task = tokio::spawn({
         let manager = manager.clone();
         let host = host.clone();
-        let auth = auth();
-        async move { manager.connect(&host, auth).await }
+        let target_auth = auth();
+        let jump_credentials = auth();
+        async move {
+            manager
+                .connect_with_jump_auth(&host, target_auth, Some(jump_credentials))
+                .await
+        }
     });
     // Two host keys: the bastion and the target (through the tunnel).
     trust_all_pending(&host_key, 2).await;
@@ -169,8 +174,13 @@ async fn jump_host_key_change_is_hard_failure() {
     let outcome_task = tokio::spawn({
         let manager = manager.clone();
         let host = host.clone();
-        let auth = auth();
-        async move { manager.connect(&host, auth).await }
+        let target_auth = auth();
+        let jump_credentials = auth();
+        async move {
+            manager
+                .connect_with_jump_auth(&host, target_auth, Some(jump_credentials))
+                .await
+        }
     });
     trust_all_pending(&host_key, 2).await;
     outcome_task
@@ -199,8 +209,13 @@ async fn jump_host_key_change_is_hard_failure() {
     let outcome_task = tokio::spawn({
         let manager = manager.clone();
         let host = host.clone();
-        let auth = auth();
-        async move { manager.connect(&host, auth).await }
+        let target_auth = auth();
+        let jump_credentials = auth();
+        async move {
+            manager
+                .connect_with_jump_auth(&host, target_auth, Some(jump_credentials))
+                .await
+        }
     });
     // Only the target key is pending; the bastion key mismatch must be a
     // hard failure (no fallback, no silent acceptance).
@@ -224,5 +239,30 @@ async fn jump_host_key_change_is_hard_failure() {
     assert!(error.contains("host key changed"), "got: {error}");
 
     new_key.shutdown().await;
+    target.shutdown().await;
+}
+
+/// The legacy `connect()` entry point carries no jump credential model. It must
+/// refuse such a configuration instead of sending the target host's credentials
+/// to a third-party bastion, and it must refuse before contacting the bastion.
+#[tokio::test]
+async fn jump_without_its_own_credentials_is_refused() {
+    let (bastion, target) = start_topology().await;
+    let host = host_with_jump(bastion.addr().port(), target.addr().port());
+    let host_key = broker();
+    let resolver = CandidateResolver::new(Vec::new(), ResolverPolicy::default());
+    let manager = SessionManager::new(Arc::clone(&host_key), resolver, 512);
+
+    let error = match manager.connect(&host, auth()).await {
+        Ok(_) => unreachable!("a bastion without its own credentials must not connect"),
+        Err(error) => error,
+    };
+    assert!(error.contains("own credentials"), "got: {error}");
+    assert!(
+        host_key.drain_requests().is_empty(),
+        "the bastion must not be contacted when its credentials were never supplied"
+    );
+
+    bastion.shutdown().await;
     target.shutdown().await;
 }

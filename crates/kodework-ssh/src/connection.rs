@@ -102,6 +102,16 @@ pub struct ConnectionOptions {
     pub auth: Vec<AuthMethod>,
     pub host_key: Arc<HostKeyBroker>,
     pub connect_timeout: Duration,
+    /// Budget for the phases that can wait on a *person*: the key exchange
+    /// (which runs the host-key decision dialog inside `connect_stream`) and
+    /// authentication (which can raise a keyboard-interactive prompt). `None`
+    /// keeps the previous behaviour of reusing `connect_timeout`.
+    ///
+    /// This is separate from `connect_timeout` on purpose: `connect_timeout`
+    /// also bounds DNS and the TCP handshake, so raising it to cover a user
+    /// decision would make an unreachable host fail far more slowly. DNS and TCP
+    /// still use `connect_timeout`; only the interactive phases use this.
+    pub interactive_timeout: Option<Duration>,
     pub keepalive_interval: Option<Duration>,
     pub inactivity_timeout: Option<Duration>,
     pub event_buffer_size: usize,
@@ -132,6 +142,7 @@ impl ConnectionOptions {
             auth,
             host_key,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            interactive_timeout: None,
             keepalive_interval: Some(DEFAULT_KEEPALIVE_INTERVAL),
             inactivity_timeout: None,
             event_buffer_size: DEFAULT_EVENT_BUFFER,
@@ -139,6 +150,15 @@ impl ConnectionOptions {
             jump: None,
             proxy: None,
         }
+    }
+
+    /// Budget for the phases that can wait on a user (KEX with a host-key
+    /// decision, and authentication with a possible keyboard-interactive
+    /// prompt). Defaults to `connect_timeout` so existing callers keep their
+    /// timing; interactive surfaces raise it explicitly.
+    #[must_use]
+    pub fn interactive_budget(&self) -> Duration {
+        self.interactive_timeout.unwrap_or(self.connect_timeout)
     }
 }
 
@@ -272,16 +292,19 @@ impl SshConnection {
             }
             let stream = stream.ok_or(last_error)?;
             tokio::time::timeout(
-                options.connect_timeout,
+                options.interactive_budget(),
                 client::connect_stream(config, stream, handler),
             )
             .await
             .map_err(|_| SshError::Timeout)??
         };
 
-        tokio::time::timeout(options.connect_timeout, authenticate(&mut handle, &options))
-            .await
-            .map_err(|_| SshError::Timeout)??;
+        tokio::time::timeout(
+            options.interactive_budget(),
+            authenticate(&mut handle, &options),
+        )
+        .await
+        .map_err(|_| SshError::Timeout)??;
 
         Ok((
             SshConnection {
@@ -324,6 +347,14 @@ impl SshConnection {
         // Bastion pinning remains endpoint-scoped; approval belongs to target UI.
         jump_options.ui_owner_host_id = options.ui_owner_host_id;
         jump_options.connect_timeout = options.connect_timeout;
+        jump_options.interactive_timeout = options.interactive_timeout;
+        // The bastion hop must not silently run with different transport
+        // behaviour than the caller asked for. These three are user-observable
+        // (keepalive drops, idle timeouts and event backpressure), so they are
+        // inherited instead of falling back to ConnectionOptions defaults.
+        jump_options.keepalive_interval = options.keepalive_interval;
+        jump_options.inactivity_timeout = options.inactivity_timeout;
+        jump_options.event_buffer_size = options.event_buffer_size;
         let (jump_connection, mut jump_events) = Self::connect_direct(jump_options).await?;
 
         // The bastion transport has no terminal traffic; drain its event
@@ -358,14 +389,17 @@ impl SshConnection {
         )
         .with_ui_owner(options.ui_owner_host_id);
         let mut handle = tokio::time::timeout(
-            options.connect_timeout,
+            options.interactive_budget(),
             client::connect_stream(config, stream, handler),
         )
         .await
         .map_err(|_| SshError::Timeout)??;
-        tokio::time::timeout(options.connect_timeout, authenticate(&mut handle, &options))
-            .await
-            .map_err(|_| SshError::Timeout)??;
+        tokio::time::timeout(
+            options.interactive_budget(),
+            authenticate(&mut handle, &options),
+        )
+        .await
+        .map_err(|_| SshError::Timeout)??;
 
         Ok((
             SshConnection {
@@ -823,6 +857,13 @@ async fn authenticate(
     handle: &mut client::Handle<SshHandler>,
     options: &ConnectionOptions,
 ) -> Result<(), SshError> {
+    // `ConnectionOptions::auth` is documented as "tried in order until one
+    // succeeds", but a method-specific failure used to abort the whole list: an
+    // unreadable key file, a passphrase-locked key or an unavailable agent ended
+    // the attempt even when a later method would have worked. Transport failures
+    // still abort; a method-specific problem now falls through and is remembered
+    // so the caller still gets an actionable diagnosis when nothing succeeds.
+    let mut specific_error: Option<SshError> = None;
     for method in &options.auth {
         match method {
             AuthMethod::Password(password) => {
@@ -830,7 +871,20 @@ async fn authenticate(
                 // as authentication returns so the secret does not linger.
                 // The result is captured first: with `?` on the call the
                 // early return skipped the wipe on transport failures.
-                let mut password = String::from_utf8_lossy(password.as_slice()).into_owned();
+                // `from_utf8_lossy` used to replace invalid bytes with U+FFFD,
+                // which silently sends a different secret than the user typed and
+                // surfaces as a plain authentication failure. Report it instead.
+                let mut password = match std::str::from_utf8(password.as_slice()) {
+                    Ok(value) => value.to_owned(),
+                    Err(_) => {
+                        specific_error.get_or_insert_with(|| {
+                            SshError::InvalidConfiguration(
+                                "password is not valid UTF-8".to_string(),
+                            )
+                        });
+                        continue;
+                    }
+                };
                 let outcome = handle
                     .authenticate_password(&options.username, &password)
                     .await;
@@ -844,24 +898,42 @@ async fn authenticate(
                 key_path,
                 passphrase,
             } => {
-                let mut passphrase_str = passphrase
-                    .as_ref()
-                    .map(|value| String::from_utf8_lossy(value.as_slice()).into_owned());
+                // Same reasoning as the password above: a lossy conversion would
+                // hand the key loader a different passphrase than the user typed.
+                let mut passphrase_str = match passphrase.as_ref() {
+                    Some(value) => match std::str::from_utf8(value.as_slice()) {
+                        Ok(text) => Some(text.to_owned()),
+                        Err(_) => {
+                            specific_error.get_or_insert_with(|| {
+                                SshError::InvalidConfiguration(
+                                    "private-key passphrase is not valid UTF-8".to_string(),
+                                )
+                            });
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
                 let key_result = load_secret_key(key_path, passphrase_str.as_deref());
                 // Wipe on every path, including key-load failures: a wrong
-                // passphrase takes the error arm, which used to return first.
+                // passphrase takes the error arm.
                 let had_passphrase = passphrase_str.is_some();
                 if let Some(value) = passphrase_str.as_mut() {
                     value.zeroize();
                 }
                 let key = match key_result {
                     Ok(key) => key,
+                    // Only the user can supply a passphrase; no other method can
+                    // stand in for it, so this one still aborts immediately.
                     Err(russh::keys::Error::KeyIsEncrypted) if !had_passphrase => {
                         return Err(SshError::CredentialRequired(
                             "private-key passphrase".to_string(),
                         ));
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        specific_error.get_or_insert_with(|| error.into());
+                        continue;
+                    }
                 };
                 let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
                 let result = handle
@@ -875,8 +947,15 @@ async fn authenticate(
                 }
             }
             AuthMethod::SshAgent => {
-                if authenticate_with_windows_agent(handle, &options.username).await? {
-                    return Ok(());
+                // No running agent (or an agent with no identities) is a
+                // method-specific problem, not a transport failure: fall through
+                // to the next configured method instead of aborting.
+                match authenticate_with_windows_agent(handle, &options.username).await {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error) => {
+                        specific_error.get_or_insert(error);
+                    }
                 }
             }
             AuthMethod::KeyboardInteractive { broker } => {
@@ -923,7 +1002,7 @@ async fn authenticate(
             }
         }
     }
-    Err(SshError::AuthenticationFailed)
+    Err(specific_error.unwrap_or(SshError::AuthenticationFailed))
 }
 
 async fn authenticate_from_agent<S>(

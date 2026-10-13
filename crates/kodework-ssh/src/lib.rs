@@ -3,6 +3,7 @@
 //! Kodework SSH boundary: russh-backed connection, PTY, host-key policy and
 //! bounded event output. This crate is Tauri-independent and async.
 
+#![cfg_attr(not(test), deny(clippy::unreachable))]
 pub mod aggregator;
 pub mod connection;
 pub mod handler;

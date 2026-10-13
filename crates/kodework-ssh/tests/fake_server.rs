@@ -530,6 +530,62 @@ async fn auth_stall_is_bounded_by_connect_timeout() {
 }
 
 #[tokio::test]
+async fn interactive_budget_extends_the_prompt_phases_only() {
+    // The desktop app needs a longer allowance for the phases that wait on a
+    // person (host-key decision, keyboard-interactive prompt) while DNS/TCP must
+    // still fail fast. This proves the two budgets are independent: with a 1 s
+    // transport timeout and a 4 s interactive budget, a stalled *authentication*
+    // is bounded by the interactive budget, not by the transport timeout.
+    let options = FakeSshOptions {
+        auth_delay: Duration::from_secs(30),
+        ..FakeSshOptions::default()
+    };
+    let server = FakeSshServer::start(options)
+        .await
+        .unwrap_or_else(|error| unreachable!("fake server start: {error}"));
+    let broker = new_broker();
+    let port = server.addr().port();
+    let mut conn_options = options_for(port, PASSWORD, Arc::clone(&broker), 1);
+    conn_options.connect_timeout = Duration::from_secs(1);
+    conn_options.interactive_timeout = Some(Duration::from_secs(4));
+    assert_eq!(
+        conn_options.interactive_budget(),
+        Duration::from_secs(4),
+        "the interactive budget must win over the transport timeout"
+    );
+    let task = tokio::spawn(async move { SshConnection::connect(conn_options).await });
+
+    // Answer the host-key prompt immediately; only authentication is stalled.
+    for _ in 0..200 {
+        let requests = broker.drain_requests();
+        if !requests.is_empty() {
+            broker.answer(requests[0].request_id, HostKeyDecision::TrustOnce);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let started = tokio::time::Instant::now();
+    let result = task
+        .await
+        .unwrap_or_else(|error| unreachable!("join: {error}"));
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(result, Err(kodework_ssh::SshError::Timeout)),
+        "a stalled auth must still time out, got: {result:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2500),
+        "the interactive budget must actually be used, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "the interactive budget must still bound the attempt, took {elapsed:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn run_command_output_is_not_broadcast_to_terminal_events() {
     // run_command must consume its own exec channel; the output must not
     // leak into the terminal event stream (tmux list, herdr queries, and
