@@ -60,7 +60,7 @@ cargo test --locked --workspace --all-features
 
 Last observed result at the time of writing: **224 Rust tests passed, 0 failed**
 (47 test binaries), 52 frontend tests, fmt and clippy clean, all script suites
-green, six-job CI success.
+green, seven-job CI success. The `Real SSH server` job and the separate `Install acceptance` workflow are described in §7a and §7b.
 
 ## 2. Long-run reliability
 
@@ -167,6 +167,9 @@ reverted (mutation), so the suite bites rather than merely passing:
 | keyboard-interactive answers that cannot be delivered | delete either wipe → "an answer whose prompt is gone must be wiped" / "an answer with no waiting prompt must be wiped" |
 | renderer effect cleanup | delete a `cancelAnimationFrame` → "registers requestAnimationFrame without a matching dispose" |
 | shipped dependency graph | add a crate that is in the shipped graph → "FAIL tauri is in the x86_64-pc-windows-msvc graph" |
+| shipped-graph classifier | make a failed inspection read as 'absent' → two classifier tests fail |
+| proxy key-exchange budget | revert only the proxy branch to the transport timeout → "proxy key exchange was cut short by the transport timeout: 676.4434ms" |
+| panic scan coverage | plant `unreachable!` after a test module → the scan fails and reports the real line number (invisible before) |
 
 Other invariants added in the same style: dead i18n catalogue keys and catalogue
 parity, `danger_policy` (whitespace/case evasion, composition never Safe, the
@@ -174,6 +177,53 @@ observational set stays Safe), and a source scan for `unreachable!`/`todo!`/
 `unimplemented!` in production sources (the library crates also carry
 `#![cfg_attr(not(test), deny(clippy::unreachable))]`; `src-tauri` cannot, because
 `#[tauri::command]` expands to `unreachable!()`).
+
+## 7a. Real SSH server
+
+Everything above that exercises SSH uses the in-process fake server in
+`kodework-testkit`, which shares this workspace's crate versions and never leaves
+the process. The `Real SSH server` CI job starts an actual OpenSSH `sshd` on the
+runner and points `crates/kodework-ssh/tests/real_server.rs` at it:
+
+- a command round trip, including the exit status the server reports;
+- an SFTP cycle (create, write, read back byte for byte, list, delete) inside a
+  directory created for that run and removed by it, so the tests are safe to point
+  at a server someone cares about;
+- a PTY that is resized and then asked to report its size, asserting both the
+  shell's output and the resized dimensions from the event stream.
+
+The job proves the key authenticates with the OpenSSH client before the Rust tests
+run, so an sshd-side problem reports the server log instead of looking like a
+client failure. It is a standalone job, not part of the required aggregate yet: the
+infrastructure has to stay stable across runs before it can block merges.
+
+## 7b. Install acceptance on a disposable runner
+
+Section 6 records what the MSI databases say; this records what a machine does.
+`.github/workflows/install-acceptance.yml` runs
+`scripts/verify-install-upgrade.ps1` on a disposable Windows runner: install the
+previously published release, install the new package over it, assert the previous
+ProductCode is gone rather than side by side, assert the version and the
+executable, **start the installed application and wait for its window**, then
+uninstall and assert the machine is clean.
+
+Observed on the runner:
+
+```
+PASS  machine starts without a Kodework install            clean
+PASS  previous release installs and registers              0.2.3 {B5E10E4F-...}
+PASS  exactly one Kodework product is registered           0.2.4 {AB54C436-...}
+PASS  the previous version was removed, not left side by side previous={B5E10E4F-...}
+PASS  installed version matches the package                package=0.2.4 installed=0.2.4
+PASS  the installed executable is present                  C:\Program Files\Kodework Windows\kodework-tauri.exe
+PASS  the installed application starts                     window created
+PASS  uninstall removes 0.2.4                              msiexec /x exit 0
+PASS  no Kodework product remains
+```
+
+It is deliberately not run on the workstation used for the rest of this report,
+which already has an installation: the script refuses to start there rather than
+mutating it.
 
 ## 8. Native Windows observations
 
@@ -191,18 +241,13 @@ counterparts, using `scripts/measure-startup.ps1`:
   version binding are verified; the origin itself is an operational step.
 - **Authenticode**: requires a commercial certificate; every rehearsal passes
   `-RequireAuthenticode:$false` deliberately.
-- **Real remote hosts**: the SSH/Tailscale/jump-host/SFTP evidence comes from the
-  in-repo fake SSH server (a real russh server over real TCP) and the soak matrix.
-  No real Linux host, real Tailscale network or third-party SFTP server has been
-  exercised, which is what a release acceptance run still needs.
-- **The in-app update check button**: driving it requires UI automation, which was
-  deliberately not performed; the client-side logic it calls is covered by §5
-  (source reading plus an equivalent end-to-end verification).
-- **Linux/macOS desktop bundles**: not built or shipped; the portable CI jobs
-  cover the core crates only.
-- **The `glib` advisory**: still open upstream (gtk 0.18 requires glib ^0.18, the
-  fix is 0.20.0, and only Tauri moving to gtk-rs 0.20 can reach it). It is not in
-  the shipped artifact, which §4 enforces mechanically.
+- **Real remote hosts**: SSH against a real server is covered (§7a); what remains
+  uncovered is a real Tailscale network, a real jump host, a third-party SFTP
+  server and a real Linux host. The soak matrix and the fake-server tests share
+  this workspace's crate versions, so they cannot stand in for those.
+- **A real install/upgrade on a workstation**: not performed, because a Kodework
+  installation already exists on the test machine and mutating it was out of
+  scope. §7b is the equivalent evidence from a disposable runner.
 
 ## 10. What each guard actually guarantees
 
@@ -234,12 +279,19 @@ it proves is a liability:
 ## 11. Process notes
 
 - The first 17 commits were pushed **directly to `main`**, not through pull
-  requests: `enforce_admins` is `false`, so an owner push bypasses the required
+  requests: `enforce_admins` was `false`, so an owner push bypassed the required
   checks. They were validated by CI on `main` afterwards, but there is no review
-  trail. The follow-up work (the proxy budget, the OTP scrubbing paths, the
-  fail-closed dependency check, the install acceptance on a runner) was done on
-  branches with pull requests whose CI had to pass first, which is the process that
-  should have been used throughout.
+  trail. Everything after that went through pull requests (#86-#90) whose required
+  checks had to pass first, and `enforce_admins` has since been enabled, so a
+  direct push to `main` is refused rather than merely discouraged.
+- Two independent reviews found real problems in this work and in this report, and
+  both were acted on rather than argued with: the external review summarised in §0
+  (four narrowed claims) and GitHub Copilot's review of the pull requests (four
+  findings: the acceptance trigger omitted build inputs, `-SkipLaunchCheck`
+  guaranteed a failed run, the SFTP test was destructive on a user-supplied server,
+  and the PTY test did not assert what it was named for). Each finding was fixed,
+  and the history records why each change was made.
+
 - The harness scripts used for the one-off checks in §2, §3, §5 and §6 live outside
   the repository as development aids; the method and the exact commands are
   described above so they can be re-created. The ones meant to be re-run by
