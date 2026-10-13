@@ -15,10 +15,20 @@ on:
         default: v0.2.3
   push:
     branches: [main]
-    # Only when something that can affect the installer or the executable moves.
+    # Every input that can change the package, not just the code that installs it:
+    # the root manifests and lockfile pin what is compiled, the frontend is built
+    # into the bundle by beforeBuildCommand, and the sidecar script produces the
+    # bundled Tailscale binaries.
     paths:
       - 'src-tauri/**'
       - 'crates/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'scripts/prepare-tailscale.ps1'
       - 'scripts/verify-install-upgrade.ps1'
       - 'scripts/build-release.ps1'
       - '.github/workflows/install-acceptance.yml'

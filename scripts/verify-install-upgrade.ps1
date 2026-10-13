@@ -116,8 +116,13 @@ try {
   Check 'the installed executable is present' ($null -ne $executable) $(if ($executable) { $executable.FullName } else { "not found under $($installed.Location)" })
 
   # ---- 5. the installed application starts ------------------------------
-  if ($SkipLaunchCheck -or -not $executable) {
-    Check 'the installed application starts' $false 'skipped (no executable, or -SkipLaunchCheck)'
+  if ($SkipLaunchCheck) {
+    # Skipping is a deliberate choice, not a result. Recording it as a failure made
+    # the documented switch guarantee a failed run; a missing executable still
+    # fails the check above, so this cannot hide a broken installation.
+    Check 'the installed application starts' $true 'skipped by request (-SkipLaunchCheck)'
+  } elseif (-not $executable) {
+    Check 'the installed application starts' $false 'no installed executable to launch'
   } else {
     $process = Start-Process -FilePath $executable.FullName -PassThru
     $deadline = (Get-Date).AddSeconds($LaunchTimeoutSeconds)
