@@ -1,0 +1,15 @@
+# Normalize line endings so the same commit produces the same working tree on
+# Windows, Linux and macOS. Without this a Windows checkout (core.autocrlf=true)
+# can leave files that a build tool rewrote reported as modified while their
+# content is byte-identical, which hides real changes in review noise.
+* text=auto
+
+# Windows-only scripting formats keep CRLF, which is what their interpreters and
+# editors expect.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf

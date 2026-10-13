@@ -26,6 +26,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# Local agent/editor settings that are never shared
+.claude/
+
 # Rust build output
 /target/
 /src-tauri/target/
