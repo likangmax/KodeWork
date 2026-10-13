@@ -51,7 +51,14 @@ function present(result) {
 let failures = 0;
 for (const { crate, advisory } of LINUX_ONLY) {
   const shipped = tree(SHIPPED_TARGET, crate);
-  if (present(shipped)) {
+  // Failure to inspect the Windows graph is not evidence of absence.
+  // In particular, a target-specific Cargo resolution failure must block
+  // release, even when Linux's negative control happens to pass.
+  if (shipped.failed) {
+    failures += 1;
+    console.log(`FAIL cargo tree could not inspect the ${SHIPPED_TARGET} graph for ${crate}`);
+    console.log(`     ${shipped.output.split('\\n').slice(0, 5).join('\\n     ')}`);
+  } else if (present(shipped)) {
     failures += 1;
     console.log(`FAIL ${crate} is in the ${SHIPPED_TARGET} graph (${advisory})`);
     console.log(`     ${shipped.output.split('\n').slice(0, 5).join('\n     ')}`);
