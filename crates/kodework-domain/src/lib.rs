@@ -572,6 +572,19 @@ pub fn connection_transition(from: ConnectionState, to: ConnectionState) -> bool
             ConnectionState::Disconnected | ConnectionState::Failed,
             ConnectionState::ResolvingAddress
         ) | (
+            // A retry after the user supplied credentials starts the address
+            // resolution again, and an explicit reconnect while already Ready
+            // replaces the live transport. Without these two the desktop app
+            // failed with "invalid connection transition" exactly when the
+            // credential prompt told the user to reconnect.
+            ConnectionState::WaitingForCredential | ConnectionState::Ready,
+            ConnectionState::ResolvingAddress
+        ) | (
+            // A failed attempt that needs new input waits for the user instead
+            // of staying in a terminal Failed state.
+            ConnectionState::Failed,
+            ConnectionState::WaitingForCredential
+        ) | (
             ConnectionState::ResolvingAddress | ConnectionState::Reconnecting,
             ConnectionState::Connecting | ConnectionState::ResolvingAddress
         ) | (
@@ -756,6 +769,39 @@ mod tests {
         assert!(connection_transition(
             ConnectionState::Ready,
             ConnectionState::Reconnecting
+        ));
+    }
+
+    /// The desktop app tells the user to re-enter credentials and reconnect, so
+    /// that exact sequence has to be a legal transition. It previously failed
+    /// with an internal "invalid connection transition" error.
+    #[test]
+    fn connection_state_machine_allows_the_documented_recovery_paths() {
+        assert!(connection_transition(
+            ConnectionState::WaitingForCredential,
+            ConnectionState::ResolvingAddress
+        ));
+        assert!(connection_transition(
+            ConnectionState::Ready,
+            ConnectionState::ResolvingAddress
+        ));
+        assert!(connection_transition(
+            ConnectionState::Failed,
+            ConnectionState::WaitingForCredential
+        ));
+        // Skips that must stay rejected: an unattempted host cannot jump
+        // straight into an authenticated state.
+        assert!(!connection_transition(
+            ConnectionState::Disconnected,
+            ConnectionState::Ready
+        ));
+        assert!(!connection_transition(
+            ConnectionState::Disconnected,
+            ConnectionState::Authenticating
+        ));
+        assert!(!connection_transition(
+            ConnectionState::ResolvingAddress,
+            ConnectionState::Ready
         ));
     }
 

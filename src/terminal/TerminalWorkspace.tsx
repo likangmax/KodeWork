@@ -63,20 +63,20 @@ export const TerminalWorkspace = memo(function TerminalWorkspace({
               <div className="pane-bar">
                 <span className="pane-title">{t('remoteTerminal')} {index + 1} · PTY {pane.id}</span>
                 <span className="pane-actions">
-                  <button className="mini pane-paste" onClick={() => requestPaste(paneKey)} title={t('pasteAssets')}><Icon name="clipboard" size={10} />{language === 'zh-CN' ? '粘贴' : 'Paste'}</button>
+                  <button className="mini pane-paste" onClick={() => requestPaste(paneKey)} title={t('pasteAssets')}><Icon name="clipboard" size={10} />{t('pastePlain')}</button>
                   <button className="icon-btn" onClick={() => onClosePane(pane.id)} title={t('closeTerminal')} aria-label={`${t('closeTerminal')} ${index + 1}`}><Icon name="close" size={10} /></button>
                 </span>
               </div>
-              <Suspense fallback={<div className="terminal-loading">{language === 'zh-CN' ? '正在加载终端渲染器…' : 'Loading terminal renderer…'}</div>}>
-                <TerminalPane hostId={selected.id} paneId={pane.id} channelId={pane.channel} pasteRequest={pasteRequests[paneKey] ?? 0} connected onPasteStatus={onPasteStatus} />
+              <Suspense fallback={<div className="terminal-loading">{t('loadingTerminalRenderer')}</div>}>
+                <TerminalPane hostId={selected.id} paneId={pane.id} channelId={pane.channel} pasteRequest={pasteRequests[paneKey] ?? 0} connected language={language} onPasteStatus={onPasteStatus} />
               </Suspense>
             </div>
           })}
         </div>
       ) : <div className="terminal-empty">
         <div className="empty-symbol"><Icon name="terminal" size={40} /></div>
-        <h2>{phase === 'connecting' ? (language === 'zh-CN' ? '正在建立安全连接…' : 'Establishing a secure connection…') : phase === 'ready' ? (language === 'zh-CN' ? '没有打开的远程终端' : 'No remote terminal open') : (language === 'zh-CN' ? '尚未连接' : 'Not connected')}</h2>
-        <p>{phase === 'ready' ? (language === 'zh-CN' ? '使用上方“新建终端”打开一个独立 PTY。' : 'Use “New terminal” above to open an independent PTY.') : selected ? (language === 'zh-CN' ? '连接建立后，这里将显示远程 PTY。首次连接会要求确认主机密钥指纹。' : 'Remote PTY sessions appear here after connection. The first connection requires host-key fingerprint confirmation.') : (language === 'zh-CN' ? '添加工作站后，这里将成为远程终端。' : 'Add a workstation to use this remote terminal.')}</p>
+        <h2>{phase === 'connecting' ? t('establishingConnection') : phase === 'ready' ? t('noRemoteTerminal') : t('notConnected')}</h2>
+        <p>{phase === 'ready' ? t('remoteTerminalReadyHint') : selected ? t('remoteTerminalConnectingHint') : t('remoteTerminalEmptyHint')}</p>
       </div>}
     </div>
   </section>

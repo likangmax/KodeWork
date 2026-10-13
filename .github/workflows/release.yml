@@ -111,8 +111,13 @@ jobs:
           # Tauri .sig contains a base64-encoded Minisign signature, not plaintext.
           # Verify signature with the embedded public key and authenticated app version.
           $expectedVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          & node scripts/verify-updater-signature.mjs $msi.FullName $sig.FullName $expectedVersion
+          $verification = & node scripts/verify-updater-signature.mjs $msi.FullName $sig.FullName $expectedVersion 2>&1
           if ($LASTEXITCODE -ne 0) { throw 'Invalid updater MSI signature or version; refusing publication.' }
+          # Exit status alone is not proof: require the verifier's own confirmation
+          # so a verifier that silently does nothing cannot pass this gate.
+          if (($verification -join "`n") -notmatch 'Updater artifact signature and authenticated version verified\.') {
+            throw 'Updater verification exited without confirming a verified signature; refusing publication.'
+          }
           $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $staging = Join-Path $env:RUNNER_TEMP 'kodework-release-assets'
           New-Item -ItemType Directory -Path $staging -Force | Out-Null

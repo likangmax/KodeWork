@@ -26,12 +26,18 @@ dist-ssr
 *.sln
 *.sw?
 
+# Local agent/editor settings that are never shared
+.claude/
+
 # Rust build output
 /target/
 /src-tauri/target/
 
 # Read-only upstream research clones (never built, never committed)
 /references/
+
+# Locally generated updater channel (MSI + latest.json before upload)
+/release-channel/
 
 # Tauri generated schemas
 /src-tauri/gen/

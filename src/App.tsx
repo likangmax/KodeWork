@@ -102,6 +102,13 @@ export default function App() {
   const [hostKeyRequest, setHostKeyRequest] = useState<HostKeyRequest | null>(null)
   const [keyboardInteractiveRequest, setKeyboardInteractiveRequest] = useState<KeyboardInteractiveRequest | null>(null)
   const keyboardInteractiveInputs = useRef<HTMLInputElement[]>([])
+  /** Dismiss the server-auth prompt and drop the detached DOM nodes that held
+   *  typed passwords/one-time codes. Clearing only the request state would
+   *  leave those values readable through the ref after the dialog is gone. */
+  const dismissKeyboardInteractive = () => {
+    keyboardInteractiveInputs.current = []
+    setKeyboardInteractiveRequest(null)
+  }
   const [herdrVersion, setHerdrVersion] = useState<string | null>(null)
   const [herdrMissing, setHerdrMissing] = useState(false)
   const [herdrError, setHerdrError] = useState<string | null>(null)
@@ -161,7 +168,9 @@ export default function App() {
   panesRef.current = panes
 
   // Stale requests from A are invalid even when the user switches A -> B -> A.
-  const chooseHostId = (id: string | null) => {
+  // Stable identity: every input it reads is a ref, the scope object or a state
+  // setter, so the load effect below can depend on it without re-running.
+  const chooseHostId = useCallback((id: string | null) => {
     if (selectedIdRef.current !== id) {
       // Cancel an in-flight browser recognition before it can type into B.
       recognitionRef.current?.abort?.()
@@ -173,7 +182,7 @@ export default function App() {
     }
     selectedIdRef.current = id
     setSelectedId(id)
-  }
+  }, [hostScope])
 
   useEffect(() => () => {
     if (messageTimer.current !== null) window.clearTimeout(messageTimer.current)
@@ -214,7 +223,7 @@ export default function App() {
     }
     void load()
     return () => { active = false }
-  }, [setMessage])
+  }, [setMessage, chooseHostId])
 
   // Warm the selected embedded Tailscale path once per host selection.  The
   // previous implementation also warmed the first host during initial load
@@ -320,7 +329,7 @@ export default function App() {
           }
         } catch (error) {
           const detail = String(error)
-          const definitelyMissing = /not installed|command not found|not recognized|找不到/i.test(detail)
+          const definitelyMissing = /not installed|command not found|not recognized|找不到/i.test(detail) // i18n-exempt: matches remote tool output in either language, never displayed
           herdrMissingPolls.current = definitelyMissing ? herdrMissingPolls.current + 1 : 0
           setHerdrVersion(null)
           setHerdrMissing(definitelyMissing && herdrMissingPolls.current >= 3)
@@ -471,7 +480,7 @@ export default function App() {
     setPromptPassword(false)
     setRememberPassword(false)
     setHostKeyRequest(null)
-    setKeyboardInteractiveRequest(null)
+    dismissKeyboardInteractive()
     if (passwordInputRef.current) passwordInputRef.current.value = ''
     setPhase('connecting')
     setMessage(t('connectingTo', host.label))
@@ -512,9 +521,9 @@ export default function App() {
       const answered = await answerHostKey(selectedId, hostKeyRequest.request_id, decision)
       if (!isCurrent()) return
       setHostKeyRequest(null)
-      if (!answered) setMessage(language === 'zh-CN' ? '主机密钥确认已过期，请重新连接。' : 'Host-key approval expired; reconnect and retry.')
+      if (!answered) setMessage(t('hostKeyApprovalExpired'))
     } catch (error) {
-      if (isCurrent()) setMessage(language === 'zh-CN' ? `主机密钥确认失败：${String(error)}` : `Host-key approval failed: ${String(error)}`)
+      if (isCurrent()) setMessage(t('hostKeyApprovalFailed', String(error)))
     }
   }
   const onKeyboardInteractiveAnswer = async () => {
@@ -523,7 +532,7 @@ export default function App() {
     const responses = keyboardInteractiveRequest.prompts.map((_, index) => keyboardInteractiveInputs.current[index]?.value ?? '')
     keyboardInteractiveInputs.current.forEach((input) => { input.value = '' })
     const requestId = keyboardInteractiveRequest.request_id
-    setKeyboardInteractiveRequest(null)
+    dismissKeyboardInteractive()
     try {
       const answered = await answerKeyboardInteractive(selectedId, requestId, responses)
       if (isCurrent() && !answered) setMessage(t('keyboardInteractiveExpired'))
@@ -538,16 +547,21 @@ export default function App() {
       return
     }
     if (isDesktop()) {
-      try {
-        const editingActiveHost = selectedId === draft.id && (phase === 'ready' || phase === 'connecting')
-        if (editingActiveHost) {
+      const editingActiveHost = selectedId === draft.id && (phase === 'ready' || phase === 'connecting')
+      const previousHost = selected
+      const previousPhase = phase
+      if (editingActiveHost) {
+        // Editing the live host replaces its credentials and route, so the old
+        // transport has to be gone before the new configuration is stored.
+        // Report a failed disconnect as a disconnect problem, not a save problem.
+        try {
           await disconnectGate.enqueue(draft.id, () => disconnectHost(draft.id))
-          setPanes([])
-          setTransfers({})
-          setFiles([])
-          setPhase('idle')
-          setStateLabel(t('stateDisconnected'))
+        } catch (error) {
+          setMessage(t('disconnectFailed', draft.label, String(error)))
+          return
         }
+      }
+      try {
         await saveHost(draft)
         let storedDraft = draft
         const privateKeyPassphrase = privateKeyPassphraseRef.current?.value ?? ''
@@ -560,7 +574,8 @@ export default function App() {
           const storedHost = await saveTailscaleAuthKey(draft.id, tailscaleKey)
           if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
           setHosts((items) => [...items.filter((h) => h.id !== storedHost.id), storedHost].sort((a, b) => a.label.localeCompare(b.label)))
-          chooseHostId(storedHost.id)
+          if (!editingActiveHost) disconnectLiveHost(previousHost, previousPhase)
+          adoptHostSelection(storedHost)
           setDraft(null)
           setMessage(editingActiveHost
             ? t('hostAndTailscaleSavedDisconnected')
@@ -568,7 +583,12 @@ export default function App() {
           return
         }
         setHosts((items) => [...items.filter((h) => h.id !== storedDraft.id), storedDraft].sort((a, b) => a.label.localeCompare(b.label)))
-        chooseHostId(storedDraft.id)
+        // Saving a different (usually brand-new) workstation also changes the
+        // selection, so it must run the same teardown as a sidebar click.
+        // Skipping it left the header reporting the previous host as connected
+        // while its panes were re-pointed at a host that has no session.
+        if (!editingActiveHost) disconnectLiveHost(previousHost, previousPhase)
+        adoptHostSelection(storedDraft)
         setDraft(null)
         setMessage(editingActiveHost
           ? t('hostSavedDisconnected')
@@ -582,7 +602,7 @@ export default function App() {
     if (tailscaleKeyInputRef.current) tailscaleKeyInputRef.current.value = ''
     if (privateKeyPassphraseRef.current) privateKeyPassphraseRef.current.value = ''
     setHosts((items) => [...items.filter((h) => h.id !== draft.id), draft].sort((a, b) => a.label.localeCompare(b.label)))
-    chooseHostId(draft.id)
+    adoptHostSelection(draft)
     setDraft(null)
     setMessage(isDesktop()
       ? t('hostSavedReconnectHint')
@@ -601,16 +621,11 @@ export default function App() {
     setMessage(isDesktop() ? t('workstationDeleted') : t('previewRemovedFromPage'))
   }
 
-  /** Switching hosts must tear down the previous session's UI state
-   *  and its backend connection; otherwise the new host reuses stale
-   *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
-  const onSelectHost = (host: Host) => {
-    if (selectedId === host.id) return
-    if (selectedId && isDesktop() && (phase === 'ready' || phase === 'connecting')) {
-      // Register the outgoing operation synchronously before the new host is
-      // selected, even though native disconnection is asynchronous.
-      void disconnectGate.enqueue(selectedId, () => disconnectHost(selectedId)).catch(() => {})
-    }
+  /** Adopt a host as the selected workspace. Every per-host surface is reset
+   *  here so a selection can never inherit the previous host's panes,
+   *  transfers, tunnels, projects, prompts or credential inputs. Callers that
+   *  take over from a live session must disconnect it first. */
+  const adoptHostSelection = (host: Host) => {
     chooseHostId(host.id)
     setFilesPath(host.default_remote_path || '/')
     setPhase('idle')
@@ -639,10 +654,32 @@ export default function App() {
     herdrMissingPolls.current = 0
     setNewTmuxName('')
     setHostKeyRequest(null)
-    setKeyboardInteractiveRequest(null)
+    dismissKeyboardInteractive()
     if (passwordInputRef.current) passwordInputRef.current.value = ''
     setPromptPassword(false)
     setMessage('')
+  }
+
+  /** A previous host that is still live must be told to disconnect before the
+   *  renderer stops tracking it, otherwise its session keeps running with no
+   *  owner. A failure is surfaced instead of swallowed: the user has to know
+   *  the old workstation may still hold an authenticated session. */
+  const disconnectLiveHost = (host: Host | null, currentPhase: ConnectPhase) => {
+    if (!host || !isDesktop() || (currentPhase !== 'ready' && currentPhase !== 'connecting')) return
+    // Register the outgoing operation synchronously before the new host is
+    // selected, even though native disconnection is asynchronous.
+    void disconnectGate.enqueue(host.id, () => disconnectHost(host.id)).catch((error) => {
+      setMessage(t('disconnectFailed', host.label, String(error)))
+    })
+  }
+
+  /** Switching hosts must tear down the previous session's UI state
+   *  and its backend connection; otherwise the new host reuses stale
+   *  pane ids, keeps stale transfers/tunnels and leaks the old session. */
+  const onSelectHost = (host: Host) => {
+    if (selectedId === host.id) return
+    if (selected) disconnectLiveHost(selected, phase)
+    adoptHostSelection(host)
   }
 
   /** First live pane id, or null when no terminal is open. Features that
@@ -661,12 +698,12 @@ export default function App() {
     try {
       await disconnectGate.enqueue(selected.id, () => disconnectHost(selected.id))
     } catch (error) {
-      if (isCurrent()) setMessage(language === 'zh-CN' ? `断开连接失败：${String(error)}` : `Disconnect failed: ${String(error)}`)
+      if (isCurrent()) setMessage(t('disconnectFailed', selected.label, String(error)))
       return
     }
     if (!isCurrent()) return
     setHostKeyRequest(null)
-    setKeyboardInteractiveRequest(null)
+    dismissKeyboardInteractive()
     setBridgeInfo(null)
     setTunnels([])
     setPreviewUrl(null)
@@ -1273,7 +1310,7 @@ export default function App() {
             <section className="preview-card">
               <div className="preview-head">
                 <Icon name="globe" size={12} />
-                <span>Web Preview</span>
+                <span>{t('webPreview')}</span>
                 {previewUrl && <span>{previewUrl}</span>}
                 {listeningTunnels.length > 0 && (
                   <select
@@ -1386,7 +1423,7 @@ export default function App() {
             }
           }}>
             <div className="modal-head">
-              <div><div className="eyebrow">AUTHENTICATION</div><h2 id="password-dialog-title">{t('connectTo', selected.label)}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowAuthentication')}</div><h2 id="password-dialog-title">{t('connectTo', selected.label)}</h2></div>
               <button type="button" className="ghost" onClick={() => {
                 if (passwordInputRef.current) passwordInputRef.current.value = ''
                 setPromptPassword(false)
@@ -1412,7 +1449,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PROJECT</div><h2 id="project-dialog-title">{t('editProject')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowProject')}</div><h2 id="project-dialog-title">{t('editProject')}</h2></div>
               <button type="button" className="ghost" onClick={() => setProjectDraft(null)}>{t('close')}</button>
             </div>
             <label>{t('nameLabel')}
@@ -1433,7 +1470,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="action-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">ACTION</div><h2 id="action-dialog-title">{t('editAction')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowAction')}</div><h2 id="action-dialog-title">{t('editAction')}</h2></div>
               <button type="button" className="ghost" onClick={() => setActionDraft(null)}>{t('close')}</button>
             </div>
             <label>{t('nameLabel')}
@@ -1488,7 +1525,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-action-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">CONFIRM</div><h2 id="confirm-action-dialog-title">{t('confirmRunAction')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowConfirm')}</div><h2 id="confirm-action-dialog-title">{t('confirmRunAction')}</h2></div>
             </div>
             <p className="modal-note">{t('actionWillRun', confirmAction.name, confirmAction.danger_level)}</p>
             <code className="fingerprint">{confirmAction.command}</code>
@@ -1504,7 +1541,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="snippets-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">SNIPPETS</div><h2 id="snippets-dialog-title">{t('commandSnippets')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowSnippets')}</div><h2 id="snippets-dialog-title">{t('commandSnippets')}</h2></div>
               <button type="button" className="ghost" onClick={() => setSnippetsOpen(false)}>{t('close')}</button>
             </div>
             {snippetDraft ? (
@@ -1550,7 +1587,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tunnels-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">PORT FORWARDING</div><h2 id="tunnels-dialog-title">{t('sshTunnels')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowPortForwarding')}</div><h2 id="tunnels-dialog-title">{t('sshTunnels')}</h2></div>
               <button type="button" className="ghost" onClick={() => setTunnelPanelOpen(false)}>{t('close')}</button>
             </div>
             <div className="tunnel-form">
@@ -1592,7 +1629,7 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           onAutoStart={(enabled) => { setAutoStart(enabled); void setAutostart(enabled).then(setAutoStart).catch((error) => setMessage(t('autostartFailed', String(error)))) }}
           onCheck={() => { setUpdateBusy(true); void checkForUpdates().then(setUpdateCheck).catch((error) => setUpdateCheck({ status: 'error', error: String(error) })).finally(() => setUpdateBusy(false)) }}
-          onInstall={() => { setUpdateBusy(true); void installUpdate().then((result) => { if (result.ok) { setUpdateCheck({ status: 'up-to-date' }); setMessage(t('updateInstalled')) } else { setUpdateCheck({ status: 'error', error: result.error ?? t('installFailed') }) } }).finally(() => setUpdateBusy(false)) }}
+          onInstall={() => { setUpdateBusy(true); void installUpdate().then((result) => { if (result.ok) { setUpdateCheck({ status: 'up-to-date' }); setMessage(t('updateInstalled')) } else { setUpdateCheck({ status: 'error', error: result.error === 'desktop-only' ? t('updateDesktopOnly') : (result.error ?? t('installFailed')) }) } }).finally(() => setUpdateBusy(false)) }}
         />
       )}
 
@@ -1603,7 +1640,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="keyboard-interactive-dialog-title">
           <form className="host-modal" onSubmit={(event) => { event.preventDefault(); void onKeyboardInteractiveAnswer() }}>
             <div className="modal-head">
-              <div><div className="eyebrow">KEYBOARD-INTERACTIVE</div><h2 id="keyboard-interactive-dialog-title">{keyboardInteractiveRequest.name || t('serverAuth')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowKeyboardInteractive')}</div><h2 id="keyboard-interactive-dialog-title">{keyboardInteractiveRequest.name || t('serverAuth')}</h2></div>
             </div>
             {keyboardInteractiveRequest.instructions && <p className="modal-note">{keyboardInteractiveRequest.instructions}</p>}
             {keyboardInteractiveRequest.prompts.map((prompt, index) => (
@@ -1629,7 +1666,7 @@ export default function App() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="host-key-dialog-title">
           <div className="host-modal">
             <div className="modal-head">
-              <div><div className="eyebrow">HOST KEY VERIFICATION</div><h2 id="host-key-dialog-title">{t('confirmHostKey')}</h2></div>
+              <div><div className="eyebrow">{t('eyebrowHostKeyVerification')}</div><h2 id="host-key-dialog-title">{t('confirmHostKey')}</h2></div>
             </div>
             <p className="fingerprint-label">{t('hostKeyFingerprint', hostKeyRequest.info.hostname, String(hostKeyRequest.info.port))}</p>
             <code className="fingerprint">{hostKeyRequest.info.fingerprint}</code>

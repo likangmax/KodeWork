@@ -1,16 +1,23 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal } from 'xterm'
-import { memo, useEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useRef } from 'react'
 import { clipboardCopyText, localTerminalResize, localTerminalWrite, subscribeLocalTerminal } from '../api'
+import { translate, type Language, type TranslationKey } from '../i18n'
 import { THEME_CHANGE_EVENT, terminalTheme } from '../theme'
 
 const encoder = new TextEncoder()
 
-export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, onStatus }: { id: number; active: boolean; onStatus: (message: string) => void }) {
+export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, language, onStatus }: { id: number; active: boolean; language: Language; onStatus: (message: string) => void }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  // Stable translator for the one-shot terminal effect below: identity must not
+  // change with the language, or the terminal would be rebuilt (losing its
+  // scrollback). The ref is refreshed by an effect, never during render.
+  const languageRef = useRef(language)
+  useEffect(() => { languageRef.current = language }, [language])
+  const t = useCallback((key: TranslationKey, ...args: string[]) => translate(languageRef.current, key, ...args), [])
 
   useEffect(() => {
     const container = containerRef.current
@@ -60,9 +67,10 @@ export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, o
         pending.push(new Uint8Array(event.bytes))
         if (!flushQueued) { flushQueued = true; requestAnimationFrame(flush) }
       } else if (event.kind === 'exited') {
-        term.write(`\r\n[进程已退出，代码 ${event.code}]\r\n`)
+        // `code` is null when the child could not be reaped; never claim 0.
+        term.write(`\r\n${event.code === null ? t('localProcessExitedUnknown') : t('localProcessExited', String(event.code))}\r\n`)
       } else {
-        term.write(`\r\n[本地终端错误：${event.message}]\r\n`)
+        term.write(`\r\n${t('localTerminalError', event.message)}\r\n`)
       }
     })
     let selectionTimer: number | null = null
@@ -70,7 +78,7 @@ export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, o
       if (selectionTimer !== null) window.clearTimeout(selectionTimer)
       selectionTimer = window.setTimeout(() => {
         const text = term.getSelection()
-        if (text) void clipboardCopyText(text).then(() => onStatus('已复制本机终端选区。')).catch((error) => onStatus(`复制失败：${String(error)}`))
+        if (text) void clipboardCopyText(text).then(() => onStatus(t('localSelectionCopied'))).catch((error) => onStatus(t('copyFailed', String(error))))
       }, 120)
     })
     const onTheme = () => { term.options.theme = terminalTheme(); if (term.rows > 0) term.refresh(0, term.rows - 1) }
@@ -82,7 +90,7 @@ export const LocalTerminalPane = memo(function LocalTerminalPane({ id, active, o
       if (selectionTimer !== null) window.clearTimeout(selectionTimer)
       term.dispose(); termRef.current = null; fitRef.current = null
     }
-  }, [id, onStatus])
+  }, [id, onStatus, t])
 
   useEffect(() => {
     if (!active) return

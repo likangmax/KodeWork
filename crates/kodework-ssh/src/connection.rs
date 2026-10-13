@@ -828,11 +828,14 @@ async fn authenticate(
             AuthMethod::Password(password) => {
                 // The lossy copy is a plain heap string; zero it as soon
                 // as authentication returns so the secret does not linger.
+                // The result is captured first: with `?` on the call the
+                // early return skipped the wipe on transport failures.
                 let mut password = String::from_utf8_lossy(password.as_slice()).into_owned();
-                let result = handle
+                let outcome = handle
                     .authenticate_password(&options.username, &password)
-                    .await?;
+                    .await;
                 password.zeroize();
+                let result = outcome?;
                 if result.success() {
                     return Ok(());
                 }
@@ -844,18 +847,22 @@ async fn authenticate(
                 let mut passphrase_str = passphrase
                     .as_ref()
                     .map(|value| String::from_utf8_lossy(value.as_slice()).into_owned());
-                let key = match load_secret_key(key_path, passphrase_str.as_deref()) {
+                let key_result = load_secret_key(key_path, passphrase_str.as_deref());
+                // Wipe on every path, including key-load failures: a wrong
+                // passphrase takes the error arm, which used to return first.
+                let had_passphrase = passphrase_str.is_some();
+                if let Some(value) = passphrase_str.as_mut() {
+                    value.zeroize();
+                }
+                let key = match key_result {
                     Ok(key) => key,
-                    Err(russh::keys::Error::KeyIsEncrypted) if passphrase_str.is_none() => {
+                    Err(russh::keys::Error::KeyIsEncrypted) if !had_passphrase => {
                         return Err(SshError::CredentialRequired(
                             "private-key passphrase".to_string(),
                         ));
                     }
                     Err(error) => return Err(error.into()),
                 };
-                if let Some(value) = passphrase_str.as_mut() {
-                    value.zeroize();
-                }
                 let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
                 let result = handle
                     .authenticate_publickey(

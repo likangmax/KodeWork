@@ -71,9 +71,13 @@ Platform or network behavior is marked verified only when exercised in that envi
 
 ## Known follow-up work
 
-Current tracked follow-up work is intentionally narrow:
+Current tracked follow-up work:
 
-- repository administration/settings work that cannot be completed through ordinary source changes ([#44](https://github.com/likangmax/KodeWork/issues/44)).
+- repository administration/settings work that cannot be completed through ordinary source changes ([#44](https://github.com/likangmax/KodeWork/issues/44));
+- confirm installed-client migration and a real signed MSI against the production updater endpoint before the next public release ([#69](https://github.com/likangmax/KodeWork/issues/69)). The client enables `plugins.updater.requireSignedVersion` and the release path verifies the signed version, but the published endpoint `updates.kodework.dev` is not yet provisioned, so automatic updates are **not** a shipped capability;
+- characterize the intermittent ConPTY readiness timeout from a captured recurrence ([#71](https://github.com/likangmax/KodeWork/issues/71));
+- serialize a prior host disconnect before a rapid A-B-A reconnect ([#80](https://github.com/likangmax/KodeWork/issues/80)). The A→B→A teardown race described there is already closed at `6a3b81f`: the renderer registers the outgoing disconnect before switching selection and the native per-host connect guard serializes the pair. What remains is the narrower case of switching hosts *while a connect is still in flight*, before the session entry exists.
+- clear the remaining dependency advisory that has no in-range fix: `glib` 0.18.5 (unsound `VariantStrIter` iterator implementations) is reachable only through the Linux tray stack (`tauri` → `tray-icon` → `libappindicator` → `gtk` 0.18 → `atk` → `glib`) and is **not** part of the shipped Windows MSI. Clearing it needs an upstream gtk-rs/tray-icon major bump; `cargo audit` reports it as a warning and it is tracked here rather than silently ignored. The other advisories Dependabot reported on this repository (`pageant` ≤ 0.2.2, `source-map-js` < 1.2.2) are fixed by the lockfile updates in this change.
 
 The README product-tour screenshot work tracked in [#26](https://github.com/likangmax/KodeWork/issues/26) is complete and is no longer an open project-status item.
 

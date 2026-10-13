@@ -116,7 +116,7 @@ export const LocalTerminalWorkspace = memo(function LocalTerminalWorkspace({ lan
         <p>{t('localTerminalHint')}</p>
       </div> : terminals.map((terminal) => <div className="local-terminal-pane" key={terminal.id} style={{ display: activeId === terminal.id ? undefined : 'none' }}>
         <Suspense fallback={<div className="terminal-loading">{t('loadingLocalRenderer')}</div>}>
-          <LocalTerminalPane id={terminal.id} active={activeId === terminal.id} onStatus={onStatus} />
+          <LocalTerminalPane id={terminal.id} active={activeId === terminal.id} language={language} onStatus={onStatus} />
         </Suspense>
       </div>)}
     </div>
