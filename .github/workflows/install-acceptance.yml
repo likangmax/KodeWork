@@ -35,6 +35,10 @@ jobs:
     name: Install, upgrade, launch and remove the MSI
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # The upgrade leg always runs: without a baseline package there is nothing
+      # to upgrade over, and that leg is the reason this workflow exists.
+      PREVIOUS_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.previous_release || 'v0.2.3' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
@@ -78,16 +82,16 @@ jobs:
       - name: Build the MSI
         run: npx tauri build --bundles msi
       - name: Fetch the previously published release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.previous_release != '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          PREVIOUS_TAG: ${{ inputs.previous_release }}
         run: |
+          $tag = $env:PREVIOUS_RELEASE
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw 'PREVIOUS_RELEASE is empty.' }
           $directory = Join-Path $env:RUNNER_TEMP 'previous-release'
           New-Item -ItemType Directory -Force -Path $directory | Out-Null
-          gh release download $env:PREVIOUS_TAG --pattern '*.msi' --dir $directory
-          if ($LASTEXITCODE -ne 0) { throw "Unable to download the MSI from release $env:PREVIOUS_TAG." }
+          gh release download $tag --pattern '*.msi' --dir $directory
+          if ($LASTEXITCODE -ne 0) { throw "Unable to download the MSI from release $tag." }
           $msi = Get-ChildItem $directory -Filter '*.msi' | Select-Object -First 1
           "PREVIOUS_MSI=$($msi.FullName)" >> $env:GITHUB_ENV
           Write-Host "previous release package: $($msi.FullName) ($([int]($msi.Length/1MB)) MiB)"
