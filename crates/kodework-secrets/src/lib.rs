@@ -33,6 +33,17 @@ impl SecretValue {
     pub fn expose(&self) -> &[u8] {
         self.0.as_slice()
     }
+
+    /// Hands the buffer over instead of copying it.
+    ///
+    /// A caller that needs an owned, self-wiping copy would otherwise clone the
+    /// bytes with `expose().to_vec()`, which leaves a second plaintext copy of the
+    /// credential in memory until that copy is dropped. The SSH layer's credential
+    /// type is this same `Zeroizing<Vec<u8>>`, so the buffer can simply move.
+    #[must_use]
+    pub fn into_bytes(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
 }
 
 impl std::fmt::Debug for SecretValue {
