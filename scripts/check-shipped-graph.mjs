@@ -13,6 +13,9 @@
 //
 // Usage: node scripts/check-shipped-graph.mjs
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Crates that only exist for the Linux desktop backend, with the reason. */
 const LINUX_ONLY = [
@@ -23,15 +26,18 @@ const LINUX_ONLY = [
   { crate: 'webkit2gtk', advisory: 'Linux webview backend' },
   { crate: 'libappindicator', advisory: 'Linux tray backend' },
 ];
-const SHIPPED_TARGET = 'x86_64-pc-windows-msvc';
-const UNSHIPPED_TARGET = 'x86_64-unknown-linux-gnu';
+export const SHIPPED_TARGET = 'x86_64-pc-windows-msvc';
+export const UNSHIPPED_TARGET = 'x86_64-unknown-linux-gnu';
 
-function tree(target, crate) {
+/** A cargo invocation that never finishes must not look like a clean graph. */
+const CARGO_TIMEOUT_MS = 180_000;
+
+export function tree(target, crate) {
   try {
     const output = execFileSync(
       'cargo',
       ['tree', '--locked', '--target', target, '-e', 'normal', '-i', crate],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: CARGO_TIMEOUT_MS },
     );
     return { output, failed: false };
   } catch (error) {
@@ -39,46 +45,78 @@ function tree(target, crate) {
   }
 }
 
-/** `cargo tree -i` exits 0 with "nothing to print" when the crate is absent. */
-function present(result) {
-  if (result.failed) return false;
-  const text = result.output.trim();
-  if (text.length === 0) return false;
-  if (/nothing to print/i.test(text)) return false;
-  return new RegExp(`^${'\\S'}+\\s`, 'm').test(text) || text.length > 0;
+/**
+ * Classifies one `cargo tree -i` result.
+ *
+ * `cargo tree -i` exits 0 and reports "nothing to print" when the crate is
+ * absent, so absence is decided by the output rather than by the exit status. A
+ * query that could not run at all is `error`, never `absent`: treating a broken
+ * invocation as absence is how a dependency check silently stops checking.
+ */
+export function classifyTree(result) {
+  if (result.failed) return 'error';
+  const text = String(result.output ?? '');
+  if (text.trim().length === 0) return 'absent';
+  if (/nothing to print/i.test(text)) return 'absent';
+  // A real reverse-dependency tree starts with the crate itself and its version.
+  // Anything else is treated as an error rather than as evidence of absence: this
+  // check exists to fail closed.
+  if (/^[\w.+@/-]+ v\d/m.test(text)) return 'present';
+  return 'error';
 }
 
-let failures = 0;
-for (const { crate, advisory } of LINUX_ONLY) {
-  const shipped = tree(SHIPPED_TARGET, crate);
-  // Failure to inspect the Windows graph is not evidence of absence.
-  // In particular, a target-specific Cargo resolution failure must block
-  // release, even when Linux's negative control happens to pass.
-  if (shipped.failed) {
-    failures += 1;
-    console.log(`FAIL cargo tree could not inspect the ${SHIPPED_TARGET} graph for ${crate}`);
-    console.log(`     ${shipped.output.split('\n').slice(0, 5).join('\n     ')}`);
-  } else if (present(shipped)) {
-    failures += 1;
-    console.log(`FAIL ${crate} is in the ${SHIPPED_TARGET} graph (${advisory})`);
-    console.log(`     ${shipped.output.split('\n').slice(0, 5).join('\n     ')}`);
-  } else {
-    console.log(`OK   ${crate} absent from the shipped ${SHIPPED_TARGET} graph`);
+/**
+ * The decision for one crate: a finding string when the shipped graph is not
+ * clean for it, otherwise null.
+ */
+export function evaluateCrate(crate, advisory, shipped, linux) {
+  const shippedKind = classifyTree(shipped);
+  if (shippedKind === 'error') {
+    return `cargo tree could not inspect the ${SHIPPED_TARGET} graph for ${crate}:\n     ${firstLines(shipped.output)}`;
+  }
+  if (shippedKind === 'present') {
+    return `${crate} is in the ${SHIPPED_TARGET} graph (${advisory}):\n     ${firstLines(shipped.output)}`;
+  }
+  // Negative control: without it, a broken cargo invocation would make every
+  // "absent" verdict above vacuous.
+  if (classifyTree(linux) !== 'present') {
+    return `${crate} is missing from the ${UNSHIPPED_TARGET} graph too - the check is not exercising anything`;
+  }
+  return null;
+}
+
+function firstLines(output) {
+  return String(output ?? '').split('\n').slice(0, 5).join('\n     ');
+}
+
+function run() {
+  let failures = 0;
+  for (const { crate, advisory } of LINUX_ONLY) {
+    const finding = evaluateCrate(crate, advisory, tree(SHIPPED_TARGET, crate), tree(UNSHIPPED_TARGET, crate));
+    if (finding) {
+      failures += 1;
+      console.log(`FAIL ${finding}`);
+    } else {
+      console.log(`OK   ${crate} absent from the shipped ${SHIPPED_TARGET} graph`);
+    }
+  }
+  console.log(
+    failures === 0
+      ? `\nshipped graph clean: no Linux-desktop crate is linked into ${SHIPPED_TARGET}`
+      : `\n${failures} problem(s)`,
+  );
+  process.exitCode = failures === 0 ? 0 : 1;
+}
+
+// Only run when invoked as the program: importing this module for its classifier
+// must not shell out to cargo.
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return true;
   }
 }
 
-// The negative control: the same crates must be found for the Linux target.
-// Without this, a broken cargo invocation would make every check above pass.
-for (const { crate } of LINUX_ONLY) {
-  const linux = tree(UNSHIPPED_TARGET, crate);
-  if (!present(linux)) {
-    failures += 1;
-    console.log(`FAIL ${crate} is missing from the ${UNSHIPPED_TARGET} graph too - the check is not exercising anything`);
-  }
-}
-console.log(
-  failures === 0
-    ? `\nshipped graph clean: no Linux-desktop crate is linked into ${SHIPPED_TARGET}`
-    : `\n${failures} problem(s)`,
-);
-process.exitCode = failures === 0 ? 0 : 1;
+if (isDirectInvocation()) run();
