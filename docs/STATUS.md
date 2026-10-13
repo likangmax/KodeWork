@@ -50,20 +50,25 @@ These states are not interchangeable. Compilation or CI success alone does not m
 
 ## Verification baseline
 
-The repository CI has six substantive check families:
+The repository CI has seven substantive check families:
 
 1. frontend install/lint/local-documentation-link checks/tests/production build;
 2. Windows Rust sidecar preparation, formatting, locked Clippy with warnings denied, and full locked workspace tests;
 3. dependency/security policy including production npm audit, RustSec audit, and tracked-secret pattern rejection;
-4. desktop build: `tauri build --no-bundle` in the release profile, which is the only gate that would catch a Tauri crate/npm mismatch or a release-only build break (before it existed, all six contexts passed while `tauri build` refused to run);
-5. portable Rust checks/tests on Linux;
-6. portable Rust checks/tests on macOS.
+4. desktop build: `tauri build --no-bundle` in the release profile, which is the only gate that would catch a Tauri crate/npm mismatch or a release-only build break (before it existed, every context passed while `tauri build` refused to run);
+5. real SSH server: a real OpenSSH `sshd` is started on the runner and the client is exercised against it - banner, key exchange, `authorized_keys` authentication, the `sftp` subsystem and a real shell. The fake-server tests share this workspace's crate versions and never leave the process, so they cannot cover this;
+6. portable Rust checks/tests on Linux;
+7. portable Rust checks/tests on macOS.
+
+A second workflow, **Install acceptance**, installs the package on a disposable Windows runner, upgrades it over the previously published release, starts the installed application, and removes it again. It runs on demand and on `main` pushes that change anything the package is built from. This is the evidence that "the MSI database says the upgrade is well-formed" cannot provide.
 
 The existing required `rust` status context is an aggregate gate: it reports success only when the Windows Rust job, the desktop build job and the dependency/security policy job all succeed. This preserves the branch-protection context while ensuring the security policy cannot be skipped by a merge that requires `rust`.
 
+Gate results are not release results: the newest published release is `v0.2.3`, and work on `main` is ahead of it, so a green `main` says nothing about what installed users have.
+
 Workflow configuration is not a substitute for all repository settings. Branch protection/rulesets still determine which top-level status contexts and review rules GitHub enforces.
 
-Platform or network behavior is marked verified only when exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for native evidence expectations.
+Platform or network behavior is marked verified only when exercised in that environment. See [TEST-MATRIX-WINDOWS.md](TEST-MATRIX-WINDOWS.md) for native evidence expectations and [VERIFICATION.md](VERIFICATION.md) for what was verified, how, and what was not.
 
 ## Release and distribution boundaries
 
