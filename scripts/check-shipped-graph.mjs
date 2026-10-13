@@ -57,7 +57,7 @@ for (const { crate, advisory } of LINUX_ONLY) {
   if (shipped.failed) {
     failures += 1;
     console.log(`FAIL cargo tree could not inspect the ${SHIPPED_TARGET} graph for ${crate}`);
-    console.log(`     ${shipped.output.split('\\n').slice(0, 5).join('\\n     ')}`);
+    console.log(`     ${shipped.output.split('\n').slice(0, 5).join('\n     ')}`);
   } else if (present(shipped)) {
     failures += 1;
     console.log(`FAIL ${crate} is in the ${SHIPPED_TARGET} graph (${advisory})`);
