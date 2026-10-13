@@ -7,6 +7,47 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
+
+/// Wipes an answer that will never reach the SSH layer.
+///
+/// The copy handed to `russh` cannot be wiped from here (that API takes
+/// ownership of the `Vec<String>`, and keeping a second copy to wipe would leave
+/// strictly more plaintext in the process than it removes). This covers the
+/// paths where the answer is dropped on our side instead: a stale prompt id, a
+/// prompt that already timed out, or a workstation that no longer owns the
+/// request. `Vec<Z>::zeroize` zeroes every element before clearing the vector.
+fn wipe_responses(responses: &mut Vec<String>) {
+    responses.zeroize();
+}
+
+/// Delivers an answer if the prompt is still waiting for it, otherwise wipes it.
+///
+/// Returns whether it was delivered, plus the buffer it was given: on success
+/// that buffer is empty (the answer moved to the waiting authenticator), and on
+/// failure it is the wiped answer, which makes the wipe observable to tests
+/// instead of only inferable.
+fn deliver_answer(
+    sender: Option<oneshot::Sender<Vec<String>>>,
+    mut responses: Vec<String>,
+) -> (bool, Vec<String>) {
+    match sender {
+        Some(sender) => match sender.send(responses) {
+            Ok(()) => (true, Vec::new()),
+            Err(mut rejected) => {
+                // The prompt is gone (timeout, cancellation, aborted connection).
+                // The failed send hands the answer back, so wipe it here.
+                wipe_responses(&mut rejected);
+                (false, rejected)
+            }
+        },
+        None => {
+            // Unknown or already-consumed request id.
+            wipe_responses(&mut responses);
+            (false, responses)
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyboardPrompt {
@@ -104,7 +145,16 @@ impl KeyboardInteractiveBroker {
                 })
             })
             .unwrap_or(false);
-        owned && self.answer(request_id, responses)
+        if !owned {
+            // A stale answer (wrong workstation, or a prompt that already timed
+            // out) is dropped here, so wipe it: this is the most reachable of the
+            // paths where a one-time code or password is discarded without being
+            // handed to the SSH layer.
+            let mut responses = responses;
+            wipe_responses(&mut responses);
+            return false;
+        }
+        self.answer(request_id, responses)
     }
 
     /// Wake pending authentication immediately before a requested disconnect.
@@ -131,7 +181,7 @@ impl KeyboardInteractiveBroker {
             .lock()
             .ok()
             .and_then(|mut guard| guard.remove(&request_id));
-        let applied = sender.is_some_and(|sender| sender.send(responses).is_ok());
+        let (applied, _wiped) = deliver_answer(sender, responses);
         if applied {
             if let Ok(mut guard) = self.pending.lock() {
                 guard.retain(|request| request.request_id != request_id);
@@ -363,5 +413,97 @@ mod tests {
             Ok(vec!["123456".into()])
         );
         assert!(broker.drain_requests().is_empty());
+    }
+
+    /// A delivered answer must reach the authenticator byte for byte: the wipe
+    /// must never touch the copy that is actually used.
+    #[tokio::test]
+    async fn a_delivered_answer_reaches_the_authenticator_unchanged() {
+        let (sender, receiver) = oneshot::channel();
+        let (applied, remainder) =
+            deliver_answer(Some(sender), vec!["123456".into(), "otp".into()]);
+        assert!(applied);
+        assert!(remainder.is_empty());
+        assert_eq!(
+            receiver
+                .await
+                .unwrap_or_else(|error| unreachable!("{error}")),
+            vec!["123456".to_string(), "otp".to_string()]
+        );
+    }
+
+    /// Both ways an answer can fail to reach a waiting prompt are observable
+    /// here: there is no answer at all, or the prompt was already gone.
+    #[test]
+    fn undeliverable_answers_are_wiped() {
+        let answer = || vec!["123456".to_string(), "password".to_string()];
+        let (applied, remainder) = deliver_answer(None, answer());
+        assert!(!applied);
+        assert!(
+            remainder.is_empty(),
+            "an answer with no waiting prompt must be wiped"
+        );
+
+        let (sender, receiver) = oneshot::channel::<Vec<String>>();
+        drop(receiver);
+        let (applied, remainder) = deliver_answer(Some(sender), answer());
+        assert!(!applied);
+        assert!(
+            remainder.is_empty(),
+            "an answer whose prompt is gone must be wiped"
+        );
+    }
+
+    /// Guards the helper itself, so removing the wipe is a test failure rather
+    /// than a silent regression.
+    #[test]
+    fn wiping_clears_every_response() {
+        let mut responses = vec!["123456".to_string(), "hunter2".to_string()];
+        wipe_responses(&mut responses);
+        assert!(responses.is_empty());
+    }
+
+    /// The stale-answer path from the workstation-isolation test, checked for
+    /// the property that matters: the rejected answer never reaches the prompt.
+    #[tokio::test]
+    async fn a_stale_answer_neither_reaches_its_prompt_nor_panics() {
+        let broker = Arc::new(KeyboardInteractiveBroker::new(Duration::from_secs(5)));
+        let owner = HostId::new();
+        let other = HostId::new();
+        let task = {
+            let broker = Arc::clone(&broker);
+            tokio::spawn(async move {
+                broker
+                    .prompt_for_connection(
+                        Some(owner),
+                        4,
+                        "OTP".into(),
+                        "Enter a code".into(),
+                        vec![KeyboardPrompt {
+                            prompt: "Code: ".into(),
+                            echo: false,
+                        }],
+                    )
+                    .await
+            })
+        };
+        let request_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(request) = broker.pending_for_owner(owner).first() {
+                    break request.request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| unreachable!("{error}"));
+
+        assert!(!broker.answer_for_owner(other, request_id, vec!["999999".into()]));
+        assert!(!broker.answer(0, vec!["000000".into()]));
+        assert!(broker.answer_for_owner(owner, request_id, vec!["123456".into()]));
+        assert_eq!(
+            task.await.unwrap_or_else(|error| unreachable!("{error}")),
+            Ok(vec!["123456".into()])
+        );
     }
 }
