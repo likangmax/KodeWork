@@ -979,8 +979,8 @@ async fn authenticate(
                             // Answers stay wipe-on-drop until they are handed
                             // off to russh. Invalid counts must never drop a
                             // plaintext Vec<String> without scrubbing it.
-                            let mut responses = zeroize::Zeroizing::new(broker
-                                .prompt_for_connection(
+                            let mut responses = zeroize::Zeroizing::new(
+                                broker.prompt_for_connection(
                                     options.ui_owner_host_id,
                                     options.generation,
                                     name,
@@ -993,14 +993,17 @@ async fn authenticate(
                                         })
                                         .collect(),
                                 )
-                                .await?);
+                                .await?,
+                            );
                             if responses.len() != expected {
                                 return Err(SshError::InvalidConfiguration(
                                     "keyboard-interactive response count mismatch".into(),
                                 ));
                             }
                             reply = handle
-                                .authenticate_keyboard_interactive_respond(std::mem::take(&mut *responses))
+                                .authenticate_keyboard_interactive_respond(std::mem::take(
+                                    &mut *responses,
+                                ))
                                 .await?;
                         }
                     }
