@@ -33,6 +33,9 @@ dist-ssr
 # Read-only upstream research clones (never built, never committed)
 /references/
 
+# Locally generated updater channel (MSI + latest.json before upload)
+/release-channel/
+
 # Tauri generated schemas
 /src-tauri/gen/
 /src-tauri/binaries/*.exe

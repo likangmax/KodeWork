@@ -112,7 +112,7 @@ export type LocalTerminalCapabilities = {
 }
 export type LocalTerminalEvent =
   | { kind: 'data'; bytes: number[] }
-  | { kind: 'exited'; code: number }
+  | { kind: 'exited'; code: number | null }
   | { kind: 'error'; message: string }
 
 export const localTerminalCapabilities = () => invoke<LocalTerminalCapabilities>('local_terminal_capabilities')
@@ -402,7 +402,9 @@ export const checkForUpdates = async (): Promise<UpdateCheck> => {
 }
 
 export const installUpdate = async (): Promise<{ ok: boolean; error?: string }> => {
-  if (!isDesktop()) return { ok: false, error: '仅桌面版支持自动更新' }
+  // Stable machine code, not prose: the renderer localizes it so the message
+  // follows the interface language instead of always being Chinese.
+  if (!isDesktop()) return { ok: false, error: 'desktop-only' }
   try {
     const { check } = await import('@tauri-apps/plugin-updater')
     const update = await check()

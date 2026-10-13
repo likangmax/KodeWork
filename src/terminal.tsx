@@ -7,6 +7,7 @@ import { Terminal } from 'xterm'
 import 'xterm/css/xterm.css'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { clipboardCopyText, clipboardPaste, resizePty, sendInput, subscribeSession } from './api'
+import { translate, type Language, type TranslationKey } from './i18n'
 import { THEME_CHANGE_EVENT, terminalTheme } from './theme'
 import { decodeOsc52 } from './terminal/osc52'
 
@@ -20,42 +21,52 @@ type Props = {
   /** Only events for this SSH channel are written to this terminal. */
   channelId: number
   pasteRequest: number
+  /** Status messages follow the interface language, like every other surface. */
+  language: Language
   onPasteStatus?: (message: string) => void
 }
 
-export const TerminalPane = memo(function TerminalPane({ hostId, connected, paneId, channelId, pasteRequest, onPasteStatus }: Props) {
+export const TerminalPane = memo(function TerminalPane({ hostId, connected, paneId, channelId, pasteRequest, language, onPasteStatus }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const resizeTimer = useRef<number | null>(null)
   const pasteBusyRef = useRef(false)
   const [pasteBusy, setPasteBusy] = useState(false)
+  // A stable translator for the long-lived xterm handlers the effect installs
+  // once. Depending on `language` directly would rebuild the terminal (and lose
+  // its scrollback) on every language switch, so the current language is read
+  // through a ref that an effect keeps up to date. Render-time text uses
+  // `language` directly and therefore never lags.
+  const languageRef = useRef(language)
+  useEffect(() => { languageRef.current = language }, [language])
+  const t = useCallback((key: TranslationKey, ...args: string[]) => translate(languageRef.current, key, ...args), [])
 
   const pasteFromClipboard = useCallback(async () => {
     const term = termRef.current
     if (!connected || !term || pasteBusyRef.current) return
     pasteBusyRef.current = true
     setPasteBusy(true)
-    onPasteStatus?.('正在读取剪贴板；图片或 PDF 会先上传到远程主机…')
+    onPasteStatus?.(t('pasteReadingClipboard'))
     try {
       const payload = await clipboardPaste(hostId)
       if (payload.kind === 'text') {
         term.paste(payload.text)
-        onPasteStatus?.('已粘贴文本。')
+        onPasteStatus?.(t('pasteTextDone'))
       } else if (payload.kind === 'assets') {
         term.paste(payload.remote_paths.map((path) => `'${path.replaceAll("'", "'\\''")}'`).join(' '))
-        onPasteStatus?.(`已上传 ${payload.remote_paths.length} 个图片/PDF，并粘贴远端路径。`)
+        onPasteStatus?.(t('pasteAssetsDone', String(payload.remote_paths.length)))
       } else {
-        onPasteStatus?.('剪贴板中没有可粘贴的文本、图片或 PDF。')
+        onPasteStatus?.(t('pasteNothing'))
       }
     } catch (error) {
-      onPasteStatus?.(`剪贴板上传失败：${String(error)}`)
+      onPasteStatus?.(t('pasteUploadFailed', String(error)))
     } finally {
       pasteBusyRef.current = false
       setPasteBusy(false)
       term.focus()
     }
-  }, [connected, hostId, onPasteStatus])
+  }, [connected, hostId, onPasteStatus, t])
 
   useEffect(() => {
     if (pasteRequest > 0) void pasteFromClipboard()
@@ -95,14 +106,14 @@ export const TerminalPane = memo(function TerminalPane({ hostId, connected, pane
       const decoded = decodeOsc52(data)
       if (decoded.kind === 'query') return true // Clipboard reads stay disabled.
       if (decoded.kind === 'invalid') {
-        onPasteStatus?.(`远端复制已阻止：${decoded.reason}`)
+        onPasteStatus?.(t('remoteCopyBlocked', t(decoded.reason)))
         return true
       }
       try {
         await clipboardCopyText(decoded.text)
-        onPasteStatus?.('Herdr 选区已复制到系统剪贴板。')
+        onPasteStatus?.(t('remoteCopyDone'))
       } catch (error) {
-        onPasteStatus?.(`写入系统剪贴板失败：${String(error)}`)
+        onPasteStatus?.(t('remoteCopyFailed', String(error)))
       }
       return true
     })
@@ -174,8 +185,8 @@ export const TerminalPane = memo(function TerminalPane({ hostId, connected, pane
         if (!selection || selection === lastCopiedSelection) return
         lastCopiedSelection = selection
         void clipboardCopyText(selection)
-          .then(() => onPasteStatus?.('已复制终端选区。'))
-          .catch((error) => onPasteStatus?.(`复制失败：${String(error)}`))
+          .then(() => onPasteStatus?.(t('selectionCopied')))
+          .catch((error) => onPasteStatus?.(t('copyFailed', String(error))))
       }, 120)
     })
 
@@ -248,11 +259,11 @@ export const TerminalPane = memo(function TerminalPane({ hostId, connected, pane
       termRef.current = null
       fitRef.current = null
     }
-  }, [hostId, connected, paneId, channelId, onPasteStatus, pasteFromClipboard])
+  }, [hostId, connected, paneId, channelId, onPasteStatus, pasteFromClipboard, t])
 
   return (
     <div className="terminal-host" ref={containerRef}>
-      {pasteBusy && <div className="terminal-paste-progress">正在上传剪贴板文件…</div>}
+      {pasteBusy && <div className="terminal-paste-progress">{translate(language, 'uploadingClipboardFiles')}</div>}
     </div>
   )
 })

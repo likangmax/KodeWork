@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 
 const MAX_SESSIONS: usize = 20;
@@ -34,7 +35,9 @@ pub struct LocalTerminalDescriptor {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LocalTerminalEvent {
     Data { bytes: Vec<u8> },
-    Exited { code: u32 },
+    /// `code` is `None` when the child could not be reaped in time. Reporting a
+    /// definite `0` there told the user a failed command had succeeded.
+    Exited { code: Option<u32> },
     Error { message: String },
 }
 
@@ -299,14 +302,26 @@ fn spawn_reader(session: Arc<LocalSession>, mut reader: Box<dyn Read + Send>) {
         });
 }
 
-fn child_exit_code(session: &LocalSession) -> u32 {
-    session
-        .child
-        .lock()
-        .ok()
-        .and_then(|mut child| child.try_wait().ok().flatten())
-        .map(|status| status.exit_code())
-        .unwrap_or(0)
+/// Reap the child to report its real exit status.
+///
+/// EOF on the pseudoconsole often arrives before the child has been waited on,
+/// so a single `try_wait()` returns `None`; that used to be reported as exit
+/// code 0, which claimed success for a command that had actually failed. This
+/// runs on the reader thread, where a short bounded wait is safe, and returns
+/// `None` (unknown) rather than inventing a status when the wait runs out.
+fn child_exit_code(session: &LocalSession) -> Option<u32> {
+    const REAP_ATTEMPTS: u32 = 50;
+    const REAP_INTERVAL: Duration = Duration::from_millis(20);
+
+    let mut child = session.child.lock().ok()?;
+    for _ in 0..=REAP_ATTEMPTS {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.exit_code()),
+            Ok(None) => std::thread::sleep(REAP_INTERVAL),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn emit(session: &LocalSession, event: LocalTerminalEvent) {
@@ -595,7 +610,7 @@ mod tests {
                 }
                 super::LocalTerminalEvent::Exited { code } => {
                     return Err(format!(
-                        "local terminal exited with {code} before readiness; output was {}",
+                        "local terminal exited with {code:?} before readiness; output was {}",
                         String::from_utf8_lossy(&output)
                     ));
                 }
@@ -647,7 +662,7 @@ mod tests {
                         }
                         super::LocalTerminalEvent::Exited { code } => {
                             return Err(format!(
-                                "local terminal exited with {code}; output was {}",
+                                "local terminal exited with {code:?}; output was {}",
                                 String::from_utf8_lossy(&output),
                             ))
                         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Verify an updater artifact and its version using the public key shipped in KodeWork.
 // Tauri stores a BASE64-encoded Minisign message in .msi.sig, not raw .minisig text.
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -82,7 +82,23 @@ export function verifyUpdaterArtifact(artifactPath, signaturePath, version) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+// Decide "am I the program that was started?" by comparing *resolved real
+// paths*. A plain string comparison against `import.meta.url` silently skips
+// this whole block — including the exit code below — whenever the same file is
+// reached through a junction, symlink, 8.3 short name, differently-cased path
+// or a shim, and the callers only inspect the exit status. Skipping must never
+// be able to look like success, so an unresolvable entry path is treated as a
+// direct invocation and allowed to fail loudly instead.
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(scriptPath);
+  } catch {
+    return true;
+  }
+}
+
+if (isDirectInvocation()) {
   try {
     verifyUpdaterArtifact(...process.argv.slice(2));
     console.log('Updater artifact signature and authenticated version verified.');

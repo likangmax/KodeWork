@@ -3,7 +3,9 @@ import path from 'node:path';
 import process from 'node:process';
 
 const root = process.cwd();
-const ignoredDirectories = new Set(['.git', 'node_modules', 'target', 'dist']);
+// `references` holds read-only upstream research clones that are gitignored and
+// never present in CI; scanning them reported broken links that are not ours.
+const ignoredDirectories = new Set(['.git', 'node_modules', 'target', 'dist', 'references']);
 const markdownLinkPattern = /!?\[[^\]]*\]\(([^)]+)\)/g;
 const htmlLinkPattern = /\b(?:href|src)\s*=\s*["']([^"']+)["']/gi;
 
