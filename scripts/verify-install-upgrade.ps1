@@ -144,5 +144,8 @@ try {
   $failed = ($results | Where-Object { $_ -like 'FAIL*' }).Count
   Write-Output ''
   Write-Output "===== install acceptance: $($results.Count - $failed)/$($results.Count) checks passed ====="
-  if ($failed -gt 0) { exit 1 }
+  # The exit code has to be decided here rather than inherited from whichever native
+  # command ran last: a CI step appends `exit $LASTEXITCODE`, and a stale value from an
+  # installer call made a fully passing run report failure.
+  exit $(if ($failed -gt 0) { 1 } else { 0 })
 }
