@@ -88,6 +88,7 @@ The README product-tour screenshot work tracked in [#26](https://github.com/lika
 
 ## Reference documents
 
+- verification evidence for the 2026-10-13 audit: [VERIFICATION.md](VERIFICATION.md)
 - installable artifacts: [GitHub Releases](https://github.com/likangmax/KodeWork/releases)
 - user-visible history: [CHANGELOG.md](CHANGELOG.md)
 - platform/release contract: [RELEASE-MATRIX.md](RELEASE-MATRIX.md)
