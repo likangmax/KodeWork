@@ -10,19 +10,21 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'BaseUrl or KODEWORK_UPDATE_BASE_URL is required.' }
 if ($BaseUrl -notmatch '^https://') { throw 'Updater BaseUrl must use HTTPS.' }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Updater version must be stable X.Y.Z.' }
+
+# Bind the published version to the application metadata instead of trusting the
+# -Version argument on its own. Checked before the artifact lookup so a wrong
+# version reports the real problem instead of "MSI not found". The publisher
+# always runs from the repository that produced the MSI.
+$configVersion = (Get-Content -Raw -LiteralPath (Join-Path $root 'src-tauri\tauri.conf.json') | ConvertFrom-Json).version
+if ($configVersion -ne $Version) {
+  throw "Requested version $Version does not match src-tauri/tauri.conf.json ($configVersion)."
+}
+
 $msiDirectory = Join-Path $root 'target\release\bundle\msi'
 $msi = Get-ChildItem -LiteralPath $msiDirectory -Filter "*_${Version}_x64_en-US.msi" | Select-Object -First 1
 if (-not $msi) { throw "MSI for version $Version was not found in $msiDirectory" }
 $signaturePath = $msi.FullName + '.sig'
 if (-not (Test-Path -LiteralPath $signaturePath)) { throw "Updater signature missing: $signaturePath" }
-
-# Bind the published version to the application metadata instead of trusting the
-# -Version argument on its own. The publisher always runs from the repository
-# that produced the MSI, so a divergence here is a mistake, not a use case.
-$configVersion = (Get-Content -Raw -LiteralPath (Join-Path $root 'src-tauri\tauri.conf.json') | ConvertFrom-Json).version
-if ($configVersion -ne $Version) {
-  throw "Requested version $Version does not match src-tauri/tauri.conf.json ($configVersion)."
-}
 
 $signature = [System.IO.File]::ReadAllText($signaturePath).Trim()
 if ([string]::IsNullOrWhiteSpace($signature)) { throw 'Updater signature is empty.' }
@@ -60,7 +62,10 @@ $manifest = [ordered]@{
   }
 }
 $manifestPath = Join-Path $channel 'latest.json'
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+# Written through .NET rather than Set-Content -Encoding utf8NoBOM: that encoding
+# name only exists in PowerShell 7+, so the documented manual runbook failed on a
+# stock Windows PowerShell 5.1 host.
+[System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
 
 $parsed = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ($parsed.version -ne $Version -or [string]::IsNullOrWhiteSpace($parsed.platforms.'windows-x86_64'.signature)) {

@@ -30,7 +30,10 @@ try {
       timestampUrl = $timestampUrl
       tsp = $true
     } } }
-    $overlay | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $signingConfig -Encoding utf8NoBOM
+    # .NET write instead of Set-Content -Encoding utf8NoBOM: that encoding name
+    # only exists in PowerShell 7+, so the manual release path failed on a stock
+    # Windows PowerShell 5.1 host.
+    [System.IO.File]::WriteAllText($signingConfig, ($overlay | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
     $tauriArguments += @('--config', $signingConfig)
   } elseif ($env:KODEWORK_REQUIRE_AUTHENTICODE -eq '1') {
     throw 'KODEWORK_REQUIRE_AUTHENTICODE=1 but KODEWORK_CERT_THUMBPRINT is not configured.'
