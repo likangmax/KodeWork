@@ -780,9 +780,10 @@ fn resolve_auth_methods(
                         detail: "stored credential is empty".to_string(),
                     });
                 }
-                Some(kodework_ssh::connection::ZeroizingVec::new(
-                    secret.expose().to_vec(),
-                ))
+                // Move the buffer rather than cloning it: `SecretValue` and the SSH
+                // credential type are both `Zeroizing<Vec<u8>>`, so cloning only
+                // creates a second plaintext copy of the credential.
+                Some(secret.into_bytes())
             }
             Some(reference) => {
                 return Err(ConnectError {
@@ -1146,9 +1147,11 @@ pub(crate) fn answer_keyboard_interactive(
     if responses.len() > 32 || responses.iter().any(|response| response.len() > 4096) {
         return Err("keyboard-interactive response is too large".into());
     }
-    Ok(state
-        .keyboard_interactive
-        .answer_for_owner(host_id, request_id, std::mem::take(&mut *responses)))
+    Ok(state.keyboard_interactive.answer_for_owner(
+        host_id,
+        request_id,
+        std::mem::take(&mut *responses),
+    ))
 }
 
 /// Subscribes the renderer to terminal events for a host. The events flow

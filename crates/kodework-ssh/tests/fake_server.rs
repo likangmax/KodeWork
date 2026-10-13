@@ -755,3 +755,67 @@ fn proxy_key_exchange_must_use_interactive_budget() {
         "proxy KEX must not be capped by the short transport timeout"
     );
 }
+
+/// The deadline the proxy route actually applies, measured instead of read.
+///
+/// A stand-in proxy that never speaks SSH makes that deadline observable: the
+/// connection must fail with a timeout after the interactive budget, not after
+/// `connect_timeout`. Reverting the budget makes this assertion fail by more than
+/// a second, which is why it is a behavioural check rather than a source scan.
+///
+/// No SSH server is involved: the proxy never connects anywhere, so the only thing
+/// under test is which deadline bounds the key-exchange wait.
+#[tokio::test]
+async fn proxy_key_exchange_uses_the_interactive_deadline() {
+    let broker = new_broker();
+    let mut options = options_for(1, PASSWORD, Arc::clone(&broker), 11);
+    options.connect_timeout = Duration::from_millis(600);
+    options.interactive_timeout = Some(Duration::from_millis(3_000));
+    options.proxy = Some(proxy_that_never_answers());
+
+    let started = std::time::Instant::now();
+    let outcome = SshConnection::connect(options).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        outcome.is_err(),
+        "a proxy that never speaks SSH must not produce a connection"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2_000),
+        "proxy key exchange was cut short by the transport timeout: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(6_000),
+        "proxy key exchange exceeded the interactive budget: {elapsed:?}"
+    );
+}
+
+/// A program that consumes its input and produces nothing for longer than any
+/// deadline in the test above.
+///
+/// A single long-lived process is used deliberately: `cmd /C ping` leaves a
+/// grandchild holding the pipe after the killed shell exits, which keeps the test
+/// alive until that grandchild finishes.
+fn proxy_that_never_answers() -> kodework_ssh::connection::ProxyCommand {
+    #[cfg(windows)]
+    {
+        kodework_ssh::connection::ProxyCommand {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 6".into(),
+            ],
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        kodework_ssh::connection::ProxyCommand {
+            program: "sleep".into(),
+            args: vec!["6".into()],
+        }
+    }
+}

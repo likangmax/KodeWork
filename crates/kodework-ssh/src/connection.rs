@@ -980,20 +980,23 @@ async fn authenticate(
                             // off to russh. Invalid counts must never drop a
                             // plaintext Vec<String> without scrubbing it.
                             let mut responses = zeroize::Zeroizing::new(
-                                broker.prompt_for_connection(
-                                    options.ui_owner_host_id,
-                                    options.generation,
-                                    name,
-                                    instructions,
-                                    prompts
-                                        .into_iter()
-                                        .map(|prompt| crate::keyboard_interactive::KeyboardPrompt {
-                                            prompt: prompt.prompt,
-                                            echo: prompt.echo,
-                                        })
-                                        .collect(),
-                                )
-                                .await?,
+                                broker
+                                    .prompt_for_connection(
+                                        options.ui_owner_host_id,
+                                        options.generation,
+                                        name,
+                                        instructions,
+                                        prompts
+                                            .into_iter()
+                                            .map(|prompt| {
+                                                crate::keyboard_interactive::KeyboardPrompt {
+                                                    prompt: prompt.prompt,
+                                                    echo: prompt.echo,
+                                                }
+                                            })
+                                            .collect(),
+                                    )
+                                    .await?,
                             );
                             if responses.len() != expected {
                                 return Err(SshError::InvalidConfiguration(
