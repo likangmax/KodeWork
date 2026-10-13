@@ -141,7 +141,25 @@ async fn real_server_sftp_round_trips_a_file() {
         .await
         .unwrap_or_else(|error| unreachable!("opening the real sftp subsystem failed: {error}"));
 
-    let path = format!("{}/round-trip.txt", target.directory);
+    // These tests can be pointed at a server someone cares about, so every path
+    // they touch is created for this run and removed by it: a fixed filename would
+    // let `create` replace an existing file and then delete it.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let directory = format!(
+        "{}/kodework-test-{}-{}",
+        target.directory,
+        std::process::id(),
+        stamp
+    );
+    session
+        .create_dir(&directory)
+        .await
+        .unwrap_or_else(|error| unreachable!("creating {directory} failed: {error}"));
+
+    let path = format!("{directory}/round-trip.txt");
     let payload = b"kodework real sftp payload\n";
     {
         use tokio::io::AsyncWriteExt;
@@ -172,40 +190,85 @@ async fn real_server_sftp_round_trips_a_file() {
     assert_eq!(read_back, payload, "the file must come back byte for byte");
 
     let entries = session
-        .read_dir(&target.directory)
+        .read_dir(&directory)
         .await
-        .unwrap_or_else(|error| unreachable!("listing {} failed: {error}", target.directory));
+        .unwrap_or_else(|error| unreachable!("listing {directory} failed: {error}"));
     let names: Vec<String> = entries.map(|entry| entry.file_name()).collect();
-    assert!(
-        names.iter().any(|name| name == "round-trip.txt"),
-        "the listing must contain the file just written: {names:?}"
+    assert_eq!(
+        names,
+        vec!["round-trip.txt".to_string()],
+        "the directory created for this run must hold exactly the file just written"
     );
 
     session
         .remove_file(&path)
         .await
         .unwrap_or_else(|error| unreachable!("removing {path} failed: {error}"));
+    session
+        .remove_dir(&directory)
+        .await
+        .unwrap_or_else(|error| unreachable!("removing {directory} failed: {error}"));
     connection
         .disconnect()
         .await
         .unwrap_or_else(|error| unreachable!("disconnect failed: {error}"));
 }
 
+/// Asserts what the test is named for: the shell echoes the command, reports the
+/// size the client resized it to, and that output reaches the event stream.
+///
+/// The marker is assembled remotely (`printf 'KODEWORK_%s' REAL_PTY_OK`) so a
+/// match cannot come from the terminal echoing the typed line back.
 #[tokio::test]
 async fn real_server_pty_echoes_and_resizes() {
     let target = require_target!();
-    let (connection, _events) = connect(&target).await;
+    let (connection, mut events) = connect(&target).await;
     let pty = connection
         .open_pty(80, 24)
         .await
         .unwrap_or_else(|error| unreachable!("opening a real pty failed: {error}"));
+    let channel = pty.channel_id();
 
-    pty.write(b"printf 'kodework-real-pty\\n'\n")
-        .await
-        .unwrap_or_else(|error| unreachable!("writing to the pty failed: {error}"));
+    // Resize before the command so the reported size is the resized one.
     pty.resize(100, 40)
         .await
         .unwrap_or_else(|error| unreachable!("resizing the real pty failed: {error}"));
+    pty.write(b"printf 'KODEWORK_%s\\n' REAL_PTY_OK; stty size\n")
+        .await
+        .unwrap_or_else(|error| unreachable!("writing to the pty failed: {error}"));
+
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout(deadline - now, events.recv()).await {
+            Ok(Some(SessionEvent::Data {
+                channel: event_channel,
+                bytes,
+            })) if event_channel == channel => {
+                seen.extend_from_slice(&bytes);
+                let text = String::from_utf8_lossy(&seen);
+                if text.contains("KODEWORK_REAL_PTY_OK") && text.contains("40 100") {
+                    break;
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    let output = String::from_utf8_lossy(&seen).into_owned();
+    assert!(
+        output.contains("KODEWORK_REAL_PTY_OK"),
+        "the shell's output must reach the event stream, saw: {output:?}"
+    );
+    assert!(
+        output.contains("40 100"),
+        "the shell must report the resized dimensions (rows cols), saw: {output:?}"
+    );
 
     connection
         .disconnect()
