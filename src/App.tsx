@@ -297,6 +297,14 @@ export default function App() {
     if (selectedId) void refreshState(selectedId)
   })
 
+  // The status label is stored as already-translated text, so switching the
+  // interface language would otherwise leave the previous language in the
+  // header until the next native state change. Re-derive it from the native
+  // state, which is the source of truth for both the label and the phase.
+  useEffect(() => {
+    if (selectedId) void refreshState(selectedId)
+  }, [language, selectedId, refreshState])
+
   // Poll remote runtime state (tmux sessions, herdr agents) while ready
   // and the runtime panel is actually visible.
   useEffect(() => {
@@ -376,7 +384,7 @@ export default function App() {
         return
       }
       setPanes([{ id, channel }])
-    }).catch((error) => { if (active && isCurrent()) setMessage(t('openTerminalFailed', String(error))) })
+    }).catch((error) => { if (active && isCurrent()) setMessage(latestT.current('openTerminalFailed', String(error))) })
     return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, selectedId, activeTab])
@@ -390,7 +398,7 @@ export default function App() {
         if (!isCurrent()) return
         const state = snapshot.state
         if (state === 'Reconnecting') {
-          setStateLabel(t('stateReconnecting'))
+          setStateLabel(latestT.current('stateReconnecting'))
           setPhase('connecting')
           // Panes belong to the dead transport: the backend cleared them
           // on attach, so drop the stale ids and let the ready-effect
@@ -404,25 +412,25 @@ export default function App() {
             host.auth_mode === 'KeyboardInteractive'
           )
           if (canReconnectWithoutPassword && host) {
-            setMessage(t('reconnectAttempting'))
+            setMessage(latestT.current('reconnectAttempting'))
           } else if (host && host.auth_ref === null && host.auth_mode === 'Password') {
-            setMessage(t('reconnectNeedsPassword'))
+            setMessage(latestT.current('reconnectNeedsPassword'))
             setPromptPassword(true)
           }
         } else if (state === 'WaitingForCredential') {
           setPhase('connecting')
-          setStateLabel(t('stateWaitingForCredential'))
+          setStateLabel(latestT.current('stateWaitingForCredential'))
           if (lastHostRef.current?.auth_mode === 'Password') {
-            setMessage(t('reconnectNeedsCredential'))
+            setMessage(latestT.current('reconnectNeedsCredential'))
             setPromptPassword(true)
           }
         } else if (state === 'Failed') {
           setPhase('failed')
-          setStateLabel(t('stateFailed'))
+          setStateLabel(latestT.current('stateFailed'))
         } else if (state === 'Ready') {
           if (phaseRef.current !== 'ready') {
             setPhase('ready')
-            setStateLabel(t('stateReady'))
+            setStateLabel(latestT.current('stateReady'))
           }
         }
     })
