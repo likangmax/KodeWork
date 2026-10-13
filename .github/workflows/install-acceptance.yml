@@ -14,7 +14,7 @@ on:
         required: false
         default: v0.2.3
   push:
-    branches: [main, ci/install-upgrade-acceptance]
+    branches: [main]
     # Only when something that can affect the installer or the executable moves.
     paths:
       - 'src-tauri/**'
