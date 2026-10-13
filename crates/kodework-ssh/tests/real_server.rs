@@ -15,7 +15,7 @@
 //! - `KODEWORK_TEST_SSH_USER` (required; the account the key belongs to)
 //! - `KODEWORK_TEST_SSH_KEY` (required; path to the private key)
 //! - `KODEWORK_TEST_SSH_DIR` (default `/tmp/kodework-real-ssh`; must be writable)
-use kodework_ssh::connection::{AuthMethod, ConnectionOptions, ZeroizingVec};
+use kodework_ssh::connection::{AuthMethod, ConnectionOptions};
 use kodework_ssh::handler::SessionEvent;
 use kodework_ssh::host_key::{HostKeyBroker, HostKeyDecision, MemoryKnownHosts};
 use kodework_ssh::SshConnection;
@@ -96,8 +96,8 @@ async fn connect(target: &Target) -> (SshConnection, tokio::sync::mpsc::Receiver
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     task.await
-        .unwrap_or_else(|error| panic!("connect task failed: {error}"))
-        .unwrap_or_else(|error| panic!("connecting to the real server failed: {error}"))
+        .unwrap_or_else(|error| unreachable!("connect task failed: {error}"))
+        .unwrap_or_else(|error| unreachable!("connecting to the real server failed: {error}"))
 }
 
 #[tokio::test]
@@ -112,7 +112,9 @@ async fn real_server_runs_a_command_and_reports_its_exit_code() {
             64 * 1024,
         )
         .await
-        .unwrap_or_else(|error| panic!("run_command against the real server failed: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("run_command against the real server failed: {error}")
+        });
     assert_eq!(
         output.exit_code,
         Some(7),
@@ -127,7 +129,7 @@ async fn real_server_runs_a_command_and_reports_its_exit_code() {
     connection
         .disconnect()
         .await
-        .unwrap_or_else(|error| panic!("disconnect failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("disconnect failed: {error}"));
 }
 
 #[tokio::test]
@@ -137,7 +139,7 @@ async fn real_server_sftp_round_trips_a_file() {
     let session = connection
         .sftp()
         .await
-        .unwrap_or_else(|error| panic!("opening the real sftp subsystem failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("opening the real sftp subsystem failed: {error}"));
 
     let path = format!("{}/round-trip.txt", target.directory);
     let payload = b"kodework real sftp payload\n";
@@ -146,13 +148,13 @@ async fn real_server_sftp_round_trips_a_file() {
         let mut file = session
             .create(&path)
             .await
-            .unwrap_or_else(|error| panic!("creating {path} failed: {error}"));
+            .unwrap_or_else(|error| unreachable!("creating {path} failed: {error}"));
         file.write_all(payload)
             .await
-            .unwrap_or_else(|error| panic!("writing {path} failed: {error}"));
+            .unwrap_or_else(|error| unreachable!("writing {path} failed: {error}"));
         file.shutdown()
             .await
-            .unwrap_or_else(|error| panic!("closing {path} failed: {error}"));
+            .unwrap_or_else(|error| unreachable!("closing {path} failed: {error}"));
     }
 
     let read_back = {
@@ -160,11 +162,11 @@ async fn real_server_sftp_round_trips_a_file() {
         let mut file = session
             .open(&path)
             .await
-            .unwrap_or_else(|error| panic!("opening {path} failed: {error}"));
+            .unwrap_or_else(|error| unreachable!("opening {path} failed: {error}"));
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
             .await
-            .unwrap_or_else(|error| panic!("reading {path} failed: {error}"));
+            .unwrap_or_else(|error| unreachable!("reading {path} failed: {error}"));
         buffer
     };
     assert_eq!(read_back, payload, "the file must come back byte for byte");
@@ -172,7 +174,7 @@ async fn real_server_sftp_round_trips_a_file() {
     let entries = session
         .read_dir(&target.directory)
         .await
-        .unwrap_or_else(|error| panic!("listing {} failed: {error}", target.directory));
+        .unwrap_or_else(|error| unreachable!("listing {} failed: {error}", target.directory));
     let names: Vec<String> = entries.map(|entry| entry.file_name()).collect();
     assert!(
         names.iter().any(|name| name == "round-trip.txt"),
@@ -182,11 +184,11 @@ async fn real_server_sftp_round_trips_a_file() {
     session
         .remove_file(&path)
         .await
-        .unwrap_or_else(|error| panic!("removing {path} failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("removing {path} failed: {error}"));
     connection
         .disconnect()
         .await
-        .unwrap_or_else(|error| panic!("disconnect failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("disconnect failed: {error}"));
 }
 
 #[tokio::test]
@@ -196,17 +198,17 @@ async fn real_server_pty_echoes_and_resizes() {
     let pty = connection
         .open_pty(80, 24)
         .await
-        .unwrap_or_else(|error| panic!("opening a real pty failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("opening a real pty failed: {error}"));
 
     pty.write(b"printf 'kodework-real-pty\\n'\n")
         .await
-        .unwrap_or_else(|error| panic!("writing to the pty failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("writing to the pty failed: {error}"));
     pty.resize(100, 40)
         .await
-        .unwrap_or_else(|error| panic!("resizing the real pty failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("resizing the real pty failed: {error}"));
 
     connection
         .disconnect()
         .await
-        .unwrap_or_else(|error| panic!("disconnect failed: {error}"));
+        .unwrap_or_else(|error| unreachable!("disconnect failed: {error}"));
 }
