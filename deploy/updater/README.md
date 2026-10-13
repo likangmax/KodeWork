@@ -22,23 +22,35 @@ The updater minisign signature and Authenticode serve different trust boundaries
 ## Rehearsing the whole channel without provisioning anything
 
 The steps above need DNS, TLS and a bucket, which is exactly why the channel is
-easy to leave unverified. The same chain can be exercised on one machine:
+easy to leave unverified. The same chain can be exercised on one machine,
+including real TLS:
 
+0. Optional but recommended, so the transport matches production: create a local
+   CA plus a loopback server certificate and trust the CA for the current user
+   only (no administrator rights needed). Any local CA works; the point is that
+   nothing in the rehearsal skips certificate validation.
 1. Build a signed MSI (`scripts/build-release.ps1`, or `npx tauri build` with
    `TAURI_SIGNING_PRIVATE_KEY` set to a rehearsal key).
 2. Publish into a local tree. `-AllowInsecureLoopback` is the only way to use an
-   `http://` BaseUrl, and it accepts loopback addresses only:
+   `http://` BaseUrl, and it accepts loopback addresses only; an `https://` BaseUrl
+   needs no switch:
 
    ```powershell
-   scripts/publish-update.ps1 -Version X.Y.Z -BaseUrl http://127.0.0.1:8787 `
-     -Destination $env:TEMP\channel -AllowInsecureLoopback
+   scripts/publish-update.ps1 -Version X.Y.Z -BaseUrl https://127.0.0.1:8443 `
+     -Destination $env:TEMP\channel
    ```
 
-3. Serve it: `node scripts/serve-update-channel.mjs --root $env:TEMP\channel --port 8787`.
+3. Serve it, with `--pfx` for TLS or without it for plain loopback HTTP:
+
+   ```
+   node scripts/serve-update-channel.mjs --root $env:TEMP\channel --port 8443 `
+     --pfx <server.pfx> --pfx-passphrase <secret>
+   ```
+
 4. Verify it the way a client does, including rollback detection:
 
    ```powershell
-   scripts/verify-release.ps1 -LatestJsonUrl http://127.0.0.1:8787/stable/latest.json `
+   scripts/verify-release.ps1 -LatestJsonUrl https://127.0.0.1:8443/stable/latest.json `
      -ExpectedVersion X.Y.Z -RequireAuthenticode:$false
    ```
 
@@ -46,8 +58,29 @@ The manifest embeds the artifact URL, so the port used to serve the tree has to
 be the port passed as `-BaseUrl` in step 2. The rehearsal proves the manifest
 shape, the artifact download, the minisign signature and the version binding; it
 deliberately does not stand in for Authenticode, which needs the commercial
-certificate, or for an installed-client migration on the production endpoint.
+certificate.
+
+The manifest carries the artifact under both `windows-x86_64-msi` and
+`windows-x86_64`: `tauri-plugin-updater` searches `{os}-{arch}-{installer}` first
+and falls back to `{os}-{arch}`, so publishing both spellings removes the
+dependency on that fallback.
 
 `node scripts/check-shipped-graph.mjs` is the companion check for the opposite
 question: that a crate carrying a Linux-desktop advisory (for example `glib`) is
 not linked into the shipped Windows artifact.
+
+## Verifying the upgrade over an installed copy
+
+Whether an installed client actually migrates is a property of the MSI database,
+not of the update channel, and it can be checked against the copy already on the
+machine without installing anything:
+
+- the new package's `UpgradeCode` must equal the installed product's, its
+  `ProductCode` must differ (that is what makes it a major upgrade rather than a
+  re-install), its `ProductVersion` must be greater, the `Upgrade` table must
+  cover the installed version, and `RemoveExistingProducts` must be scheduled in
+  `InstallExecuteSequence` - WiX's `MajorUpgrade` removes the previous version that
+  way, not through the `Upgrade` table's `Remove` column;
+- read both sides with the Windows Installer COM API: the installed product's
+  cached package via `Installer.ProductInfo(productCode, 'LocalPackage')`, and the
+  new package's `Property`, `Upgrade` and `InstallExecuteSequence` tables.

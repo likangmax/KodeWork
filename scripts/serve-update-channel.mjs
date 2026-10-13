@@ -1,14 +1,18 @@
-// Serves a generated release channel over loopback HTTP so the whole update path
+// Serves a generated release channel over loopback so the whole update path
 // (manifest fetch -> artifact download -> signature and version verification) can
-// be rehearsed without public DNS, TLS or the production bucket.
+// be rehearsed without public DNS or the production bucket. With --pfx it serves
+// over TLS, which is what the production channel uses; the certificate can come
+// from a local CA trusted for the current user.
 //
 // Layout produced by scripts/publish-update.ps1:
 //   <root>/stable/latest.json
 //   <root>/stable/kodework-windows-<version>-x86_64.msi
 //
 // Usage: node scripts/serve-update-channel.mjs [--root <dir>] [--port 8787]
-import { createServer } from 'node:http';
-import { createReadStream, statSync } from 'node:fs';
+//                                             [--pfx <file.pfx>] [--pfx-passphrase <secret>]
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -24,13 +28,29 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   process.exit(2);
 }
 
+const pfxPath = option('--pfx', '');
+let tls = null;
+if (pfxPath) {
+  try {
+    tls = {
+      pfx: readFileSync(resolve(pfxPath)),
+      passphrase: option('--pfx-passphrase', ''),
+    };
+  } catch (error) {
+    console.error(`cannot read --pfx ${pfxPath}: ${error.message}`);
+    process.exit(2);
+  }
+}
+
 const TYPES = {
   '.json': 'application/json',
   '.msi': 'application/octet-stream',
   '.sig': 'text/plain; charset=utf-8',
 };
 
-const server = createServer((request, response) => {
+const server = (tls ? createHttpsServer(tls, handler) : createHttpServer(handler));
+
+function handler(request, response) {
   const requested = decodeURIComponent((request.url ?? '/').split('?')[0]);
   // Contain every request inside the channel root: `normalize` collapses `..`
   // before it can escape, and the prefix check catches what is left.
@@ -68,7 +88,7 @@ const server = createServer((request, response) => {
   response.on('error', () => stream.destroy());
   response.on('close', () => stream.destroy());
   stream.pipe(response);
-});
+}
 
 server.on('clientError', (_error, socket) => {
   if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
@@ -76,6 +96,8 @@ server.on('clientError', (_error, socket) => {
 });
 
 server.listen(port, '127.0.0.1', () => {
+  const scheme = tls ? 'https' : 'http';
   console.log(`update channel root : ${root}`);
-  console.log(`manifest            : http://127.0.0.1:${port}/stable/latest.json`);
+  console.log(`manifest            : ${scheme}://127.0.0.1:${port}/stable/latest.json`);
+  if (tls) console.log(`tls                 : ${pfxPath}`);
 });

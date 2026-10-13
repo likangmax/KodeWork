@@ -65,6 +65,15 @@ $manifest = [ordered]@{
   notes = $Notes
   pub_date = $pubDate
   platforms = [ordered]@{
+    # tauri-plugin-updater searches `{os}-{arch}-{installer}` first and falls back
+    # to `{os}-{arch}` (updater.rs, get_urls). Windows MSI is what this channel
+    # publishes, so both keys are written: the suffixed one is what the client asks
+    # for first, and the unsuffixed one is the documented fallback that older
+    # manifests already carried.
+    'windows-x86_64-msi' = [ordered]@{
+      signature = $signature
+      url = "$base/stable/$artifactName"
+    }
     'windows-x86_64' = [ordered]@{
       signature = $signature
       url = "$base/stable/$artifactName"
@@ -78,9 +87,18 @@ $manifestPath = Join-Path $channel 'latest.json'
 [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
 
 $parsed = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if ($parsed.version -ne $Version -or [string]::IsNullOrWhiteSpace($parsed.platforms.'windows-x86_64'.signature)) {
-  throw 'Generated latest.json failed validation.'
+# Both keys must be present and carry the same artifact: they are two spellings of
+# one release, and a manifest where they disagree would update some clients and not
+# others.
+foreach ($key in @('windows-x86_64-msi', 'windows-x86_64')) {
+  if ([string]::IsNullOrWhiteSpace($parsed.platforms.$key.signature)) {
+    throw "Generated latest.json has no signature under '$key'."
+  }
+  if ($parsed.platforms.$key.url -ne $parsed.platforms.'windows-x86_64'.url) {
+    throw "Generated latest.json points '$key' at a different artifact."
+  }
 }
+if ($parsed.version -ne $Version) { throw 'Generated latest.json failed validation.' }
 Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $channel $artifactName), $manifestPath |
   Format-Table Path, Hash -AutoSize
 
