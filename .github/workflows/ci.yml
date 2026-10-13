@@ -194,6 +194,55 @@ jobs:
   # that a Windows shell build proves a macOS/Linux desktop release. Native
   # bundle/signing jobs belong in the release workflow and run on the target
   # operating system.
+  # Everything else that exercises SSH uses the in-process fake server in
+  # kodework-testkit, which shares this workspace's crate versions and never
+  # leaves the process. This job starts a real OpenSSH server on the runner so the
+  # client meets a real banner, real key exchange, real `authorized_keys`
+  # authentication, the real `sftp` subsystem and a real shell.
+  real-ssh:
+    name: Real SSH server
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Start a real sshd for the tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y -qq openssh-server
+          sudo mkdir -p /run/sshd
+          sudo ssh-keygen -A
+          key="${RUNNER_TEMP}/real-ssh-key"
+          ssh-keygen -t ed25519 -N '' -f "$key" -q
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          cat "${key}.pub" >> "$HOME/.ssh/authorized_keys"
+          chmod 600 "$HOME/.ssh/authorized_keys"
+          sudo mkdir -p /tmp/kodework-real-ssh
+          sudo chown "$(id -u):$(id -g)" /tmp/kodework-real-ssh
+          # A dedicated port keeps this independent of any sshd the image ships.
+          sudo /usr/sbin/sshd -p 2222 -o 'PasswordAuthentication=no' -o 'PubkeyAuthentication=yes' -o 'UsePAM=no'
+          for _ in $(seq 1 40); do
+            if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then exec 3<&-; break; fi
+            sleep 0.5
+          done
+          echo "sshd is listening on 2222"
+          {
+            echo "KODEWORK_TEST_SSH_HOST=127.0.0.1"
+            echo "KODEWORK_TEST_SSH_PORT=2222"
+            echo "KODEWORK_TEST_SSH_USER=$(id -un)"
+            echo "KODEWORK_TEST_SSH_KEY=${key}"
+            echo "KODEWORK_TEST_SSH_DIR=/tmp/kodework-real-ssh"
+          } >> "$GITHUB_ENV"
+      - name: Run the client against the real server
+        run: cargo test --locked -p kodework-ssh --test real_server -- --nocapture
+      - name: Show the server log when the client fails
+        if: failure()
+        run: sudo tail -n 80 /var/log/auth.log || sudo journalctl -u ssh --no-pager | tail -n 80 || true
+
   portable-rust:
     name: portable Rust (${{ matrix.target }})
     strategy:
