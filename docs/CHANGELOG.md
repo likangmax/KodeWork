@@ -16,6 +16,11 @@
 - Saving a workstation while another one is connected goes through the same teardown as selecting a host, so the header no longer reports a brand-new workstation as connected with another host's terminal panes, and a failed disconnect is reported instead of discarded.
 - Clipboard, terminal and local-PTY status messages, dialog section labels and the updater message all follow the interface language, instead of showing Chinese text in the English interface or English labels in the Chinese one.
 - Keyboard-interactive input fields are cleared when the prompt closes.
+- Transports that were deliberately torn down can no longer be reused: disconnecting invalidates the transport generation, so the retired event pump cannot repopulate pending events or report the deliberate disconnect as an unexpected drop.
+- A background Run is reported as running only while tmux reports a live pane. With `remain-on-exit` (a common setting) the session outlives the script, so a finished run used to stay "running" forever; anything other than a live pane is now reported as unknown rather than as success.
+- Authentication methods are tried in the documented order: an unreadable key file, a locked key or an unavailable agent no longer aborts the list before a later method is attempted, and the most specific failure is reported when nothing succeeds. Credentials that are not valid UTF-8 are rejected with an explicit message instead of being silently altered, and a jump host is refused rather than receiving the target host's credentials when it has none of its own.
+- The local terminal pane cancels its focus frame on teardown, and a refused connect no longer blocks the teardown of that workstation (the disconnect waits for the in-flight connect instead of failing with "no session for host" and leaving a live session untracked).
+- Added a CI job that runs `tauri build --no-bundle` in the release profile. It was the one gate missing before: every other context passes while the desktop build is broken, which is how the Tauri crate/npm mismatch behind 0.2.4 shipped green.
 
 ## 0.2.3 — 2026-08-18 — Guided setup, bilingual UI, and reproducible release
 

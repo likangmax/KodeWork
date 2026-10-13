@@ -50,15 +50,16 @@ These states are not interchangeable. Compilation or CI success alone does not m
 
 ## Verification baseline
 
-The repository CI has five substantive check families:
+The repository CI has six substantive check families:
 
 1. frontend install/lint/local-documentation-link checks/tests/production build;
 2. Windows Rust sidecar preparation, formatting, locked Clippy with warnings denied, and full locked workspace tests;
 3. dependency/security policy including production npm audit, RustSec audit, and tracked-secret pattern rejection;
-4. portable Rust checks/tests on Linux;
-5. portable Rust checks/tests on macOS.
+4. desktop build: `tauri build --no-bundle` in the release profile, which is the only gate that would catch a Tauri crate/npm mismatch or a release-only build break (before it existed, all six contexts passed while `tauri build` refused to run);
+5. portable Rust checks/tests on Linux;
+6. portable Rust checks/tests on macOS.
 
-The existing required `rust` status context is an aggregate gate: it reports success only when both the Windows Rust job and the dependency/security policy job succeed. This preserves the branch-protection context while ensuring the security policy cannot be skipped by a merge that requires `rust`.
+The existing required `rust` status context is an aggregate gate: it reports success only when the Windows Rust job, the desktop build job and the dependency/security policy job all succeed. This preserves the branch-protection context while ensuring the security policy cannot be skipped by a merge that requires `rust`.
 
 Workflow configuration is not a substitute for all repository settings. Branch protection/rulesets still determine which top-level status contexts and review rules GitHub enforces.
 
