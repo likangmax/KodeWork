@@ -54,4 +54,56 @@ describe('HostDisconnectGate', () => {
     await expect(success).resolves.toBeUndefined()
     await expect(gate.awaitPending('a')).resolves.toBeUndefined()
   })
+
+  // The native side creates its session entry only after resolving credentials
+  // and Tailscale, so a disconnect that arrives while the connect is still in
+  // flight fails with "no session for host" and the connect then completes with
+  // nothing tracking it. The teardown has to wait for that connect.
+  it('waits for an in-flight connect before tearing the same host down', async () => {
+    const gate = new HostDisconnectGate()
+    const events: string[] = []
+    let finishConnect: (() => void) | null = null
+    let signalConnectStart: (() => void) | undefined
+    const connectStarted = new Promise<void>((resolve) => { signalConnectStart = resolve })
+    const connect = new Promise<void>((resolve) => {
+      events.push('connect-started')
+      finishConnect = resolve
+      signalConnectStart?.()
+    })
+    gate.trackConnect('a', connect)
+    await connectStarted
+
+    const teardown = gate.enqueueAfterConnect('a', async () => { events.push('disconnect') })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(events).toEqual(['connect-started'])
+    expect(gate.isConnecting('a')).toBe(true)
+
+    const unblock = finishConnect as (() => void) | null
+    if (!unblock) throw new Error('connect did not start')
+    unblock()
+    await teardown
+    expect(events).toEqual(['connect-started', 'disconnect'])
+    expect(gate.isConnecting('a')).toBe(false)
+  })
+
+  it('does not let a failed connect block the teardown', async () => {
+    const gate = new HostDisconnectGate()
+    const events: string[] = []
+    gate.trackConnect('a', Promise.reject(new Error('connect failed')))
+    await gate.enqueueAfterConnect('a', async () => { events.push('disconnect') })
+    expect(events).toEqual(['disconnect'])
+    expect(gate.isConnecting('a')).toBe(false)
+  })
+
+  it('keeps a pending connect for another host out of the way', async () => {
+    const gate = new HostDisconnectGate()
+    const events: string[] = []
+    let releaseConnect: (() => void) | null = null
+    gate.trackConnect('a', new Promise<void>((resolve) => { releaseConnect = resolve }))
+    await gate.enqueueAfterConnect('b', async () => { events.push('disconnect-b') })
+    expect(events).toEqual(['disconnect-b'])
+    const unblock = releaseConnect as (() => void) | null
+    if (unblock) unblock()
+  })
 })

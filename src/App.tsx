@@ -493,7 +493,11 @@ export default function App() {
     setPhase('connecting')
     setMessage(t('connectingTo', host.label))
     try {
-      const result = await connectHost(host, passwordValue)
+      // Tracked so that a disconnect issued while this connect is still in flight
+      // waits for it. The native session entry only exists after credential and
+      // Tailscale resolution, so an early disconnect fails with "no session for
+      // host" and this connect would otherwise complete with nothing tracking it.
+      const result = await disconnectGate.trackConnect(host.id, connectHost(host, passwordValue))
       if (seq !== connectSeq.current || !isCurrent()) return
       setMessage(result)
       void refreshState(host.id)
@@ -563,7 +567,7 @@ export default function App() {
         // transport has to be gone before the new configuration is stored.
         // Report a failed disconnect as a disconnect problem, not a save problem.
         try {
-          await disconnectGate.enqueue(draft.id, () => disconnectHost(draft.id))
+          await disconnectGate.enqueueAfterConnect(draft.id, () => disconnectHost(draft.id))
         } catch (error) {
           setMessage(t('disconnectFailed', draft.label, String(error)))
           return
@@ -676,7 +680,7 @@ export default function App() {
     if (!host || !isDesktop() || (currentPhase !== 'ready' && currentPhase !== 'connecting')) return
     // Register the outgoing operation synchronously before the new host is
     // selected, even though native disconnection is asynchronous.
-    void disconnectGate.enqueue(host.id, () => disconnectHost(host.id)).catch((error) => {
+    void disconnectGate.enqueueAfterConnect(host.id, () => disconnectHost(host.id)).catch((error) => {
       setMessage(t('disconnectFailed', host.label, String(error)))
     })
   }
@@ -704,7 +708,7 @@ export default function App() {
     connectSeq.current += 1
     filesSeq.current += 1
     try {
-      await disconnectGate.enqueue(selected.id, () => disconnectHost(selected.id))
+      await disconnectGate.enqueueAfterConnect(selected.id, () => disconnectHost(selected.id))
     } catch (error) {
       if (isCurrent()) setMessage(t('disconnectFailed', selected.label, String(error)))
       return
