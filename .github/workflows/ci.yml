@@ -31,6 +31,9 @@ jobs:
       - run: npm run test:frontend
       - run: node --test scripts/verify-updater-signature.test.mjs
       - run: node --test scripts/check-tauri-versions.test.mjs
+      # The classifier decides whether a dependency inspector that could not run
+      # means "crate absent"; that has to stay a tested property, not a heuristic.
+      - run: node --test scripts/check-shipped-graph.test.mjs
       - run: npm run build
 
   windows-rust:
