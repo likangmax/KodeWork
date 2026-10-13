@@ -12,8 +12,20 @@ $log = Join-Path $resultDir "soak-$stamp.log"
 
 function Invoke-Gate([string]$Name, [scriptblock]$Command) {
   "[$([DateTimeOffset]::Now.ToString('o'))] START $Name" | Tee-Object -FilePath $log -Append
-  & $Command 2>&1 | Tee-Object -FilePath $log -Append
-  if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
+  # Cargo writes progress to stderr. With the script-wide
+  # ErrorActionPreference = 'Stop', Windows PowerShell 5.1 promotes those lines
+  # to terminating errors and the gate aborted on the first "Compiling ...",
+  # so this tool only ever worked under PowerShell 7. The exit code is the
+  # contract here, not the absence of stderr output.
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $Command 2>&1 | Tee-Object -FilePath $log -Append
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($exitCode -ne 0) { throw "$Name failed with exit code $exitCode" }
   "[$([DateTimeOffset]::Now.ToString('o'))] PASS $Name" | Tee-Object -FilePath $log -Append
 }
 
@@ -28,7 +40,10 @@ try {
   $iteration = 0
   while ([DateTimeOffset]::Now -lt $deadline) {
     $iteration++
-    Invoke-Gate "stability iteration $iteration" { cargo test -p kodework-ssh --test fake_server; cargo test -p kodework-sftp --test sftp_roundtrip }
+    # One gate per command: a shared gate would report only the last exit code
+    # and could hide a failing SSH suite behind a passing SFTP suite.
+    Invoke-Gate "stability iteration $iteration (ssh fake server)" { cargo test -p kodework-ssh --test fake_server }
+    Invoke-Gate "stability iteration $iteration (sftp round trip)" { cargo test -p kodework-sftp --test sftp_roundtrip }
     if ($AllowSleepCycle) {
       Write-Warning 'The machine will suspend now. Ensure this runner is allowed to sleep and wake manually or by a configured wake timer.'
       rundll32.exe powrprof.dll,SetSuspendState Sleep

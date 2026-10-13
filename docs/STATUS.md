@@ -43,6 +43,10 @@ These states are not interchangeable. Compilation or CI success alone does not m
 - Reconnect attempts are native, typed, and single-flight per host; the renderer observes native runtime state rather than owning connection truth.
 - Unknown Action commands require review confirmation by default; only clearly observational commands are classified Safe.
 - Modal dialogs expose accessible names with a focused regression test.
+- Production sources contain no `unreachable!`/`todo!`/`unimplemented!`: `clippy::unreachable` is denied in every library crate, and `panic_free_sources` (in `kodework-domain`) covers `src-tauri`, where `#[tauri::command]` macro expansion makes that lint unusable.
+- A bastion never receives the target host's credentials: the desktop path resolves jump-specific credentials, and the library entry point that has no jump credential model refuses the connection instead of reusing the target secret.
+- Interactive prompts are bounded by their own budget rather than the transport timeout, so the host-key decision window is reachable; an explicit disconnect invalidates the transport generation, so a deliberate disconnect cannot be mistaken for an unexpected drop.
+- Every workspace crate builds in isolation (`cargo check -p <crate>`): no crate relies on feature unification with another member to satisfy a feature it uses.
 
 ## Verification baseline
 

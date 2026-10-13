@@ -11,6 +11,11 @@
 - Updated maintained tooling/dependencies including uuid 1.26.1, @vitejs/plugin-react 6.1.1, Vite 8.3.0, and oxlint 1.82.0; Node 26 type definitions and TypeScript 7 remain deferred to dedicated major migrations.
 - Added accessible names to every current modal dialog plus a regression test that prevents unnamed dialogs from returning.
 - Stable `v0.2.4` publication remains gated by the configured Tauri updater signing key and trusted Authenticode certificate; public updater hosting and native macOS/Linux bundles are still not claimed as released.
+- Interactive prompts are no longer cut short by the transport timeout: the host-key decision window and the keyboard-interactive prompt have their own budget (60 seconds for the decision, 75 seconds for the whole interactive phase), while DNS and TCP still fail fast at 15 seconds. Previously a fingerprint review or one-time-code entry had only about 15 seconds, and the documented 60-second decision window was unreachable.
+- The credential-recovery path works: a host waiting for a password can be reconnected without disconnecting first, instead of failing with an internal "invalid connection transition" error.
+- Saving a workstation while another one is connected goes through the same teardown as selecting a host, so the header no longer reports a brand-new workstation as connected with another host's terminal panes, and a failed disconnect is reported instead of discarded.
+- Clipboard, terminal and local-PTY status messages, dialog section labels and the updater message all follow the interface language, instead of showing Chinese text in the English interface or English labels in the Chinese one.
+- Keyboard-interactive input fields are cleared when the prompt closes.
 
 ## 0.2.3 — 2026-08-18 — Guided setup, bilingual UI, and reproducible release
 
