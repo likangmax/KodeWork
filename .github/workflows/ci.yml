@@ -78,6 +78,50 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "ConPTY readiness repeat $attempt failed." }
           }
 
+  # Everything else validates the workspace in the debug profile or builds only
+  # the frontend, so a release-profile or Tauri crate/npm regression could reach
+  # main with every context green (that is exactly what happened before #85: all
+  # six contexts passed while `tauri build` refused to run). This runs as its own
+  # job so it is validated in parallel and does not extend the critical path.
+  # --no-bundle keeps signing material out of pull requests; it still exercises
+  # the CLI version preflight, codegen, the frontend build and the release link.
+  # Measured: ~2.5 min for a cold release profile locally, so expect 4-5 min.
+  desktop-build:
+    name: Desktop build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Resolve Go cache locations
+        id: go-cache
+        shell: pwsh
+        run: |
+          "version=$((& go env GOVERSION).Trim())" >> $env:GITHUB_OUTPUT
+          "mod=$((& go env GOMODCACHE).Trim())" >> $env:GITHUB_OUTPUT
+          "build=$((& go env GOCACHE).Trim())" >> $env:GITHUB_OUTPUT
+      - name: Restore Go module and build caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.mod }}
+            ${{ steps.go-cache.outputs.build }}
+          key: tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('scripts/prepare-tailscale.ps1') }}
+          restore-keys: |
+            tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-
+      - name: Prepare bundled Tailscale sidecars
+        shell: pwsh
+        run: ./scripts/prepare-tailscale.ps1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Verify the desktop build (no installer)
+        run: npx tauri build --no-bundle
+
   dependency-security:
     name: Dependency and secret policy
     runs-on: ubuntu-latest
@@ -109,11 +153,12 @@ jobs:
           fi
 
   # `rust` is already a required status context on main. Keep that stable while
-  # making it an aggregate gate so Windows Rust and dependency/security policy
-  # must both succeed even when repository-admin settings cannot be changed.
+  # making it an aggregate gate so Windows Rust, dependency/security policy and
+  # the desktop build must all succeed even when repository-admin settings cannot
+  # be changed.
   rust:
     name: rust
-    needs: [windows-rust, dependency-security]
+    needs: [windows-rust, dependency-security, desktop-build]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -123,6 +168,7 @@ jobs:
         env:
           WINDOWS_RUST_RESULT: ${{ needs.windows-rust.result }}
           DEPENDENCY_SECURITY_RESULT: ${{ needs.dependency-security.result }}
+          DESKTOP_BUILD_RESULT: ${{ needs.desktop-build.result }}
         run: |
           if [ "$WINDOWS_RUST_RESULT" != "success" ]; then
             echo "Windows Rust result: $WINDOWS_RUST_RESULT" >&2
@@ -130,6 +176,10 @@ jobs:
           fi
           if [ "$DEPENDENCY_SECURITY_RESULT" != "success" ]; then
             echo "Dependency/security result: $DEPENDENCY_SECURITY_RESULT" >&2
+            exit 1
+          fi
+          if [ "$DESKTOP_BUILD_RESULT" != "success" ]; then
+            echo "Desktop build result: $DESKTOP_BUILD_RESULT" >&2
             exit 1
           fi
 
