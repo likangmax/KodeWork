@@ -252,8 +252,11 @@ impl SshConnection {
 
         let mut handle = if let Some(proxy) = options.proxy.as_ref() {
             let stream = spawn_proxy_stream(proxy).await?;
+            // DNS/process startup is transport work, but SSH key exchange can
+            // wait for a human host-key approval. The proxy route must get the
+            // same interactive budget as direct TCP and bastion KEX.
             tokio::time::timeout(
-                options.connect_timeout,
+                options.interactive_budget(),
                 client::connect_stream(config, stream, handler),
             )
             .await
@@ -973,7 +976,10 @@ async fn authenticate(
                             prompts,
                         } => {
                             let expected = prompts.len();
-                            let responses = broker
+                            // Answers stay wipe-on-drop until they are handed
+                            // off to russh. Invalid counts must never drop a
+                            // plaintext Vec<String> without scrubbing it.
+                            let mut responses = zeroize::Zeroizing::new(broker
                                 .prompt_for_connection(
                                     options.ui_owner_host_id,
                                     options.generation,
@@ -987,14 +993,14 @@ async fn authenticate(
                                         })
                                         .collect(),
                                 )
-                                .await?;
+                                .await?);
                             if responses.len() != expected {
                                 return Err(SshError::InvalidConfiguration(
                                     "keyboard-interactive response count mismatch".into(),
                                 ));
                             }
                             reply = handle
-                                .authenticate_keyboard_interactive_respond(responses)
+                                .authenticate_keyboard_interactive_respond(std::mem::take(&mut *responses))
                                 .await?;
                         }
                     }
