@@ -28,7 +28,12 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 thiserror = "2"
-tauri-plugin-updater = "2.10.1"
+# Lower bound matters, not just the locked version: `requireSignedVersion` is
+# ignored silently (the plugin config has no deny_unknown_fields) by
+# tauri-plugin-updater < 2.12, so a requirement of "2.10.1" allowed a lock
+# refresh to ship a build where the signed-version check is inert. 2.13 is the
+# first line that both implements the flag and matches the CLI/config in use.
+tauri-plugin-updater = "2.13"
 zeroize = "1"
 tokio = { version = "1", features = ["time"] }
 
