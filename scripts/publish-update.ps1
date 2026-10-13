@@ -3,12 +3,22 @@ param(
   [string]$BaseUrl = $env:KODEWORK_UPDATE_BASE_URL,
   [string]$Destination = (Join-Path $PSScriptRoot '..\release-channel'),
   [string]$Notes = 'Stability, performance and security improvements.',
-  [switch]$RequireUpload
+  [switch]$RequireUpload,
+  # Loopback-only rehearsal exception, so the whole publish -> serve -> verify
+  # chain can be exercised without public DNS or TLS. Deliberately narrow: every
+  # other host still requires HTTPS, which keeps a plaintext production channel
+  # impossible to publish by accident.
+  [switch]$AllowInsecureLoopback
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'BaseUrl or KODEWORK_UPDATE_BASE_URL is required.' }
-if ($BaseUrl -notmatch '^https://') { throw 'Updater BaseUrl must use HTTPS.' }
+if ($BaseUrl -notmatch '^https://') {
+  $loopback = '^http://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)'
+  if (-not ($AllowInsecureLoopback -and $BaseUrl -match $loopback)) {
+    throw 'Updater BaseUrl must use HTTPS (only a loopback http:// URL is accepted, and only with -AllowInsecureLoopback).'
+  }
+}
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Updater version must be stable X.Y.Z.' }
 
 # Bind the published version to the application metadata instead of trusting the

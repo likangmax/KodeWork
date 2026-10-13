@@ -72,7 +72,14 @@ export function verifyUpdaterArtifact(artifactPath, signaturePath, version) {
     const verified = spawnSync('minisign',
       ['-Vm', resolve(artifactPath), '-x', signature, '-p', publicKey, '-q'],
       { encoding: 'utf8', windowsHide: true, timeout: 120000 });
-    if (verified.error || verified.status !== 0) {
+    if (verified.error) {
+      // A missing or unrunnable verifier is not a signature failure: reporting it
+      // as one sent maintainers looking for a key problem instead of installing
+      // the tool (the release workflow installs Minisign explicitly). Fail closed
+      // either way, but say which of the two happened.
+      throw new Error(`Unable to run the Minisign verifier (${verified.error.code ?? verified.error.message}); install minisign and retry`);
+    }
+    if (verified.status !== 0) {
       throw new Error('Minisign cryptographic verification of MSI/signature failed');
     }
     // Do not trust the version text until the global Minisign signature has passed.

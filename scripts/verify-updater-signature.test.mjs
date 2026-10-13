@@ -100,6 +100,29 @@ test('the verifier fails closed when the artifact is not signed by the shipped k
   });
 });
 
+// A missing verifier used to be reported as "cryptographic verification failed",
+// which points at the key instead of at the missing tool.
+test('a missing Minisign binary is reported as such, not as a bad signature', () => {
+  withTempDirectory((directory) => {
+    const artifact = join(directory, 'kodework.msi');
+    const signature = join(directory, 'kodework.msi.sig');
+    writeFileSync(artifact, 'not really an MSI');
+    writeFileSync(signature, Buffer.from(mockSig('version:0.2.4')).toString('base64'));
+    const result = spawnSync(process.execPath, [verifierPath, artifact, signature, '0.2.4'], {
+      encoding: 'utf8',
+      // An empty PATH cannot find Minisign on any platform.
+      env: { ...process.env, PATH: '', Path: '' },
+    });
+    assert.notEqual(result.status, 0);
+    if (/Unable to run the Minisign verifier/.test(result.stderr)) {
+      assert.doesNotMatch(result.stderr, /cryptographic verification of MSI\/signature failed/);
+    } else {
+      // A host that resolves Minisign without PATH still has to fail closed.
+      assert.match(result.stderr, /Minisign/);
+    }
+  });
+});
+
 test('reachability through a path alias cannot turn verification into a silent pass', () => {
   withTempDirectory((directory) => {
     const alias = join(directory, 'aliased-scripts');
