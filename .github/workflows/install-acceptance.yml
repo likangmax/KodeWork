@@ -1,0 +1,116 @@
+# Installation/upgrade acceptance on a disposable Windows runner.
+#
+# This is the evidence layer that neither unit tests nor MSI-table inspection can
+# provide: the package is installed, a previously published release is upgraded
+# over, the result is started, and everything is removed again. It runs on a runner
+# because it installs per-machine software and needs administrator rights.
+name: Install acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_release:
+        description: Release tag whose MSI is installed before the new package
+        required: false
+        default: v0.2.3
+  push:
+    branches: [main]
+    # Every input that can change the package, not just the code that installs it:
+    # the root manifests and lockfile pin what is compiled, the frontend is built
+    # into the bundle by beforeBuildCommand, and the sidecar script produces the
+    # bundled Tailscale binaries.
+    paths:
+      - 'src-tauri/**'
+      - 'crates/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'scripts/prepare-tailscale.ps1'
+      - 'scripts/verify-install-upgrade.ps1'
+      - 'scripts/build-release.ps1'
+      - '.github/workflows/install-acceptance.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-upgrade:
+    name: Install, upgrade, launch and remove the MSI
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # The upgrade leg always runs: without a baseline package there is nothing
+      # to upgrade over, and that leg is the reason this workflow exists.
+      PREVIOUS_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.previous_release || 'v0.2.3' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Resolve Go cache locations
+        id: go-cache
+        shell: pwsh
+        run: |
+          "version=$((& go env GOVERSION).Trim())" >> $env:GITHUB_OUTPUT
+          "mod=$((& go env GOMODCACHE).Trim())" >> $env:GITHUB_OUTPUT
+          "build=$((& go env GOCACHE).Trim())" >> $env:GITHUB_OUTPUT
+      - name: Restore Go module and build caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.mod }}
+            ${{ steps.go-cache.outputs.build }}
+          key: tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('scripts/prepare-tailscale.ps1') }}
+          restore-keys: |
+            tailscale-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-
+      - name: Prepare bundled Tailscale sidecars
+        shell: pwsh
+        run: ./scripts/prepare-tailscale.ps1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The packaging config asks for updater artifacts, so a signing key has to
+      # exist. It is generated for this run only: acceptance does not need the
+      # production key, and no secret is required for a pull-request-triggered run.
+      - name: Generate a throwaway updater key
+        shell: pwsh
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP 'acceptance.key'
+          npx tauri signer generate -w $keyPath -p acceptance --force | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to generate a signing key for the acceptance build.' }
+          "TAURI_SIGNING_PRIVATE_KEY=$((Get-Content $keyPath -Raw).Trim())" >> $env:GITHUB_ENV
+          "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=acceptance" >> $env:GITHUB_ENV
+      - name: Build the MSI
+        run: npx tauri build --bundles msi
+      - name: Fetch the previously published release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:PREVIOUS_RELEASE
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw 'PREVIOUS_RELEASE is empty.' }
+          $directory = Join-Path $env:RUNNER_TEMP 'previous-release'
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          gh release download $tag --pattern '*.msi' --dir $directory
+          if ($LASTEXITCODE -ne 0) { throw "Unable to download the MSI from release $tag." }
+          $msi = Get-ChildItem $directory -Filter '*.msi' | Select-Object -First 1
+          "PREVIOUS_MSI=$($msi.FullName)" >> $env:GITHUB_ENV
+          Write-Host "previous release package: $($msi.FullName) ($([int]($msi.Length/1MB)) MiB)"
+      - name: Install, upgrade, launch and remove
+        shell: pwsh
+        run: |
+          $new = Get-ChildItem 'target/release/bundle/msi/*.msi' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $new) { throw 'The build produced no MSI.' }
+          $arguments = @{ NewMsi = $new.FullName }
+          if ($env:PREVIOUS_MSI) { $arguments.PreviousMsi = $env:PREVIOUS_MSI }
+          ./scripts/verify-install-upgrade.ps1 @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Install acceptance failed.' }
