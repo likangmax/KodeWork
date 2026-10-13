@@ -217,12 +217,18 @@ jobs:
           sudo ssh-keygen -A
           key="${RUNNER_TEMP}/real-ssh-key"
           ssh-keygen -t ed25519 -N '' -f "$key" -q
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-          cat "${key}.pub" >> "$HOME/.ssh/authorized_keys"
-          chmod 600 "$HOME/.ssh/authorized_keys"
+          # A dedicated account, because sshd refuses key authentication for a
+          # locked account and the runner's own account is locked. Its password is
+          # random and password authentication stays off, so only the key works.
+          sudo useradd -m -s /bin/bash kdtest
+          echo "kdtest:$(openssl rand -hex 24)" | sudo chpasswd
+          sudo mkdir -p /home/kdtest/.ssh
+          sudo cp "${key}.pub" /home/kdtest/.ssh/authorized_keys
+          sudo chown -R kdtest:kdtest /home/kdtest/.ssh
+          sudo chmod 700 /home/kdtest/.ssh
+          sudo chmod 600 /home/kdtest/.ssh/authorized_keys
           sudo mkdir -p /tmp/kodework-real-ssh
-          sudo chown "$(id -u):$(id -g)" /tmp/kodework-real-ssh
+          sudo chown kdtest:kdtest /tmp/kodework-real-ssh
           # A dedicated port keeps this independent of any sshd the image ships.
           sudo /usr/sbin/sshd -p 2222 -o 'PasswordAuthentication=no' -o 'PubkeyAuthentication=yes' -o 'UsePAM=no'
           for _ in $(seq 1 40); do
@@ -233,10 +239,22 @@ jobs:
           {
             echo "KODEWORK_TEST_SSH_HOST=127.0.0.1"
             echo "KODEWORK_TEST_SSH_PORT=2222"
-            echo "KODEWORK_TEST_SSH_USER=$(id -un)"
+            echo "KODEWORK_TEST_SSH_USER=kdtest"
             echo "KODEWORK_TEST_SSH_KEY=${key}"
             echo "KODEWORK_TEST_SSH_DIR=/tmp/kodework-real-ssh"
           } >> "$GITHUB_ENV"
+      # A key-only sshd fails for reasons that only the server log explains (a locked
+      # account, or file modes sshd refuses), so prove the path works before blaming
+      # the client.
+      - name: Prove the key authenticates before running the client
+        run: |
+          set -euo pipefail
+          ssh -i "${KODEWORK_TEST_SSH_KEY}" -p "${KODEWORK_TEST_SSH_PORT}" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+            "${KODEWORK_TEST_SSH_USER}@${KODEWORK_TEST_SSH_HOST}" 'echo ssh-ok' || {
+              sudo tail -n 40 /var/log/auth.log;
+              exit 1;
+            }
       - name: Run the client against the real server
         run: cargo test --locked -p kodework-ssh --test real_server -- --nocapture
       - name: Show the server log when the client fails
