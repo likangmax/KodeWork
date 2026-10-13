@@ -730,3 +730,28 @@ async fn tracked_command_marks_timeout_after_exec_ack_as_dispatched() {
 
     server.shutdown().await;
 }
+
+/// Structural guard for a regression where proxy KEX used the short TCP deadline
+///  instead of the user-approval budget. Proxy launch is process-specific and
+///  is not faithfully exercised by the direct-TCP fake-server integration tests.
+///
+#[test]
+fn proxy_key_exchange_must_use_interactive_budget() {
+    let source = include_str!("../src/connection.rs");
+    let proxy = source
+        .split_once("let mut handle = if let Some(proxy) = options.proxy.as_ref() {")
+        .unwrap_or_else(|| unreachable!("proxy connect branch is missing"))
+        .1;
+    let proxy = proxy
+        .split_once("} else {")
+        .unwrap_or_else(|| unreachable!("proxy branch delimiter is missing"))
+        .0;
+    assert!(
+        proxy.contains("options.interactive_budget()"),
+        "proxy SSH key exchange must use the interactive deadline"
+    );
+    assert!(
+        !proxy.contains("options.connect_timeout"),
+        "proxy KEX must not be capped by the short transport timeout"
+    );
+}
