@@ -13,7 +13,8 @@
     "check:versions": "node scripts/check-tauri-versions.mjs",
     "lint": "oxlint --ignore-pattern references --ignore-pattern target",
     "preview": "vite preview",
-    "test:frontend": "vitest run"
+    "test:frontend": "vitest run",
+    "check:shipped-graph": "node scripts/check-shipped-graph.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",

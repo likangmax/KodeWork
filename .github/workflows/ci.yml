@@ -144,6 +144,13 @@ jobs:
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
           cargo audit
+      # Cargo.lock is target-independent, so an advisory against a Linux-only
+      # crate is reported even though the Windows artifact never links it. This
+      # proves that mechanically - and proves the check itself still works by
+      # requiring the same crates to be present for the Linux target - instead of
+      # leaving a standing alert with only a prose justification.
+      - name: Prove no Linux-desktop advisory crate is shipped
+        run: npm run check:shipped-graph
       - name: Reject obvious generated secrets
         shell: bash
         run: |
