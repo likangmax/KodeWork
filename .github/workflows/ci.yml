@@ -163,12 +163,16 @@ jobs:
           fi
 
   # `rust` is already a required status context on main. Keep that stable while
-  # making it an aggregate gate so Windows Rust, dependency/security policy and
-  # the desktop build must all succeed even when repository-admin settings cannot
-  # be changed.
+  # making it an aggregate gate so Windows Rust, dependency/security policy, the
+  # desktop build and the real-server tests must all succeed even when
+  # repository-admin settings cannot be changed.
+  #
+  # The real-ssh job is in here because it earned it: the infrastructure has run
+  # green on every CI run since it was added, so it can enforce rather than merely
+  # report. It runs in parallel, so being required costs no wall-clock time.
   rust:
     name: rust
-    needs: [windows-rust, dependency-security, desktop-build]
+    needs: [windows-rust, dependency-security, desktop-build, real-ssh]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -179,6 +183,7 @@ jobs:
           WINDOWS_RUST_RESULT: ${{ needs.windows-rust.result }}
           DEPENDENCY_SECURITY_RESULT: ${{ needs.dependency-security.result }}
           DESKTOP_BUILD_RESULT: ${{ needs.desktop-build.result }}
+          REAL_SSH_RESULT: ${{ needs.real-ssh.result }}
         run: |
           if [ "$WINDOWS_RUST_RESULT" != "success" ]; then
             echo "Windows Rust result: $WINDOWS_RUST_RESULT" >&2
@@ -190,6 +195,10 @@ jobs:
           fi
           if [ "$DESKTOP_BUILD_RESULT" != "success" ]; then
             echo "Desktop build result: $DESKTOP_BUILD_RESULT" >&2
+            exit 1
+          fi
+          if [ "$REAL_SSH_RESULT" != "success" ]; then
+            echo "Real SSH server result: $REAL_SSH_RESULT" >&2
             exit 1
           fi
 
