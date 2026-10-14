@@ -194,8 +194,9 @@ runner and points `crates/kodework-ssh/tests/real_server.rs` at it:
 
 The job proves the key authenticates with the OpenSSH client before the Rust tests
 run, so an sshd-side problem reports the server log instead of looking like a
-client failure. It is a standalone job, not part of the required aggregate yet: the
-infrastructure has to stay stable across runs before it can block merges.
+client failure. It is part of the required aggregate `rust` context: it ran green on
+every CI run while it was advisory, and it runs in parallel, so being required costs
+no wall-clock time.
 
 ## 7b. Install acceptance on a disposable runner
 
